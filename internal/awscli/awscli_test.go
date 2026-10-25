@@ -35,7 +35,7 @@ func TestSyncArgsMatchCurrentScript(t *testing.T) {
 
 func TestEnvNeverPagesAndSetsProfile(t *testing.T) {
 	env := Env(config.Profile{AWSProfile: "wasabi"})
-	if strings.Join(env, " ") != "AWS_PAGER= AWS_PROFILE=wasabi" {
+	if strings.Join(env, " ") != "AWS_PAGER= PYTHONUTF8=1 PYTHONIOENCODING=utf-8 AWS_PROFILE=wasabi" {
 		t.Errorf("environnement inattendu : %v", env)
 	}
 }

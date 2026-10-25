@@ -204,6 +204,11 @@ func (c *Config) ApplyDefaults() {
 			// fichiers), une seule suppression légitime le dépasserait.
 			j.Guard = &Guard{MinSourceFiles: 1}
 		}
+		if j.Delete && j.Guard.MinSourceFiles < 1 {
+			// Même avec une section guard partielle (ex. seulement max_deletes),
+			// une source vide ne doit jamais passer.
+			j.Guard.MinSourceFiles = 1
+		}
 	}
 	if len(c.Notify.ToastOn) == 0 {
 		c.Notify.ToastOn = []string{"failure", "warning"}

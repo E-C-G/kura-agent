@@ -212,3 +212,14 @@ func TestNested(t *testing.T) {
 		}
 	}
 }
+
+func TestPartialGuardGetsMinimumOneFile(t *testing.T) {
+	y := strings.Replace(minimal, "destination: DATA", "destination: DATA\n    delete: true\n    guard: {max_deletes: 500}", 1)
+	c, err := Parse([]byte(strings.Replace(y, "%s", "E:/", 1)), LoadOptions{Env: testEnv()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g := c.Jobs[0].Guard; g.MinSourceFiles != 1 || g.MaxDeletes != 500 {
+		t.Fatalf("garde-fou partiel : minimum 1 attendu, reçu %+v", g)
+	}
+}

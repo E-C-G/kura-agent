@@ -105,6 +105,7 @@ type bench struct {
 	outlook string
 	dir     string
 	sleeps  []time.Duration
+	onSleep func() // appelé à chaque attente (préavis, délai entre tentatives)
 }
 
 func newBench(t *testing.T) *bench {
@@ -144,6 +145,9 @@ func (b *bench) run(ctx context.Context, opt Options) state.Status {
 		RunsDir:     filepath.Join(b.dir, "logs", "runs"),
 		Sleep: func(ctx context.Context, d time.Duration) error {
 			b.sleeps = append(b.sleeps, d)
+			if b.onSleep != nil {
+				b.onSleep()
+			}
 			return ctx.Err()
 		},
 		RetryDelay: time.Minute,
@@ -248,7 +252,7 @@ func TestGuardBlocksWhenSourceLooksEmpty(t *testing.T) {
 	if b.aws.real("DATA") != 0 {
 		t.Fatal("aucune synchronisation réelle ne doit toucher le bucket quand le garde-fou bloque")
 	}
-	if j := b.job(st, "data"); j.Result != state.ResultGuard || !strings.Contains(j.Message, "--force-deletes") {
+	if j := b.job(st, "data"); j.Result != state.ResultGuard || !strings.Contains(j.Message, "source vide") {
 		t.Errorf("bilan du job data : %+v", j)
 	}
 	if b.job(st, "outlook").Result != state.ResultOK {
@@ -446,5 +450,140 @@ func TestLastSuccessSurvivesAFailedNight(t *testing.T) {
 	}
 	if first.RunID == second.RunID {
 		t.Error("deux exécutions dans la même minute doivent avoir des run_id distincts")
+	}
+}
+
+// --- défauts relevés en relecture ------------------------------------------
+
+// Entre deux tentatives, le disque est démonté : la nouvelle tentative ne doit pas
+// partir avec --delete sur une source absente.
+func TestGuardIsCheckedAgainBeforeEachRetry(t *testing.T) {
+	b := newBench(t)
+	b.aws.behave["DATA"] = func(dry bool, n int) (string, int) {
+		if !dry && n == 0 {
+			os.RemoveAll(b.data) // le volume disparaît pendant l'échec réseau
+			return "upload failed: connection reset\n", 1
+		}
+		return "", 0
+	}
+	st := b.run(context.Background(), Options{})
+	if b.aws.real("DATA") != 1 {
+		t.Fatalf("aucune nouvelle synchronisation ne doit partir sur une source disparue, appels réels : %d", b.aws.real("DATA"))
+	}
+	if j := b.job(st, "data"); j.Result != state.ResultError || !strings.Contains(j.Message, "inaccessible") {
+		t.Errorf("bilan du job data : %+v", j)
+	}
+}
+
+// Le disque est vidé entre deux tentatives : le garde-fou doit le voir à la seconde.
+func TestGuardBlocksRetryWhenSourceEmptiedMeanwhile(t *testing.T) {
+	b := newBench(t)
+	b.aws.behave["DATA"] = func(dry bool, n int) (string, int) {
+		if !dry && n == 0 {
+			os.RemoveAll(filepath.Join(b.data, "Compta"))
+			return "", 255
+		}
+		if dry && n > 0 {
+			return strings.Repeat("(dryrun) delete: s3://acme-srv01/DATA/x\n", 1200), 0
+		}
+		return "", 0
+	}
+	st := b.run(context.Background(), Options{})
+	if b.aws.real("DATA") != 1 || st.ExitCode != ExitGuard {
+		t.Fatalf("la seconde tentative doit être bloquée par le garde-fou : code %d, appels réels %d", st.ExitCode, b.aws.real("DATA"))
+	}
+}
+
+// Un garde-fou partiel garde le minimum d'un fichier : un dossier vide ne vide pas le bucket.
+func TestPartialGuardKeepsMinimumOneFile(t *testing.T) {
+	b := newBench(t)
+	b.cfg.Jobs[1].Guard = &config.Guard{MaxDeletes: 500}
+	b.cfg.ApplyDefaults()
+	os.Remove(filepath.Join(b.outlook, "alice.pst"))
+	b.aws.behave["C/alice/Outlook"] = func(dry bool, n int) (string, int) {
+		return "(dryrun) delete: s3://acme-srv01/C/alice/Outlook/alice.pst\n", 0
+	}
+	st := b.run(context.Background(), Options{})
+	if b.aws.real("C/alice/Outlook") != 0 || b.job(st, "outlook").Result != state.ResultGuard {
+		t.Fatalf("un dossier Outlook vide doit être bloqué : %+v", b.job(st, "outlook"))
+	}
+}
+
+// --force-deletes lève les plafonds, jamais le minimum de fichiers.
+func TestForceDeletesNeverForcesAnEmptySource(t *testing.T) {
+	b := newBench(t)
+	os.RemoveAll(filepath.Join(b.data, "Compta"))
+	mk(t, filepath.Join(b.data, "seul.txt"))
+	st := b.run(context.Background(), Options{JobIDs: []string{"data"}, ForceDeletes: true})
+	if b.aws.real("DATA") != 0 || st.ExitCode != ExitGuard {
+		t.Fatalf("une source quasi vide ne se force pas : code %d, appels réels %d", st.ExitCode, b.aws.real("DATA"))
+	}
+	if strings.Contains(b.job(st, "data").Message, "--force-deletes") {
+		t.Error("le message ne doit pas suggérer --force-deletes pour une source vide")
+	}
+}
+
+// Outlook est fermé par l'utilisateur pendant le préavis : on ne tue rien
+// (le PID mémorisé a pu être réattribué).
+func TestNoKillWhenProcessClosedDuringNotice(t *testing.T) {
+	b := newBench(t)
+	b.procs.running = []procs.Process{{PID: 4242, Name: "outlook.exe", Session: 2}}
+	b.onSleep = func() { b.procs.running = nil }
+	st := b.run(context.Background(), Options{})
+	if len(b.procs.killed) != 0 {
+		t.Fatalf("aucun arrêt attendu, arrêtés : %v", b.procs.killed)
+	}
+	if st.ExitCode != ExitOK || b.job(st, "outlook").Result != state.ResultOK {
+		t.Errorf("Outlook fermé par l'utilisateur : nuit normale attendue, %+v", st)
+	}
+}
+
+// Un nouveau processus apparu pendant le préavis est celui qu'on arrête,
+// pas l'ancien PID.
+func TestKillTargetsProcessesFoundAfterNotice(t *testing.T) {
+	b := newBench(t)
+	b.procs.running = []procs.Process{{PID: 100, Name: "outlook.exe"}}
+	b.onSleep = func() { b.procs.running = []procs.Process{{PID: 200, Name: "outlook.exe"}} }
+	b.run(context.Background(), Options{})
+	if !slices.Equal(b.procs.killed, []int{200}) {
+		t.Fatalf("seul le processus présent après le préavis doit être arrêté, arrêtés : %v", b.procs.killed)
+	}
+}
+
+// Dépasser max_duration est une erreur (code 2), pas une annulation (code 6).
+func TestMaxDurationIsAnError(t *testing.T) {
+	b := newBench(t)
+	b.cfg.Schedule.MaxDuration.Duration = time.Nanosecond
+	time.Sleep(time.Millisecond)
+	st := b.run(context.Background(), Options{})
+	if st.ExitCode != ExitError || st.Result != state.ResultError {
+		t.Fatalf("code %d (%s) attendu %d", st.ExitCode, st.Result, ExitError)
+	}
+	if !strings.Contains(st.Message, "durée maximale") {
+		t.Errorf("message : %q", st.Message)
+	}
+}
+
+// Un job sauté n'avance pas la date de dernière réussite globale ; la date par job,
+// elle, avance pour les jobs réellement synchronisés.
+func TestLastSuccessRequiresEveryJob(t *testing.T) {
+	b := newBench(t)
+	b.procs.running = []procs.Process{{PID: 7, Name: "outlook.exe"}}
+	b.procs.stubborn = true
+	st := b.run(context.Background(), Options{})
+	if st.LastSuccess != nil {
+		t.Error("Outlook non sauvegardé : pas de dernière réussite globale")
+	}
+	if _, ok := st.JobLastSuccess["data"]; !ok {
+		t.Error("le job data a réussi : sa date de réussite doit être enregistrée")
+	}
+	if _, ok := st.JobLastSuccess["outlook"]; ok {
+		t.Error("le job outlook a été sauté : pas de date de réussite")
+	}
+
+	b2 := newBench(t)
+	st = b2.run(context.Background(), Options{JobIDs: []string{"data"}})
+	if st.LastSuccess != nil {
+		t.Error("une exécution partielle (--job) n'est pas une sauvegarde complète")
 	}
 }

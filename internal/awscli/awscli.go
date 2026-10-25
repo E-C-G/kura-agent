@@ -41,7 +41,14 @@ func SyncArgs(p config.Profile, j config.Job, dryRun bool) []string {
 
 // Env renvoie les variables d'environnement à passer à aws.exe.
 func Env(p config.Profile) []string {
-	env := []string{"AWS_PAGER="} // jamais de pager : aws.exe n'a pas de console
+	env := []string{
+		"AWS_PAGER=", // jamais de pager : aws.exe n'a pas de console
+		// Sortie en UTF-8 : sinon, redirigée vers un tube, la CLI (Python) écrit dans la page
+		// de code ANSI et peut perdre les lignes des fichiers aux noms non latins, ce qui
+		// fausserait le nombre de suppressions vu par le garde-fou.
+		"PYTHONUTF8=1",
+		"PYTHONIOENCODING=utf-8",
+	}
 	if p.AWSProfile != "" {
 		env = append(env, "AWS_PROFILE="+p.AWSProfile)
 	}

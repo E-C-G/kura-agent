@@ -3,7 +3,10 @@
 package procs
 
 import (
+	"errors"
 	"fmt"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"unsafe"
@@ -11,28 +14,48 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-var debugOnce sync.Once
+var (
+	debugOnce sync.Once
+	debugErr  error
+)
 
-// enableDebugPrivilege active SeDebugPrivilege : sans lui, même un administrateur
-// ne peut pas ouvrir les processus d'un autre utilisateur (c'est ce que fait taskkill).
-func enableDebugPrivilege() {
+// enableDebugPrivilege active SeDebugPrivilege : sans lui, même un administrateur ne peut
+// pas ouvrir les processus d'un autre utilisateur (c'est ce que fait taskkill). Activé avant
+// toute recherche, pour que la lecture du numéro de session réussisse aussi.
+func enableDebugPrivilege() error {
 	var tok windows.Token
 	if err := windows.OpenProcessToken(windows.CurrentProcess(),
 		windows.TOKEN_ADJUST_PRIVILEGES|windows.TOKEN_QUERY, &tok); err != nil {
-		return
+		return fmt.Errorf("jeton du processus : %w", err)
 	}
 	defer tok.Close()
 	var luid windows.LUID
 	name, _ := windows.UTF16PtrFromString("SeDebugPrivilege")
 	if err := windows.LookupPrivilegeValue(nil, name, &luid); err != nil {
-		return
+		return fmt.Errorf("SeDebugPrivilege : %w", err)
 	}
 	tp := windows.Tokenprivileges{PrivilegeCount: 1}
 	tp.Privileges[0] = windows.LUIDAndAttributes{Luid: luid, Attributes: windows.SE_PRIVILEGE_ENABLED}
-	_ = windows.AdjustTokenPrivileges(tok, false, &tp, uint32(unsafe.Sizeof(tp)), nil, nil)
+	// AdjustTokenPrivileges « réussit » même si le privilège n'a pas été accordé :
+	// seul GetLastError le dit, d'où le thread verrouillé entre les deux appels.
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	if err := windows.AdjustTokenPrivileges(tok, false, &tp, uint32(unsafe.Sizeof(tp)), nil, nil); err != nil {
+		return fmt.Errorf("activation de SeDebugPrivilege : %w", err)
+	}
+	if errors.Is(windows.GetLastError(), windows.ERROR_NOT_ALL_ASSIGNED) {
+		return errors.New("SeDebugPrivilege non accordé : lancer la tâche avec les autorisations maximales")
+	}
+	return nil
+}
+
+func debugPrivilege() error {
+	debugOnce.Do(func() { debugErr = enableDebugPrivilege() })
+	return debugErr
 }
 
 func (system) Find(name string) ([]Process, error) {
+	_ = debugPrivilege() // l'échec éventuel est signalé par Terminate
 	snap, err := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPPROCESS, 0)
 	if err != nil {
 		return nil, fmt.Errorf("liste des processus : %w", err)
@@ -53,13 +76,29 @@ func (system) Find(name string) ([]Process, error) {
 	return out, nil
 }
 
+// Terminate arrête p après avoir vérifié, sur le processus ouvert lui-même, qu'il porte
+// toujours le nom attendu : un PID peut avoir été réattribué entre-temps.
 func (system) Terminate(p Process) error {
-	debugOnce.Do(enableDebugPrivilege)
-	h, err := windows.OpenProcess(windows.PROCESS_TERMINATE|windows.SYNCHRONIZE, false, uint32(p.PID))
+	privErr := debugPrivilege()
+	h, err := windows.OpenProcess(
+		windows.PROCESS_TERMINATE|windows.SYNCHRONIZE|windows.PROCESS_QUERY_LIMITED_INFORMATION,
+		false, uint32(p.PID))
 	if err != nil {
+		if privErr != nil {
+			return fmt.Errorf("ouverture du processus %d : %w (%v)", p.PID, err, privErr)
+		}
 		return fmt.Errorf("ouverture du processus %d : %w", p.PID, err)
 	}
 	defer windows.CloseHandle(h)
+
+	buf := make([]uint16, windows.MAX_LONG_PATH)
+	size := uint32(len(buf))
+	if err := windows.QueryFullProcessImageName(h, 0, &buf[0], &size); err != nil {
+		return fmt.Errorf("nom du processus %d illisible, arrêt annulé : %w", p.PID, err)
+	}
+	if got := filepath.Base(windows.UTF16ToString(buf[:size])); !strings.EqualFold(got, p.Name) {
+		return fmt.Errorf("le PID %d désigne maintenant %q et non %q : arrêt annulé", p.PID, got, p.Name)
+	}
 	if err := windows.TerminateProcess(h, 1); err != nil {
 		return fmt.Errorf("arrêt du processus %d : %w", p.PID, err)
 	}

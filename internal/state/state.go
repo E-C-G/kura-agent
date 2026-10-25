@@ -39,17 +39,19 @@ func Worst(results ...string) string {
 
 // Status est le contenu de status.json.
 type Status struct {
-	State       string          `json:"state"` // running | idle
-	RunID       string          `json:"run_id"`
-	Result      string          `json:"result,omitempty"`
-	DryRun      bool            `json:"dry_run,omitempty"`
-	StartedAt   time.Time       `json:"started_at"`
-	EndedAt     *time.Time      `json:"ended_at,omitempty"`
-	LastSuccess *time.Time      `json:"last_success,omitempty"`
-	ExitCode    int             `json:"exit_code"`
-	Message     string          `json:"message,omitempty"`
-	PreTasks    []PreTaskStatus `json:"pre_tasks,omitempty"`
-	Jobs        []JobStatus     `json:"jobs"`
+	State       string     `json:"state"` // running | idle
+	RunID       string     `json:"run_id"`
+	Result      string     `json:"result,omitempty"`
+	DryRun      bool       `json:"dry_run,omitempty"`
+	StartedAt   time.Time  `json:"started_at"`
+	EndedAt     *time.Time `json:"ended_at,omitempty"`
+	LastSuccess *time.Time `json:"last_success,omitempty"` // tous les jobs configurés réussis
+	// JobLastSuccess : dernière synchronisation réussie (ok ou avertissement) de chaque job.
+	JobLastSuccess map[string]time.Time `json:"job_last_success,omitempty"`
+	ExitCode       int                  `json:"exit_code"`
+	Message        string               `json:"message,omitempty"`
+	PreTasks       []PreTaskStatus      `json:"pre_tasks,omitempty"`
+	Jobs           []JobStatus          `json:"jobs"`
 }
 
 // PreTaskStatus résume une pré-tâche.
@@ -103,12 +105,12 @@ func WriteAtomic(path string, v any) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmp.Name(), path) // sous Windows, Go remplace la cible existante
+	return rename(tmp.Name(), path)
 }
 
 // Read lit status.json ; un fichier absent renvoie (nil, nil).
 func Read(path string) (*Status, error) {
-	data, err := os.ReadFile(path)
+	data, err := readFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}
@@ -132,7 +134,7 @@ func AppendHistory(path string, s Status) error {
 		return err
 	}
 	var lines [][]byte
-	if data, err := os.ReadFile(path); err == nil {
+	if data, err := readFile(path); err == nil {
 		sc := bufio.NewScanner(bytes.NewReader(data))
 		sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 		for sc.Scan() {
@@ -148,9 +150,17 @@ func AppendHistory(path string, s Status) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, append(bytes.Join(lines, []byte("\n")), '\n'), 0o644); err != nil {
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".history-*.tmp")
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	defer os.Remove(tmp.Name())
+	if _, err := tmp.Write(append(bytes.Join(lines, []byte("\n")), '\n')); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return rename(tmp.Name(), path)
 }

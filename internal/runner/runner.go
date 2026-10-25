@@ -137,6 +137,7 @@ func Run(ctx context.Context, cfg *config.Config, opt Options, d Deps) (state.St
 		log.Warn("état précédent illisible, il sera remplacé", "err", err)
 	} else if prev != nil {
 		r.st.LastSuccess = prev.LastSuccess
+		r.st.JobLastSuccess = prev.JobLastSuccess
 	}
 	r.save()
 
@@ -185,8 +186,24 @@ func Run(ctx context.Context, cfg *config.Config, opt Options, d Deps) (state.St
 	r.st.Result = overall
 	r.st.EndedAt = &end
 	r.st.ExitCode = ExitCodeFor(overall)
-	if !opt.DryRun && (overall == state.ResultOK || overall == state.ResultWarning) {
-		r.st.LastSuccess = &end
+	if !opt.DryRun {
+		// Dernière réussite par job : seuls les jobs réellement synchronisés comptent.
+		allDone := len(jobs) == len(cfg.Jobs)
+		for _, j := range r.st.Jobs {
+			if j.Result == state.ResultOK || j.Result == state.ResultWarning {
+				if r.st.JobLastSuccess == nil {
+					r.st.JobLastSuccess = map[string]time.Time{}
+				}
+				r.st.JobLastSuccess[j.ID] = end
+			} else {
+				allDone = false
+			}
+		}
+		// Dernière réussite globale : tous les jobs configurés ont tourné sans erreur.
+		// Un job sauté (Outlook resté ouvert) ou une exécution partielle (--job) ne compte pas.
+		if allDone {
+			r.st.LastSuccess = &end
+		}
 	}
 	r.save()
 	if err := state.AppendHistory(d.HistoryFile, r.st); err != nil {
@@ -278,13 +295,25 @@ func (r *run) closeProcess(ctx context.Context, p config.PreTask, ps *state.PreT
 		"processus", p.Process, "instances", len(found), "sessions", ps.Sessions,
 		"préavis_s", p.NoticeSeconds, "note", "fermeture douce et report disponibles avec l'icône")
 	if err := r.d.Sleep(ctx, time.Duration(p.NoticeSeconds)*time.Second); err != nil {
-		ps.Result, ps.Message = state.ResultCancelled, "annulé pendant le préavis"
+		ps.Result, ps.Message = r.interrupted(ctx), "interrompu pendant le préavis : "+r.interruptReason(ctx)
 		return false
 	}
 	if !p.Force {
 		ps.Result, ps.Message = state.ResultWarning, "processus toujours ouvert (force: false)"
 		r.log.Warn("pré-tâche : processus laissé ouvert (force: false)", "processus", p.Process)
 		return false
+	}
+	// Rechercher de nouveau : pendant le préavis, l'utilisateur a pu fermer Outlook et
+	// Windows réattribuer son PID à un autre processus. On n'arrête que ce qui tourne
+	// encore sous ce nom (Terminate revérifie le nom sur le processus lui-même).
+	found, err = r.d.Procs.Find(p.Process)
+	if err != nil {
+		ps.Result, ps.Message = state.ResultWarning, "liste des processus impossible : "+err.Error()
+		return false
+	}
+	if len(found) == 0 {
+		r.log.Info("pré-tâche : processus fermé pendant le préavis", "processus", p.Process)
+		return true
 	}
 	for _, f := range found {
 		if err := r.d.Procs.Terminate(f); err != nil {
@@ -311,17 +340,12 @@ func (r *run) job(ctx context.Context, j config.Job, preOK map[string]bool) stat
 	log := r.log.With("job", j.ID)
 
 	if ctx.Err() != nil {
-		js.Result, js.Message = state.ResultCancelled, "non exécuté : exécution interrompue"
+		js.Result, js.Message = r.interrupted(ctx), "non exécuté : "+r.interruptReason(ctx)
 		return js
 	}
 	if dep := j.DependsOnPreTask; dep != "" && !preOK[strings.ToLower(dep)] {
 		js.Result, js.Message = state.ResultSkipped, dep+" n'a pas pu être fermé : job sauté"
 		log.Warn("job sauté", "raison", js.Message)
-		return js
-	}
-	if st, err := os.Stat(j.Source); err != nil || !st.IsDir() {
-		js.Result, js.Message = state.ResultError, fmt.Sprintf("source %q inaccessible", j.Source)
-		log.Error("source inaccessible", "source", j.Source, "err", err)
 		return js
 	}
 
@@ -332,50 +356,14 @@ func (r *run) job(ctx context.Context, j config.Job, preOK map[string]bool) stat
 	}
 	defer jobLog.Close()
 
-	// Garde-fou (jobs avec delete)
-	var dry *awscli.Counts
-	if j.Delete && j.Guard != nil {
-		census, err := guard.CountFiles(j.Source, j.Exclude)
-		if err != nil {
-			js.Result, js.Message = state.ResultError, err.Error()
-			log.Error("garde-fou : comptage impossible", "err", err)
-			return js
-		}
-		if census.Unreadable > 0 {
-			log.Info("garde-fou : éléments illisibles ignorés au comptage", "nombre", census.Unreadable)
-		}
-		fmt.Fprintf(jobLog, "== simulation (garde-fou) %s ==\n", r.d.Now().Format(time.RFC3339))
-		counts, code, attempts, err := r.sync(ctx, j, true, jobLog, log)
-		js.Attempts += attempts
-		if err != nil || awscli.Classify(code) == awscli.Retryable || awscli.Classify(code) == awscli.Failed {
-			js.Result, js.ExitCode = r.failure(ctx, err), code
-			js.Message = fmt.Sprintf("simulation impossible, garde-fou non évaluable (code %d)", code)
-			log.Error("garde-fou : simulation en échec", "code", code, "err", err)
-			return js
-		}
-		dry = &counts
-		dec := guard.Evaluate(*j.Guard, census.Files, counts.Deleted)
-		log.Info("garde-fou", "fichiers_source", census.Files, "suppressions_prévues", counts.Deleted, "bloqué", dec.Blocked)
-		if dec.Blocked {
-			if !r.opt.ForceDeletes {
-				js.Result, js.Message = state.ResultGuard, dec.Reason+" ; relancer avec --force-deletes après vérification"
-				js.Deleted = counts.Deleted
-				log.Error("garde-fou : job bloqué, rien n'est modifié dans le bucket", "raison", dec.Reason)
-				return js
-			}
-			log.Warn("garde-fou levé par --force-deletes", "raison", dec.Reason)
-		}
-	}
-
 	if r.opt.DryRun {
-		counts := dry
-		if counts == nil {
-			fmt.Fprintf(jobLog, "== simulation %s ==\n", r.d.Now().Format(time.RFC3339))
-			c, code, attempts, err := r.sync(ctx, j, true, jobLog, log)
-			js.Attempts += attempts
-			js.ExitCode = code
-			if err != nil || awscli.Classify(code) >= awscli.Retryable {
-				js.Result, js.Message = r.failure(ctx, err), fmt.Sprintf("simulation en échec (code %d)", code)
+		counts, ok := r.preflight(ctx, j, jobLog, log, &js)
+		if !ok {
+			return js
+		}
+		if counts == nil { // job sans garde-fou : simulation dédiée
+			c, ok := r.simulate(ctx, j, jobLog, log, &js)
+			if !ok {
 				return js
 			}
 			counts = &c
@@ -386,70 +374,156 @@ func (r *run) job(ctx context.Context, j config.Job, preOK map[string]bool) stat
 		return js
 	}
 
-	fmt.Fprintf(jobLog, "== synchronisation %s ==\n", r.d.Now().Format(time.RFC3339))
-	counts, code, attempts, err := r.sync(ctx, j, false, jobLog, log)
-	js.Attempts += attempts
-	js.ExitCode = code
-	js.Uploaded, js.Deleted, js.Skipped = counts.Uploaded, counts.Deleted, counts.Skipped
-	switch {
-	case err != nil:
-		js.Result, js.Message = r.failure(ctx, err), err.Error()
-	case awscli.Classify(code) == awscli.OK:
-		js.Result = state.ResultOK
-	case awscli.Classify(code) == awscli.Warning:
-		js.Result = state.ResultWarning
-		js.Message = fmt.Sprintf("%d fichier(s) ignoré(s), souvent verrouillés ; voir %s.log", counts.Skipped, j.ID)
-	default:
+	// Synchronisation réelle. Le contrôle préalable (source + garde-fou) est refait
+	// avant CHAQUE tentative : entre deux essais espacés de plusieurs minutes, le disque
+	// a pu être démonté ou vidé, et --delete le propagerait au bucket.
+	for attempt := 0; ; attempt++ {
+		if _, ok := r.preflight(ctx, j, jobLog, log, &js); !ok {
+			return js
+		}
+		fmt.Fprintf(jobLog, "== synchronisation %s (tentative %d) ==\n", r.d.Now().Format(time.RFC3339), attempt+1)
+		counts, code, err := r.syncOnce(ctx, j, false, jobLog)
+		js.Attempts++
+		js.ExitCode = code
+		js.Uploaded, js.Deleted, js.Skipped = counts.Uploaded, counts.Deleted, counts.Skipped
+		if err != nil {
+			js.Result, js.Message = r.failureOf(ctx, err), err.Error()
+			break
+		}
+		outcome := awscli.Classify(code)
+		if outcome == awscli.OK {
+			js.Result, js.Message = state.ResultOK, ""
+			break
+		}
+		if outcome == awscli.Warning {
+			js.Result = state.ResultWarning
+			js.Message = fmt.Sprintf("%d fichier(s) ignoré(s), souvent verrouillés ; voir %s.log", counts.Skipped, j.ID)
+			break
+		}
 		js.Result = state.ResultError
 		js.Message = fmt.Sprintf("aws s3 sync a échoué (code %d) ; voir %s.log", code, j.ID)
-	}
-	log.Info("job terminé", "résultat", js.Result, "envois", js.Uploaded, "suppressions", js.Deleted,
-		"ignorés", js.Skipped, "code", code, "tentatives", js.Attempts)
-	return js
-}
-
-// failure renvoie cancelled si l'exécution a été interrompue, error sinon.
-func (r *run) failure(ctx context.Context, err error) string {
-	if ctx.Err() != nil && errors.Is(err, ctx.Err()) {
-		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			return state.ResultError
+		if outcome == awscli.Failed || attempt >= r.d.Retries {
+			break
 		}
-		return state.ResultCancelled
-	}
-	return state.ResultError
-}
-
-// sync lance aws s3 sync avec nouvelles tentatives sur les erreurs passagères.
-func (r *run) sync(ctx context.Context, j config.Job, dryRun bool, out io.Writer, log *slog.Logger) (awscli.Counts, int, int, error) {
-	args := awscli.SyncArgs(r.cfg.Profile, j, dryRun)
-	env := awscli.Env(r.cfg.Profile)
-	var (
-		counts awscli.Counts
-		code   int
-		err    error
-	)
-	attempts := 0
-	for attempt := 0; attempt <= r.d.Retries; attempt++ {
-		if attempt > 0 {
-			log.Warn("nouvelle tentative", "dans", r.d.RetryDelay.String(), "tentative", attempt+1, "code_précédent", code)
-			if err := r.d.Sleep(ctx, r.d.RetryDelay); err != nil {
-				return counts, code, attempts, err
-			}
-		}
-		attempts++
-		fmt.Fprintf(out, "$ %s %s\n", r.d.AWSCLI, strings.Join(quoteArgs(args), " "))
-		c := awscli.NewCounter(out)
-		code, err = r.d.Exec.Run(ctx, r.d.AWSCLI, args, env, c)
-		counts = c.Counts()
-		fmt.Fprintf(out, "== code de sortie %d ==\n", code)
-		if err != nil {
-			return counts, code, attempts, fmt.Errorf("lancement de aws : %w", err)
-		}
-		if awscli.Classify(code) != awscli.Retryable {
+		log.Warn("nouvelle tentative", "dans", r.d.RetryDelay.String(), "tentative", attempt+2, "code_précédent", code)
+		if err := r.d.Sleep(ctx, r.d.RetryDelay); err != nil {
+			js.Result, js.Message = r.interrupted(ctx), "interrompu avant une nouvelle tentative : "+r.interruptReason(ctx)
 			break
 		}
 	}
-	return counts, code, attempts, nil
+	log.Info("job terminé", "résultat", js.Result, "envois", js.Uploaded, "suppressions", js.Deleted,
+		"ignorés", js.Skipped, "code", js.ExitCode, "tentatives", js.Attempts)
+	return js
+}
+
+// preflight vérifie la source puis, pour un job avec delete, applique le garde-fou :
+// comptage, simulation, seuils. Il renvoie les comptes de la simulation (nil si le job
+// n'a pas de garde-fou) et false si le job doit s'arrêter, js étant alors renseigné.
+func (r *run) preflight(ctx context.Context, j config.Job, out io.Writer, log *slog.Logger, js *state.JobStatus) (*awscli.Counts, bool) {
+	if st, err := os.Stat(j.Source); err != nil || !st.IsDir() {
+		js.Result, js.Message = state.ResultError, fmt.Sprintf("source %q inaccessible", j.Source)
+		log.Error("source inaccessible", "source", j.Source, "err", err)
+		return nil, false
+	}
+	if !j.Delete || j.Guard == nil {
+		return nil, true
+	}
+	census, err := guard.CountFiles(j.Source, j.Exclude)
+	if err != nil {
+		js.Result, js.Message = state.ResultError, err.Error()
+		log.Error("garde-fou : comptage impossible", "err", err)
+		return nil, false
+	}
+	if census.Unreadable > 0 {
+		log.Info("garde-fou : éléments illisibles ignorés au comptage", "nombre", census.Unreadable)
+	}
+	counts, ok := r.simulate(ctx, j, out, log, js)
+	if !ok {
+		js.Message = "garde-fou non évaluable : " + js.Message
+		return nil, false
+	}
+	dec := guard.Evaluate(*j.Guard, census.Files, counts.Deleted)
+	log.Info("garde-fou", "fichiers_source", census.Files, "suppressions_prévues", counts.Deleted, "bloqué", dec.Blocked)
+	if !dec.Blocked {
+		return &counts, true
+	}
+	// --force-deletes lève les plafonds de suppressions, jamais le minimum de fichiers :
+	// une source vide ou démontée n'est pas un cas à forcer.
+	if r.opt.ForceDeletes && dec.Kind != guard.TooFewFiles {
+		log.Warn("garde-fou levé par --force-deletes", "raison", dec.Reason)
+		return &counts, true
+	}
+	js.Result, js.Deleted = state.ResultGuard, counts.Deleted
+	js.Message = dec.Reason
+	if dec.Kind != guard.TooFewFiles {
+		js.Message += " ; après vérification : kura-agent run --job " + j.ID + " --force-deletes"
+	}
+	log.Error("garde-fou : job bloqué, rien n'est modifié dans le bucket", "raison", dec.Reason)
+	return nil, false
+}
+
+// simulate lance aws s3 sync --dryrun, avec nouvelles tentatives sur les erreurs passagères.
+func (r *run) simulate(ctx context.Context, j config.Job, out io.Writer, log *slog.Logger, js *state.JobStatus) (awscli.Counts, bool) {
+	for attempt := 0; ; attempt++ {
+		fmt.Fprintf(out, "== simulation %s ==\n", r.d.Now().Format(time.RFC3339))
+		counts, code, err := r.syncOnce(ctx, j, true, out)
+		js.Attempts++
+		js.ExitCode = code
+		if err != nil {
+			js.Result, js.Message = r.failureOf(ctx, err), err.Error()
+			return counts, false
+		}
+		outcome := awscli.Classify(code)
+		if outcome == awscli.OK || outcome == awscli.Warning {
+			return counts, true
+		}
+		js.Result, js.Message = state.ResultError, fmt.Sprintf("simulation en échec (code %d)", code)
+		if outcome == awscli.Failed || attempt >= r.d.Retries {
+			log.Error("simulation en échec", "code", code)
+			return counts, false
+		}
+		log.Warn("simulation : nouvelle tentative", "dans", r.d.RetryDelay.String(), "code_précédent", code)
+		if err := r.d.Sleep(ctx, r.d.RetryDelay); err != nil {
+			js.Result, js.Message = r.interrupted(ctx), r.interruptReason(ctx)
+			return counts, false
+		}
+	}
+}
+
+// syncOnce lance une fois aws s3 sync et journalise commande, sortie et code.
+func (r *run) syncOnce(ctx context.Context, j config.Job, dryRun bool, out io.Writer) (awscli.Counts, int, error) {
+	args := awscli.SyncArgs(r.cfg.Profile, j, dryRun)
+	fmt.Fprintf(out, "$ %s %s\n", r.d.AWSCLI, strings.Join(quoteArgs(args), " "))
+	c := awscli.NewCounter(out)
+	code, err := r.d.Exec.Run(ctx, r.d.AWSCLI, args, awscli.Env(r.cfg.Profile), c)
+	fmt.Fprintf(out, "== code de sortie %d ==\n", code)
+	if err != nil {
+		return c.Counts(), code, fmt.Errorf("lancement de aws : %w", err)
+	}
+	return c.Counts(), code, nil
+}
+
+// interrupted : un dépassement de max_duration est une erreur ; une annulation, cancelled.
+func (r *run) interrupted(ctx context.Context) string {
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return state.ResultError
+	}
+	return state.ResultCancelled
+}
+
+func (r *run) interruptReason(ctx context.Context) string {
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return fmt.Sprintf("durée maximale de %s dépassée", r.cfg.Schedule.MaxDuration)
+	}
+	return "exécution annulée"
+}
+
+// failureOf classe une erreur de lancement : interruption ou erreur.
+func (r *run) failureOf(ctx context.Context, err error) string {
+	if ctx.Err() != nil && errors.Is(err, ctx.Err()) {
+		return r.interrupted(ctx)
+	}
+	return state.ResultError
 }
 
 // postTasks : relancer Outlook dans la session d'un utilisateur demande l'icône (étape 5).

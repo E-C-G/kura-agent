@@ -15,7 +15,6 @@ import (
 	"os/exec"
 	"os/signal"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/E-C-G/kura-agent/internal/execx"
@@ -37,7 +36,7 @@ var (
 const usage = `kura-agent — sauvegarde planifiée vers Wasabi
 
 Usage :
-  kura-agent run      [--config FICHIER] [--job ID]... [--dry-run] [--force-deletes] [--quiet]
+  kura-agent run      [--config FICHIER] [--job ID]... [--dry-run] [--force-deletes --job ID] [--quiet]
   kura-agent validate [--config FICHIER] [--offline]
   kura-agent status   [--json]
   kura-agent version
@@ -94,11 +93,28 @@ func cmdRun(args []string) int {
 	var jobs multiFlag
 	fs.Var(&jobs, "job", "n'exécuter que ce job (répétable, ou liste séparée par des virgules)")
 	dryRun := fs.Bool("dry-run", false, "simulation : rien n'est copié ni supprimé, Outlook n'est pas fermé")
-	force := fs.Bool("force-deletes", false, "lever le garde-fou de suppressions pour cette exécution")
+	force := fs.Bool("force-deletes", false, "lever les plafonds de suppressions du garde-fou (avec --job)")
 	quiet := fs.Bool("quiet", false, "ne pas recopier le journal à l'écran")
 	if err := fs.Parse(args); err != nil {
 		return runner.ExitConfig
 	}
+
+	if *force && len(jobs) == 0 {
+		fmt.Fprintln(os.Stderr, "--force-deletes exige --job : on ne lève le garde-fou que pour le job vérifié")
+		return runner.ExitConfig
+	}
+
+	// Verrou d'abord : une erreur de config ne doit pas écraser l'état d'une exécution en cours.
+	release, err := lock.Acquire()
+	if errors.Is(err, lock.ErrBusy) {
+		fmt.Fprintln(os.Stderr, "une exécution est déjà en cours : abandon")
+		return runner.ExitBusy
+	}
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "verrou impossible :", err)
+		return runner.ExitError
+	}
+	defer release()
 
 	cfg, err := config.Load(*cfgPath, config.LoadOptions{})
 	if err != nil {
@@ -113,18 +129,8 @@ func cmdRun(args []string) int {
 		return runner.ExitConfig
 	}
 
-	release, err := lock.Acquire()
-	if errors.Is(err, lock.ErrBusy) {
-		fmt.Fprintln(os.Stderr, "une exécution est déjà en cours : abandon")
-		return runner.ExitBusy
-	}
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "verrou impossible :", err)
-		return runner.ExitError
-	}
-	defer release()
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	ignoreLogoff()
+	ctx, stop := signal.NotifyContext(context.Background(), shutdownSignals()...)
 	defer stop()
 
 	var console io.Writer = os.Stdout

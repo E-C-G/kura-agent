@@ -74,16 +74,28 @@ Le passage au compte dédié `svc-kura` viendra avec `kura-agent install`.
 
 1. Prend le verrou `Global\Kura-Run` (une seule exécution à la fois, code 4 sinon).
 2. Si un job qui en dépend est lancé : cherche `outlook.exe` dans toutes les sessions, attend le
-   préavis, l'arrête de force (`force: true`). S'il reste ouvert, les jobs marqués
-   `depends_on_pre_task` sont sautés (avertissement).
-3. Pour chaque job avec `delete: true` : compte les fichiers source, simule (`--dryrun`), bloque le job
-   si la source semble vide ou si les suppressions prévues dépassent les seuils. Un job bloqué ne touche
-   pas au bucket. `--force-deletes` lève le blocage pour une exécution, après vérification.
-   Sans section `guard`, un job avec `delete: true` reçoit le minimum : au moins 1 fichier dans la source.
+   préavis, cherche de nouveau (Outlook a pu être fermé entre-temps) et arrête de force ce qui tourne
+   encore (`force: true`), après avoir revérifié le nom de chaque processus. S'il reste ouvert, les jobs
+   marqués `depends_on_pre_task` sont sautés (avertissement).
+3. Pour chaque job avec `delete: true`, **avant chaque tentative** de synchronisation : vérifie la
+   source, compte ses fichiers, simule (`--dryrun`) et bloque le job si la source semble vide ou si les
+   suppressions prévues dépassent les seuils. Un job bloqué ne touche pas au bucket.
+   - Tout job avec `delete: true` exige au moins 1 fichier dans sa source, même avec une section
+     `guard` partielle.
+   - `--force-deletes`, toujours avec `--job`, lève les plafonds de suppressions (`max_deletes`,
+     `max_delete_ratio`) pour ce job et cette exécution. Il ne lève jamais `min_source_files` : une
+     source vide ou démontée ne se force pas ; si c'est voulu, baisser le seuil dans la configuration.
 4. Lance `aws s3 sync` ; en cas d'erreur passagère (codes 1, 254, 255), 2 nouvelles tentatives à 5 min
-   d'intervalle.
+   d'intervalle, chacune précédée du contrôle du point 3.
 5. Écrit `status.json`, ajoute une ligne à `history.jsonl` (500 dernières), purge les journaux de plus
    de `retention_days`.
+
+Dans `status.json`, `last_success` n'avance que si **tous** les jobs configurés ont réussi (OK ou
+avertissement) ; un job sauté ou une exécution partielle (`--job`) ne compte pas.
+`job_last_success` donne la dernière réussite de chaque job.
+
+La déconnexion d'un utilisateur du serveur n'interrompt pas la sauvegarde ; Ctrl+C l'annule (code 6).
+Dépasser `max_duration` termine l'exécution en erreur (code 2).
 
 ## Codes de sortie de `run`
 
