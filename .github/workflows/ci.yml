@@ -64,7 +64,7 @@ jobs:
             -ldflags "-s -w -X main.version=${VERSION} -X main.commit=${GITHUB_SHA::7} -X main.date=$(date -u +%Y-%m-%d)" \
             -o dist/kura-agent.exe ./cmd/kura-agent
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: kura-agent-windows-amd64-${{ github.sha }}
           path: dist/kura-agent.exe
