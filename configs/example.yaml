@@ -1,0 +1,73 @@
+# Exemple de configuration Kura Agent (données fictives).
+# Cas typique : un Windows Server dont on sauvegarde le disque de données E:
+# et le dossier Outlook d'un utilisateur (alice) vers un bucket Wasabi.
+#
+# Emplacement en production : C:\ProgramData\Kura\config.yaml
+# Aucun secret dans ce fichier.
+
+version: 1
+
+profile:
+  name: acme-srv01
+  aws_cli: "C:/Program Files/Amazon/AWSCLIV2/aws.exe"   # vide = recherche dans le PATH
+  aws_profile: wasabi            # profil de ~/.aws/credentials du compte svc-kura
+  endpoint: https://s3.eu-central-1.wasabisys.com
+  region: eu-central-1
+  bucket: acme-srv01
+  checksum_algorithm: CRC32
+
+schedule:
+  type: daily                    # daily | weekly | hourly
+  time: "22:30"
+  days: [mon, tue, wed, thu, fri]
+  run_if_missed: true            # rattrapage si le serveur était éteint
+  max_duration: 6h               # au-delà, la tâche est arrêtée
+
+pre_tasks:
+  - type: close_process
+    process: outlook.exe
+    notice_seconds: 120          # préavis avant fermeture
+    graceful_timeout: 60s        # fermeture douce (par l'icône) avant de forcer
+    force: true
+    allow_postpone: { delay: 1h, max: 2 }
+
+post_tasks:
+  - type: start_process          # relance d'Outlook dans la session de l'utilisateur (via l'icône)
+    process: outlook.exe
+    only_if_was_running: true
+
+jobs:
+  - id: data
+    name: Données serveur
+    source: "E:/"
+    destination: DATA            # préfixe dans le bucket
+    delete: true
+    exclude:
+      - "*$RECYCLE.BIN*"
+      - "*System Volume Information*"
+    guard:
+      min_source_files: 1000     # en dessous, la source est jugée vide ou démontée
+      max_deletes: 500
+      max_delete_ratio: 0.05
+
+  - id: outlook
+    name: Outlook alice
+    source: "${PROFILE:alice}/AppData/Local/Microsoft/Outlook"   # profil de alice, pas celui de svc-kura
+    destination: "C/alice/Outlook"
+    delete: true
+    depends_on_pre_task: outlook.exe   # job sauté si Outlook n'a pas pu être fermé
+
+tray:
+  users: [alice, admin]             # comptes qui reçoivent l'icône
+  allow_run_now: [alice]            # comptes autorisés à lancer la tâche
+
+notify:
+  toast_on: [failure, warning]   # success | warning | failure
+  webhook:
+    url: ""                      # URL du broker (Make, n8n...) ; vide = pas de bilan envoyé
+    token: credential:webhook    # jeton stocké par DPAPI (kura-agent credentials set)
+    hmac: false
+
+logging:
+  level: info
+  retention_days: 90
