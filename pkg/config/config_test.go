@@ -150,7 +150,7 @@ notify:
 	wantFields := []string{
 		"version", "profile.bucket", "profile.endpoint", "profile.checksum_algorithm",
 		"schedule.type", "jobs[0].id", "jobs[0].source", "jobs[0].destination",
-		"jobs[2].destination", "jobs[2].depends_on_pre_task", "notify.webhook.token",
+		"jobs[2].destination", "jobs[2].depends_on_pre_task", "notify.report.token",
 	}
 	got := map[string]bool{}
 	for _, fe := range ve {
@@ -221,5 +221,58 @@ func TestPartialGuardGetsMinimumOneFile(t *testing.T) {
 	}
 	if g := c.Jobs[0].Guard; g.MinSourceFiles != 1 || g.MaxDeletes != 500 {
 		t.Fatalf("garde-fou partiel : minimum 1 attendu, reçu %+v", g)
+	}
+}
+
+func TestReportTypes(t *testing.T) {
+	base := strings.Replace(minimal, "%s", "E:/", 1)
+	ok := []string{
+		"notify:\n  report:\n    type: healthchecks\n    url: https://hc-ping.com/abc\n",
+		"notify:\n  report:\n    type: healthchecks\n    url: credential:hc-url\n",
+		"notify:\n  report:\n    type: webhook\n    url: https://hook.example.com/x\n",
+		"notify:\n  report:\n    type: webhook\n    url: https://hook.example.com/x\n    token: credential:webhook\n    hmac: true\n",
+	}
+	for _, y := range ok {
+		if err := parseWith(t, base+y, LoadOptions{}); err != nil {
+			t.Errorf("config valide refusée :\n%s\n%v", y, err)
+		}
+	}
+	bad := map[string]string{
+		"notify:\n  report:\n    url: https://hc-ping.com/abc\n":                                                  "notify.report.type",
+		"notify:\n  report:\n    type: slack\n    url: https://x.example.com\n":                                   "notify.report.type",
+		"notify:\n  report:\n    type: healthchecks\n":                                                            "notify.report.url",
+		"notify:\n  report:\n    type: healthchecks\n    url: http://hc-ping.com/abc\n":                           "notify.report.url",
+		"notify:\n  report:\n    type: healthchecks\n    url: https://hc-ping.com/abc\n    token: credential:x\n": "notify.report.token",
+		"notify:\n  report:\n    type: webhook\n    url: https://h.example.com\n    token: en-clair\n":            "notify.report.token",
+		"notify:\n  report:\n    type: webhook\n    url: https://h.example.com\n    hmac: true\n":                 "notify.report.hmac",
+		"notify:\n  report:\n    type: webhook\n    url: credential:Mauvais_Nom\n":                                "notify.report.url",
+	}
+	for y, field := range bad {
+		err := parseWith(t, base+y, LoadOptions{})
+		if err == nil || !strings.Contains(err.Error(), field) {
+			t.Errorf("erreur sur %s attendue pour :\n%s\nreçu : %v", field, y, err)
+		}
+	}
+}
+
+// La clé notify.webhook de la v0.1.0 reste lue : une config existante continue de fonctionner.
+func TestLegacyWebhookKey(t *testing.T) {
+	base := strings.Replace(minimal, "%s", "E:/", 1)
+	c, err := Parse([]byte(base+"notify:\n  webhook:\n    url: https://hook.example.com/x\n    token: credential:webhook\n"), LoadOptions{Env: testEnv()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r := c.Notify.Report; r == nil || r.Type != ReportWebhook || r.URL != "https://hook.example.com/x" || r.Token != "credential:webhook" {
+		t.Fatalf("ancienne clé mal reprise : %+v", r)
+	}
+	// Une URL vide (exemple de la v0.1.0) ne crée aucune destination.
+	c, err = Parse([]byte(base+"notify:\n  webhook:\n    url: \"\"\n    token: credential:webhook\n"), LoadOptions{Env: testEnv()})
+	if err != nil || c.Notify.Report != nil {
+		t.Fatalf("webhook vide : aucune destination attendue, reçu %+v (%v)", c.Notify.Report, err)
+	}
+	// Les deux formes à la fois, différentes : refusé.
+	err = parseWith(t, base+"notify:\n  webhook:\n    url: https://a.example.com\n  report:\n    type: healthchecks\n    url: https://hc-ping.com/x\n", LoadOptions{})
+	if err == nil || !strings.Contains(err.Error(), "notify.webhook") {
+		t.Fatalf("deux destinations contradictoires doivent être refusées, reçu %v", err)
 	}
 }

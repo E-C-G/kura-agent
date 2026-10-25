@@ -63,10 +63,22 @@ tray:
 
 notify:
   toast_on: [failure, warning]   # success | warning | failure
-  webhook:
-    url: ""                      # URL du broker (Make, n8n...) ; vide = pas de bilan envoyé
-    token: credential:webhook    # jeton stocké par DPAPI (kura-agent credentials set)
-    hmac: false
+  # Bilan de chaque exécution (facultatif) : une seule destination, au choix.
+  #
+  # healthchecks.io (ou instance auto-hébergée) : début, succès ou échec, résumé en journal ;
+  # alerte aussi si aucune sauvegarde n'arrive à l'heure prévue.
+  report:
+    type: healthchecks
+    url: https://hc-ping.com/00000000-0000-0000-0000-000000000000
+  #
+  # Webhook générique (Make, n8n…) : bilan JSON complet en POST.
+  # report:
+  #   type: webhook
+  #   url: https://hook.example.com/kura
+  #   token: credential:webhook    # facultatif : en-tête X-Kura-Token (kura-agent credentials set webhook)
+  #   hmac: false                  # true : corps signé dans X-Kura-Signature
+  #
+  # url accepte aussi credential:<nom> pour ne pas laisser l'URL dans ce fichier.
 
 logging:
   level: info

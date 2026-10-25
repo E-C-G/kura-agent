@@ -587,3 +587,94 @@ func TestLastSuccessRequiresEveryJob(t *testing.T) {
 		t.Error("une exécution partielle (--job) n'est pas une sauvegarde complète")
 	}
 }
+
+// --- bilan ---------------------------------------------------------------------
+
+type fakeReporter struct {
+	starts    int
+	finishes  []state.Status
+	full      []bool
+	startFull []bool
+	failWith  error
+}
+
+func (f *fakeReporter) Name() string { return "faux" }
+func (f *fakeReporter) Start(_ context.Context, _ state.Status, full bool) error {
+	f.starts++
+	f.startFull = append(f.startFull, full)
+	return f.failWith
+}
+func (f *fakeReporter) Finish(_ context.Context, st state.Status, full bool) error {
+	f.finishes = append(f.finishes, st)
+	f.full = append(f.full, full)
+	return f.failWith
+}
+
+func (b *bench) runWith(ctx context.Context, opt Options, rep *fakeReporter) state.Status {
+	b.t.Helper()
+	st, err := Run(ctx, b.cfg, opt, Deps{
+		Exec: b.aws, Procs: b.procs, AWSCLI: "aws", Reporter: rep,
+		StatusFile:  filepath.Join(b.dir, "status.json"),
+		HistoryFile: filepath.Join(b.dir, "history.jsonl"),
+		RunsDir:     filepath.Join(b.dir, "logs", "runs"),
+		Sleep:       func(ctx context.Context, d time.Duration) error { return ctx.Err() },
+	})
+	if err != nil {
+		b.t.Fatal(err)
+	}
+	return st
+}
+
+func TestReporterGetsStartAndFinalStatus(t *testing.T) {
+	b := newBench(t)
+	rep := &fakeReporter{}
+	st := b.runWith(context.Background(), Options{}, rep)
+	if rep.starts != 1 || len(rep.finishes) != 1 || !rep.full[0] {
+		t.Fatalf("un début et un bilan complet attendus : %+v", rep)
+	}
+	if f := rep.finishes[0]; f.State != "idle" || f.Result != st.Result || f.LastSuccess == nil {
+		t.Errorf("le bilan doit être l'état final : %+v", f)
+	}
+}
+
+func TestReporterNeverCalledOnDryRun(t *testing.T) {
+	b := newBench(t)
+	rep := &fakeReporter{}
+	b.runWith(context.Background(), Options{DryRun: true}, rep)
+	if rep.starts != 0 || len(rep.finishes) != 0 {
+		t.Fatalf("une simulation n'envoie aucun bilan : %+v", rep)
+	}
+}
+
+func TestReporterPartialRunIsFlagged(t *testing.T) {
+	b := newBench(t)
+	rep := &fakeReporter{}
+	b.runWith(context.Background(), Options{JobIDs: []string{"data"}}, rep)
+	if len(rep.full) != 1 || rep.full[0] || len(rep.startFull) != 1 || rep.startFull[0] {
+		t.Fatalf("--job : début et bilan marqués partiels attendus : %+v / %+v", rep.startFull, rep.full)
+	}
+}
+
+func TestReporterStillCalledAfterCancel(t *testing.T) {
+	b := newBench(t)
+	rep := &fakeReporter{}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	st := b.runWith(ctx, Options{}, rep)
+	if len(rep.finishes) != 1 || rep.finishes[0].Result != state.ResultCancelled || st.ExitCode != ExitCancelled {
+		t.Fatalf("une exécution annulée doit quand même être signalée : %+v", rep.finishes)
+	}
+}
+
+func TestReporterFailureDoesNotChangeTheResult(t *testing.T) {
+	b := newBench(t)
+	rep := &fakeReporter{failWith: os.ErrDeadlineExceeded}
+	st := b.runWith(context.Background(), Options{}, rep)
+	if st.ExitCode != ExitOK {
+		t.Fatalf("une supervision injoignable ne doit pas faire échouer la sauvegarde : code %d", st.ExitCode)
+	}
+	log, _ := os.ReadFile(filepath.Join(b.dir, "logs", "runs", st.RunID, "run.log"))
+	if !strings.Contains(string(log), "bilan non envoyé") {
+		t.Error("l'échec d'envoi doit être journalisé")
+	}
+}

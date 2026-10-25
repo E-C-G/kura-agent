@@ -1,10 +1,11 @@
 // Commande kura-agent : sauvegarde planifiée vers Wasabi (wrapper de `aws s3 sync`).
 //
-// Étapes livrées : run, validate, status, version.
-// À venir : webhook, install / uninstall / credentials, tray, restore.
+// Étapes livrées : run, validate, status, credentials, version ; bilan vers healthchecks ou webhook.
+// À venir : install / uninstall, tray, restore.
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -17,10 +18,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/E-C-G/kura-agent/internal/creds"
 	"github.com/E-C-G/kura-agent/internal/execx"
 	"github.com/E-C-G/kura-agent/internal/lock"
 	"github.com/E-C-G/kura-agent/internal/paths"
 	"github.com/E-C-G/kura-agent/internal/procs"
+	"github.com/E-C-G/kura-agent/internal/report"
 	"github.com/E-C-G/kura-agent/internal/runner"
 	"github.com/E-C-G/kura-agent/internal/state"
 	"github.com/E-C-G/kura-agent/pkg/config"
@@ -39,13 +42,18 @@ Usage :
   kura-agent run      [--config FICHIER] [--job ID]... [--dry-run] [--force-deletes --job ID] [--quiet]
   kura-agent validate [--config FICHIER] [--offline]
   kura-agent status   [--json]
+  kura-agent credentials set NOM [--from-env VARIABLE]
+  kura-agent credentials delete NOM
+  kura-agent credentials list
   kura-agent version
 
 Commandes :
   run       exécute la sauvegarde (normalement lancée par la tâche planifiée \Kura\Sync)
   validate  vérifie la configuration, la présence d'aws.exe et l'accès au bucket
-  status    affiche l'état de la dernière exécution
-  version   affiche la version
+  status       affiche l'état de la dernière exécution
+  credentials  gère les secrets référencés par credential:NOM dans la configuration ;
+               à lancer sous le compte qui exécute la tâche (chiffrement DPAPI lié à ce compte)
+  version      affiche la version
 
 Codes de sortie de run : 0 OK · 1 avertissement · 2 erreur · 3 configuration invalide
                          4 déjà en cours · 5 garde-fou · 6 annulée
@@ -64,6 +72,8 @@ func main() {
 		code = cmdValidate(os.Args[2:])
 	case "status":
 		code = cmdStatus(os.Args[2:])
+	case "credentials":
+		code = cmdCredentials(os.Args[2:])
 	case "version", "--version", "-v":
 		fmt.Printf("kura-agent %s (commit %s, compilé le %s)\n", version, commit, date)
 	case "help", "--help", "-h":
@@ -137,6 +147,12 @@ func cmdRun(args []string) int {
 	if *quiet {
 		console = nil
 	}
+	// Une destination de bilan mal configurée (secret absent…) ne doit pas empêcher la
+	// sauvegarde : on le signale et on continue sans bilan.
+	rep, err := report.New(cfg.Notify.Report, creds.Store{Dir: paths.CredentialsDir()}, reportOptions(cfg))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "bilan désactivé pour cette exécution :", err)
+	}
 	st, err := runner.Run(ctx, cfg, runner.Options{JobIDs: jobs, DryRun: *dryRun, ForceDeletes: *force}, runner.Deps{
 		Exec:        execx.System{},
 		Procs:       procs.System(),
@@ -145,6 +161,7 @@ func cmdRun(args []string) int {
 		HistoryFile: paths.HistoryFile(),
 		RunsDir:     paths.RunsDir(),
 		Console:     console,
+		Reporter:    rep,
 	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -223,10 +240,97 @@ func cmdValidate(args []string) int {
 			check(fmt.Sprintf("accès au bucket %s (profil %q)", cfg.Profile.Bucket, cfg.Profile.AWSProfile), err)
 		}
 	}
+	if r := cfg.Notify.Report; r != nil {
+		label := "bilan : " + r.Type
+		if *offline {
+			_, err := report.New(r, creds.Store{Dir: paths.CredentialsDir()}, reportOptions(cfg))
+			check(label+" (secrets résolus, pas d'envoi)", err)
+		} else {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			note, err := report.Check(ctx, r, creds.Store{Dir: paths.CredentialsDir()}, reportOptions(cfg))
+			cancel()
+			check(label, err)
+			if err == nil && note != "" {
+				fmt.Printf("       %s\n", note)
+			}
+		}
+	}
 	if !ok {
 		return runner.ExitConfig
 	}
 	return runner.ExitOK
+}
+
+func reportOptions(cfg *config.Config) report.Options {
+	host, _ := os.Hostname()
+	return report.Options{Version: version, Host: host, Profile: cfg.Profile.Name,
+		Bucket: cfg.Profile.Bucket, PendingDir: paths.PendingDir()}
+}
+
+func cmdCredentials(args []string) int {
+	store := creds.Store{Dir: paths.CredentialsDir()}
+	if len(args) == 0 {
+		fmt.Fprint(os.Stderr, usage)
+		return 2
+	}
+	switch args[0] {
+	case "list":
+		names, err := store.List()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 2
+		}
+		if len(names) == 0 {
+			fmt.Println("aucun secret enregistré")
+		}
+		for _, n := range names {
+			fmt.Println(n)
+		}
+		return 0
+	case "delete":
+		if len(args) != 2 {
+			fmt.Fprintln(os.Stderr, "usage : kura-agent credentials delete NOM")
+			return 2
+		}
+		if err := store.Delete(args[1]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 2
+		}
+		fmt.Printf("secret %q supprimé\n", args[1])
+		return 0
+	case "set":
+		fs := flag.NewFlagSet("credentials set", flag.ContinueOnError)
+		fromEnv := fs.String("from-env", "", "lire la valeur dans cette variable d'environnement")
+		if len(args) < 2 || strings.HasPrefix(args[1], "-") {
+			fmt.Fprintln(os.Stderr, "usage : kura-agent credentials set NOM [--from-env VARIABLE]")
+			return 2
+		}
+		name := args[1]
+		if err := fs.Parse(args[2:]); err != nil {
+			return 2
+		}
+		var value string
+		if *fromEnv != "" {
+			value = os.Getenv(*fromEnv)
+		} else {
+			fmt.Fprintf(os.Stderr, "valeur de %q (une ligne, affichée en clair à la saisie) : ", name)
+			line, err := bufio.NewReader(os.Stdin).ReadString('\n')
+			if err != nil && line == "" {
+				fmt.Fprintln(os.Stderr, "\nlecture impossible :", err)
+				return 2
+			}
+			value = strings.TrimRight(line, "\r\n")
+		}
+		if err := store.Set(name, value); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 2
+		}
+		fmt.Printf("secret %q enregistré ; référence dans la configuration : credential:%s\n", name, name)
+		return 0
+	default:
+		fmt.Fprintf(os.Stderr, "sous-commande inconnue %q (set, delete, list)\n", args[0])
+		return 2
+	}
 }
 
 func cmdStatus(args []string) int {

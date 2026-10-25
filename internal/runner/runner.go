@@ -21,6 +21,7 @@ import (
 	"github.com/E-C-G/kura-agent/internal/execx"
 	"github.com/E-C-G/kura-agent/internal/guard"
 	"github.com/E-C-G/kura-agent/internal/procs"
+	"github.com/E-C-G/kura-agent/internal/report"
 	"github.com/E-C-G/kura-agent/internal/state"
 	"github.com/E-C-G/kura-agent/pkg/config"
 )
@@ -67,7 +68,8 @@ type Deps struct {
 	StatusFile  string
 	HistoryFile string
 	RunsDir     string
-	Console     io.Writer // copie du journal à l'écran ; nil = aucune
+	Console     io.Writer       // copie du journal à l'écran ; nil = aucune
+	Reporter    report.Reporter // destination du bilan ; nil = aucune
 
 	Now        func() time.Time                                 // défaut : time.Now
 	Sleep      func(ctx context.Context, d time.Duration) error // défaut : attente annulable
@@ -151,6 +153,14 @@ func Run(ctx context.Context, cfg *config.Config, opt Options, d Deps) (state.St
 		log.Warn("impossible de lier aws.exe à l'agent (Job Object)", "err", err)
 	}
 
+	if d.Reporter != nil && !opt.DryRun {
+		sctx, cancel := context.WithTimeout(ctx, time.Minute)
+		if err := d.Reporter.Start(sctx, r.st, len(jobs) == len(cfg.Jobs)); err != nil {
+			log.Warn("bilan : signal de début non envoyé", "destination", d.Reporter.Name(), "err", err)
+		}
+		cancel()
+	}
+
 	log.Info("début de l'exécution", "run_id", runID, "profil", cfg.Profile.Name,
 		"bucket", cfg.Profile.Bucket, "jobs", jobIDs(jobs), "simulation", opt.DryRun, "force_deletes", opt.ForceDeletes)
 
@@ -210,6 +220,20 @@ func Run(ctx context.Context, cfg *config.Config, opt Options, d Deps) (state.St
 		log.Warn("historique non mis à jour", "err", err)
 	}
 	purgeRuns(d.RunsDir, cfg.Logging.RetentionDays, end, log)
+	if d.Reporter != nil {
+		if opt.DryRun {
+			log.Info("simulation : aucun bilan envoyé", "destination", d.Reporter.Name())
+		} else {
+			// Contexte propre : une exécution annulée ou hors délai doit quand même être signalée.
+			fctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			if err := d.Reporter.Finish(fctx, r.st, len(jobs) == len(cfg.Jobs)); err != nil {
+				log.Warn("bilan non envoyé", "destination", d.Reporter.Name(), "err", err)
+			} else {
+				log.Info("bilan envoyé", "destination", d.Reporter.Name())
+			}
+			cancel()
+		}
+	}
 	log.Info("fin de l'exécution", "résultat", overall, "code", r.st.ExitCode,
 		"durée", end.Sub(start).Round(time.Second).String())
 	return r.st, nil

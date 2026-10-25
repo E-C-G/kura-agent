@@ -209,16 +209,40 @@ func (c *Config) Validate(opt ValidateOptions) error {
 			add(fmt.Sprintf("notify.toast_on[%d]", i), "valeur %q inconnue (success, warning, failure)", t)
 		}
 	}
-	if w := c.Notify.Webhook; w.URL != "" {
-		if u, err := url.Parse(w.URL); err != nil || u.Scheme != "https" || u.Host == "" {
-			add("notify.webhook.url", "URL HTTPS attendue, reçu %q", w.URL)
-		}
-		if w.Token == "" {
-			add("notify.webhook.token", "obligatoire quand une URL est définie (ex. credential:webhook)")
-		}
+	if w := c.Notify.Webhook; w != nil && w.URL != "" && c.Notify.Report != nil &&
+		(c.Notify.Report.URL != w.URL || c.Notify.Report.Type != ReportWebhook) {
+		add("notify.webhook", "ancienne forme de notify.report : ne gardez que notify.report")
 	}
-	if t := c.Notify.Webhook.Token; t != "" && !strings.HasPrefix(t, "credential:") {
-		add("notify.webhook.token", "référence attendue sous la forme credential:<nom> ; ne mettez jamais le jeton en clair ici")
+	if r := c.Notify.Report; r != nil {
+		switch r.Type {
+		case ReportHealthchecks, ReportWebhook:
+		case "":
+			add("notify.report.type", "obligatoire : healthchecks ou webhook")
+		default:
+			add("notify.report.type", "valeur %q inconnue (healthchecks, webhook)", r.Type)
+		}
+		switch {
+		case r.URL == "":
+			add("notify.report.url", "obligatoire")
+		case strings.HasPrefix(r.URL, CredentialPrefix):
+			if name := strings.TrimPrefix(r.URL, CredentialPrefix); !idPattern.MatchString(name) {
+				add("notify.report.url", "nom de secret %q invalide (minuscules, chiffres et '-')", name)
+			}
+		default:
+			if u, err := url.Parse(r.URL); err != nil || u.Scheme != "https" || u.Host == "" {
+				add("notify.report.url", "URL HTTPS ou credential:<nom> attendue, reçu %q", r.URL)
+			}
+		}
+		if r.Token != "" {
+			if r.Type == ReportHealthchecks {
+				add("notify.report.token", "inutile avec healthchecks : l'URL de ping identifie le check")
+			} else if name, ok := strings.CutPrefix(r.Token, CredentialPrefix); !ok || !idPattern.MatchString(name) {
+				add("notify.report.token", "référence attendue sous la forme credential:<nom> ; ne mettez jamais le jeton en clair ici")
+			}
+		}
+		if r.HMAC && (r.Type != ReportWebhook || r.Token == "") {
+			add("notify.report.hmac", "la signature HMAC demande type: webhook et un token")
+		}
 	}
 
 	// logging

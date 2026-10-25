@@ -14,16 +14,16 @@ Console d'administration associée : [E-C-G/kura-ctl](https://github.com/E-C-G/k
 | --- | --- | --- |
 | 1 | `pkg/config` : format YAML, `${PROFILE:compte}`, validation | **fait** |
 | 2 | `kura-agent run` sans interface : garde-fou, nouvelles tentatives, codes de sortie, `status.json`, journaux | **fait** |
-| 3 | Bilan au webhook (broker Make ou autre) | à faire |
+| 3 | Bilan vers healthchecks.io ou un webhook (Make, n8n…), coffre de secrets `credentials` | **fait** |
 | 4 | `install` / `uninstall` / `credentials` : compte `svc-kura`, tâche `\Kura\Sync`, DPAPI | à faire |
 | 5 | Icône par session, préavis et fermeture douce d'Outlook | à faire |
 | 6 | Restauration (V2) | à faire |
 
-Commandes disponibles : `run`, `validate`, `status`, `version`.
+Commandes disponibles : `run`, `validate`, `status`, `credentials`, `version`.
 
 ## Compiler
 
-Go 1.24 ou plus récent. Première fois, avec accès à Internet :
+Go 1.26 ou plus récent. Première fois, avec accès à Internet :
 
 ```sh
 go mod tidy          # télécharge les dépendances et crée go.sum
@@ -115,6 +115,100 @@ En attendant `kura-agent install` (étape 4), la mise en place est manuelle, sur
 
 Le passage au compte dédié `svc-kura` viendra avec `kura-agent install`.
 
+## Bilan de chaque exécution (étape 3)
+
+Chaque exécution réelle peut envoyer son bilan à **une** destination, réglée dans `notify.report`.
+Une simulation (`--dry-run`) n'envoie jamais rien. Une destination injoignable ne fait jamais
+échouer la sauvegarde : l'erreur est journalisée dans `run.log`.
+
+### healthchecks.io (ou instance auto-hébergée)
+
+```yaml
+notify:
+  report:
+    type: healthchecks
+    url: https://hc-ping.com/<uuid-du-check>
+```
+
+| Moment | Appel |
+| --- | --- |
+| Début de l'exécution | `<url>/start?rid=…` (mesure de la durée, détection d'un blocage) |
+| Fin, tous les jobs réussis (OK ou fichiers ignorés) | `<url>?rid=…` |
+| Fin en erreur, garde-fou, job sauté, annulation | `<url>/fail?rid=…` |
+
+- Le même `rid` relie le début et la fin. Le corps de la fin contient le résumé des jobs, visible
+  dans le journal du check (10 ko au plus).
+- healthchecks alerte aussi quand **aucun** signal n'arrive à l'heure prévue : serveur éteint,
+  tâche désactivée. Régler la période et le délai de grâce du check sur la planification.
+- Une exécution partielle (`--job`) ne touche pas au check : ni début, ni fin.
+- `kura-agent validate` envoie un signal `<url>/log`, qui s'inscrit au journal du check sans changer
+  son état.
+
+### Webhook générique (Make, n8n…)
+
+```yaml
+notify:
+  report:
+    type: webhook
+    url: https://hook.example.com/kura
+    token: credential:webhook   # facultatif
+    hmac: true                  # facultatif, demande un token
+```
+
+L'agent envoie en `POST` un bilan JSON à la fin de chaque exécution réelle :
+
+```json
+{
+  "event": "run_finished",
+  "host": "SRV01",
+  "profile": "acme-srv01",
+  "bucket": "acme-srv01",
+  "run_id": "2026-10-24_2230",
+  "result": "ok",
+  "success": true,
+  "exit_code": 0,
+  "partial": false,
+  "started_at": "2026-10-24T22:30:02+02:00",
+  "ended_at": "2026-10-24T22:47:15+02:00",
+  "last_success": "2026-10-24T22:47:15+02:00",
+  "agent_version": "0.2.0",
+  "sent_at": "2026-10-24T20:47:16Z",
+  "jobs": [
+    { "id": "data", "result": "ok", "uploaded": 214, "deleted": 3, "exit_code": 0 },
+    { "id": "outlook", "result": "warning", "uploaded": 2, "deleted": 0, "skipped": 1, "exit_code": 2,
+      "message": "1 fichier(s) ignoré(s), souvent verrouillés ; voir outlook.log" }
+  ]
+}
+```
+
+- `success` est vrai quand tous les jobs configurés ont tourné sans erreur ; `partial` quand
+  l'exécution a été lancée avec `--job`.
+- Avec `token`, l'en-tête `X-Kura-Token` porte le jeton. Avec `hmac: true`, s'ajoutent
+  `X-Kura-Timestamp` et `X-Kura-Signature: sha256=<hex>`, HMAC-SHA256 de
+  `<timestamp>.<corps>` avec le jeton : le broker peut vérifier l'origine du bilan et refuser un
+  bilan rejoué. Jeton, URL et noms de fichiers ne figurent jamais dans le corps.
+- 3 essais (puis 5 s, puis 15 s d'attente) ; en cas d'échec, le bilan est gardé dans
+  `C:\ProgramData\Kura\pending\` et renvoyé, dans l'ordre, avant le suivant (20 au plus).
+- Côté broker, prévoir aussi un contrôle quotidien « aucun bilan réussi depuis 48 h », que l'agent
+  ne peut pas faire lui-même quand le serveur est éteint.
+
+### Secrets : `kura-agent credentials`
+
+`url` et `token` acceptent une référence `credential:<nom>` vers le coffre de l'agent, pour ne laisser
+dans `config.yaml` ni jeton ni URL de ping (qui suffit à envoyer un faux signal au check).
+
+```bat
+kura-agent credentials set webhook
+kura-agent credentials set hc-url --from-env HC_URL
+kura-agent credentials list
+kura-agent credentials delete webhook
+```
+
+Sous Windows, chaque secret est chiffré par DPAPI pour le **compte qui l'enregistre** : lancer ces
+commandes sous le compte qui exécute la tâche planifiée, sinon `run` ne pourra pas le relire.
+`kura-agent install` (étape 4) s'en chargera pour le compte `svc-kura`. Les fichiers sont rangés
+dans `C:\ProgramData\Kura\credentials\`.
+
 ## Ce que fait une exécution
 
 1. Prend le verrou `Global\Kura-Run` (une seule exécution à la fois, code 4 sinon).
@@ -161,6 +255,8 @@ C:\ProgramData\Kura\
 ├── config.yaml
 ├── status.json              état courant, réécrit atomiquement
 ├── history.jsonl            une ligne par exécution
+├── credentials\             secrets chiffrés (kura-agent credentials)
+├── pending\                 bilans webhook en attente de renvoi
 └── logs\runs\2026-10-24_2230\
     ├── run.log              déroulé de l'exécution
     ├── data.log             commandes et sortie brute d'aws pour le job "data"
@@ -181,6 +277,8 @@ internal/procs/     recherche et arrêt de processus toutes sessions
 internal/execx/     lancement d'aws.exe sans fenêtre, arrêt garanti
 internal/lock/      verrou machine
 internal/state/     status.json, history.jsonl
+internal/report/    bilan vers healthchecks ou webhook
+internal/creds/     coffre de secrets (DPAPI sous Windows)
 internal/paths/     emplacements sur disque
 ```
 

@@ -34,3 +34,9 @@ func HistoryFile() string { return filepath.Join(DataDir(), "history.jsonl") }
 
 // RunsDir contient un dossier de journaux par exécution.
 func RunsDir() string { return filepath.Join(DataDir(), "logs", "runs") }
+
+// CredentialsDir contient le coffre de secrets (chiffrés par DPAPI sous Windows).
+func CredentialsDir() string { return filepath.Join(DataDir(), "credentials") }
+
+// PendingDir garde les bilans webhook non envoyés, renvoyés à l'exécution suivante.
+func PendingDir() string { return filepath.Join(DataDir(), "pending") }

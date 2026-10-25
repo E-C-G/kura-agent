@@ -99,18 +99,47 @@ type Tray struct {
 	AllowRunNow []string `yaml:"allow_run_now"`
 }
 
-// Notify règle les notifications locales et le bilan poussé au webhook.
+// Notify règle les notifications locales et l'envoi du bilan de chaque exécution.
 type Notify struct {
 	ToastOn []string `yaml:"toast_on"`
-	Webhook Webhook  `yaml:"webhook"`
+	Report  *Report  `yaml:"report"`
+	// Webhook est l'ancienne forme (v0.1.0) de report, toujours lue :
+	// une URL non vide équivaut à report: {type: webhook, …}.
+	Webhook *Webhook `yaml:"webhook"`
 }
 
-// Webhook est l'URL du broker qui reçoit le bilan de chaque exécution.
-type Webhook struct {
+// Types de destination du bilan.
+const (
+	ReportHealthchecks = "healthchecks" // healthchecks.io ou instance auto-hébergée
+	ReportWebhook      = "webhook"      // broker générique (Make, n8n…) : POST JSON
+)
+
+// Report est la destination du bilan de chaque exécution.
+//
+// healthchecks : url = URL de ping du check (ex. https://hc-ping.com/<uuid>) ;
+// l'agent appelle <url>/start au début, <url> en cas de succès, <url>/fail sinon.
+//
+// webhook : url reçoit en POST le bilan JSON ; token (facultatif) part dans
+// l'en-tête X-Kura-Token, et signe le corps (X-Kura-Signature) si hmac est vrai.
+//
+// url et token acceptent une référence "credential:<nom>" vers le coffre de l'agent
+// (kura-agent credentials set <nom>), pour ne pas laisser d'URL secrète dans ce fichier.
+type Report struct {
+	Type  string `yaml:"type"`
 	URL   string `yaml:"url"`
-	Token string `yaml:"token"` // référence "credential:<nom>", jamais le secret en clair
+	Token string `yaml:"token"`
 	HMAC  bool   `yaml:"hmac"`
 }
+
+// Webhook est l'ancienne forme de la destination du bilan.
+type Webhook struct {
+	URL   string `yaml:"url"`
+	Token string `yaml:"token"`
+	HMAC  bool   `yaml:"hmac"`
+}
+
+// CredentialPrefix préfixe une référence au coffre de secrets de l'agent.
+const CredentialPrefix = "credential:"
 
 // Logging règle la journalisation.
 type Logging struct {
@@ -209,6 +238,9 @@ func (c *Config) ApplyDefaults() {
 			// une source vide ne doit jamais passer.
 			j.Guard.MinSourceFiles = 1
 		}
+	}
+	if w := c.Notify.Webhook; w != nil && w.URL != "" && c.Notify.Report == nil {
+		c.Notify.Report = &Report{Type: ReportWebhook, URL: w.URL, Token: w.Token, HMAC: w.HMAC}
 	}
 	if len(c.Notify.ToastOn) == 0 {
 		c.Notify.ToastOn = []string{"failure", "warning"}
