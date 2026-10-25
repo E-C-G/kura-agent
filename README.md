@@ -68,8 +68,13 @@ certificat est configuré, puis publie une release GitHub avec :
 
 Un tag avec suffixe (`v0.3.0-rc1`) publie une pré-version.
 
-**Signature Authenticode** (facultative mais recommandée : sans elle, SmartScreen et certains
-antivirus signalent l'exécutable). Ajouter dans *Settings → Secrets and variables → Actions* :
+**Signature Authenticode** : pas de certificat pour l'instant, l'exécutable est publié non signé.
+Chaque release l'indique alors en tête de ses notes, avec la marche à suivre face à SmartScreen
+(*Informations complémentaires* → *Exécuter quand même*, ou `Unblock-File`) et la vérification de
+l'empreinte avec `Get-FileHash` contre `SHA256SUMS`. Certains antivirus peuvent aussi signaler un
+exécutable Go non signé : prévoir une exclusion pour `C:\Program Files\Kura\` si besoin.
+
+Pour signer plus tard, ajouter dans *Settings → Secrets and variables → Actions* :
 
 | Secret | Contenu |
 | --- | --- |

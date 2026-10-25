@@ -128,6 +128,16 @@ jobs:
           v="${{ steps.v.outputs.version }}"
           flags=(--verify-tag --generate-notes --title "kura-agent $v")
           [[ "${{ steps.v.outputs.prerelease }}" == "true" ]] && flags+=(--prerelease)
+          if [[ "$HAS_SIGNING_CERT" != "true" ]]; then
+            # Mention placée avant les notes générées automatiquement.
+            cat > "$RUNNER_TEMP/notes.md" <<'NOTES'
+          > **Exécutable non signé.** Windows SmartScreen peut afficher « Windows a protégé votre ordinateur » :
+          > cliquer sur *Informations complémentaires* puis *Exécuter quand même*. Après téléchargement,
+          > `Unblock-File .\kura-agent.exe` retire l'avertissement. Vérifier d'abord l'empreinte :
+          > `Get-FileHash .\kura-agent.exe -Algorithm SHA256` doit correspondre à la ligne de `SHA256SUMS`.
+          NOTES
+            flags+=(--notes-file "$RUNNER_TEMP/notes.md")
+          fi
           gh release create "$TAG" "${flags[@]}" \
             "dist/kura-agent_${v}_windows_amd64.zip" \
             "dist/kura-agent_${v}_windows_amd64.exe" \
