@@ -1,0 +1,98 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Format, analyse statique pour Linux et Windows, tests avec détection de concurrence,
+  # puis binaire Windows conservé comme artefact.
+  linux:
+    name: Linux · format, vet, tests, build Windows
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.mod
+
+      - name: Modules
+        shell: bash
+        run: |
+          if [ ! -f go.sum ]; then
+            echo "::warning title=go.sum absent::go.sum n'est pas commité ; il est généré pour ce build (modules vérifiés contre sum.golang.org). Lancer 'go mod tidy' et commiter go.sum."
+            go mod tidy
+          else
+            # go.mod et go.sum doivent être à jour : affiche l'écart et échoue sinon.
+            go mod tidy -diff
+          fi
+          go mod verify
+
+      - name: Format
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "::error title=gofmt::fichiers à formater avec gofmt -w :"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Vet (Linux)
+        run: go vet ./...
+
+      - name: Vet (Windows)
+        run: GOOS=windows GOARCH=amd64 go vet ./...
+
+      - name: Tests
+        run: go test -race -count=1 ./...
+
+      - name: Build Windows
+        run: |
+          VERSION="0.0.0-dev+${GITHUB_SHA::7}"
+          GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath \
+            -ldflags "-s -w -X main.version=${VERSION} -X main.commit=${GITHUB_SHA::7} -X main.date=$(date -u +%Y-%m-%d)" \
+            -o dist/kura-agent.exe ./cmd/kura-agent
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kura-agent-windows-amd64-${{ github.sha }}
+          path: dist/kura-agent.exe
+          retention-days: 14
+
+  # Les tests qui touchent au système (verrou, chemins, renommage de fichiers)
+  # passent aussi sur un vrai Windows.
+  windows:
+    name: Windows · tests
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.mod
+
+      - name: Modules
+        shell: bash
+        run: go mod tidy
+
+      - name: Tests
+        run: go test -count=1 ./...
+
+      - name: Lancement du binaire
+        shell: bash
+        run: |
+          go build -o kura-agent.exe ./cmd/kura-agent
+          ./kura-agent.exe version
+          ./kura-agent.exe help

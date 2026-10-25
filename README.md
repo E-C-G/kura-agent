@@ -1,5 +1,7 @@
 # kura-agent
 
+[![CI](https://github.com/E-C-G/kura-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/E-C-G/kura-agent/actions/workflows/ci.yml)
+
 Agent de sauvegarde Windows vers Wasabi : un wrapper de `aws s3 sync` lancé par une tâche
 planifiée, avec garde-fou contre les suppressions massives, fermeture d'Outlook,
 journaux et état lisible par l'icône de notification.
@@ -41,6 +43,44 @@ GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath \
   -ldflags "-s -w -X main.version=0.2.0 -X main.commit=$(git rev-parse --short HEAD)" \
   -o dist/kura-agent.exe ./cmd/kura-agent
 ```
+
+## Intégration continue et publication
+
+**CI** (`.github/workflows/ci.yml`), à chaque push sur `main` et à chaque pull request :
+
+- Linux : `go.mod`/`go.sum` à jour, `gofmt`, `go vet` pour Linux et Windows, tests avec détection de
+  concurrence, puis `kura-agent.exe` conservé 14 jours comme artefact du build ;
+- Windows : tests sur un vrai Windows (verrou, chemins, remplacement de fichiers) et lancement du binaire.
+
+**Publication** (`.github/workflows/release.yml`), déclenchée par un tag :
+
+```sh
+git tag v0.2.0
+git push origin v0.2.0
+```
+
+Le workflow relance les tests, compile `kura-agent.exe` avec la version du tag, le signe si un
+certificat est configuré, puis publie une release GitHub avec :
+
+- `kura-agent_0.2.0_windows_amd64.zip` : l'exécutable, le README et `config.example.yaml` ;
+- `kura-agent_0.2.0_windows_amd64.exe` : l'exécutable seul ;
+- `SHA256SUMS` : les sommes de contrôle.
+
+Un tag avec suffixe (`v0.3.0-rc1`) publie une pré-version.
+
+**Signature Authenticode** (facultative mais recommandée : sans elle, SmartScreen et certains
+antivirus signalent l'exécutable). Ajouter dans *Settings → Secrets and variables → Actions* :
+
+| Secret | Contenu |
+| --- | --- |
+| `WINDOWS_SIGNING_CERT` | certificat de signature de code `.pfx`, encodé en base64 |
+| `WINDOWS_SIGNING_PASSWORD` | mot de passe du `.pfx` |
+
+Pour encoder le certificat sous Windows :
+`[Convert]::ToBase64String([IO.File]::ReadAllBytes("cert.pfx")) | Set-Clipboard`.
+
+**Dependabot** (`.github/dependabot.yml`) propose chaque semaine les mises à jour des modules Go et
+des actions GitHub.
 
 ## Mettre en service à la place d'un script planifié existant (étape 2)
 

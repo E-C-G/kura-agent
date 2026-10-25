@@ -1,0 +1,134 @@
+name: Release
+
+# Publier une version :  git tag v0.2.0 && git push origin v0.2.0
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag existant à publier (ex. v0.2.0)
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Tests avant publication
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.mod
+      - run: go mod tidy && go mod verify
+      - run: go vet ./... && GOOS=windows go vet ./...
+      - run: go test -race -count=1 ./...
+
+  build:
+    name: Build, signature, publication
+    needs: test
+    # Runner Windows : signtool y est disponible pour la signature Authenticode.
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ inputs.tag || github.ref_name }}
+      HAS_SIGNING_CERT: ${{ secrets.WINDOWS_SIGNING_CERT != '' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.mod
+
+      - name: Version
+        id: v
+        shell: bash
+        run: |
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::tag « $TAG » invalide : attendu vMAJEUR.MINEUR.CORRECTIF (ex. v0.2.0)"
+            exit 1
+          fi
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+          echo "commit=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+          echo "date=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+          if [[ "$TAG" == *-* ]]; then echo "prerelease=true" >> "$GITHUB_OUTPUT"; else echo "prerelease=false" >> "$GITHUB_OUTPUT"; fi
+
+      - name: Build
+        shell: bash
+        env:
+          GOOS: windows
+          GOARCH: amd64
+          CGO_ENABLED: '0'
+        run: |
+          go mod tidy
+          go build -trimpath \
+            -ldflags "-s -w -X main.version=${{ steps.v.outputs.version }} -X main.commit=${{ steps.v.outputs.commit }} -X main.date=${{ steps.v.outputs.date }}" \
+            -o dist/kura-agent.exe ./cmd/kura-agent
+
+      # Signature facultative : renseigner les secrets du dépôt
+      #   WINDOWS_SIGNING_CERT      certificat de signature de code .pfx, encodé en base64
+      #   WINDOWS_SIGNING_PASSWORD  mot de passe du .pfx
+      # Sans eux, l'exécutable est publié non signé (SmartScreen et certains antivirus le signaleront).
+      - name: Signature Authenticode
+        if: env.HAS_SIGNING_CERT == 'true'
+        shell: pwsh
+        env:
+          CERT: ${{ secrets.WINDOWS_SIGNING_CERT }}
+          CERT_PASSWORD: ${{ secrets.WINDOWS_SIGNING_PASSWORD }}
+        run: |
+          $pfx = Join-Path $env:RUNNER_TEMP 'signing.pfx'
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:CERT))
+          try {
+            $signtool = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin' -Recurse -Filter signtool.exe |
+              Where-Object FullName -like '*\x64\*' | Sort-Object FullName -Descending | Select-Object -First 1
+            if (-not $signtool) { throw 'signtool.exe introuvable sur le runner' }
+            & $signtool.FullName sign /f $pfx /p $env:CERT_PASSWORD /fd SHA256 `
+              /tr http://timestamp.digicert.com /td SHA256 /d 'Kura Agent' dist\kura-agent.exe
+            if ($LASTEXITCODE -ne 0) { throw "signtool a échoué ($LASTEXITCODE)" }
+            & $signtool.FullName verify /pa dist\kura-agent.exe
+            if ($LASTEXITCODE -ne 0) { throw "vérification de la signature en échec ($LASTEXITCODE)" }
+          } finally {
+            Remove-Item $pfx -Force -ErrorAction SilentlyContinue
+          }
+
+      - name: Vérification du binaire
+        shell: bash
+        run: |
+          out="$(./dist/kura-agent.exe version)"
+          echo "$out"
+          [[ "$out" == *"${{ steps.v.outputs.version }}"* ]] || { echo "::error::version absente du binaire"; exit 1; }
+
+      - name: Archive et sommes de contrôle
+        shell: bash
+        run: |
+          name="kura-agent_${{ steps.v.outputs.version }}_windows_amd64"
+          mkdir -p "pkg/$name"
+          cp dist/kura-agent.exe README.md "pkg/$name/"
+          cp configs/example.yaml "pkg/$name/config.example.yaml"
+          (cd pkg && 7z a -tzip -bso0 "../dist/$name.zip" "$name")
+          cp dist/kura-agent.exe "dist/kura-agent_${{ steps.v.outputs.version }}_windows_amd64.exe"
+          (cd dist && sha256sum "$name.zip" "kura-agent_${{ steps.v.outputs.version }}_windows_amd64.exe" > SHA256SUMS)
+          cat dist/SHA256SUMS
+
+      - name: Publication
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          v="${{ steps.v.outputs.version }}"
+          flags=(--verify-tag --generate-notes --title "kura-agent $v")
+          [[ "${{ steps.v.outputs.prerelease }}" == "true" ]] && flags+=(--prerelease)
+          gh release create "$TAG" "${flags[@]}" \
+            "dist/kura-agent_${v}_windows_amd64.zip" \
+            "dist/kura-agent_${v}_windows_amd64.exe" \
+            dist/SHA256SUMS

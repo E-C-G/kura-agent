@@ -3,6 +3,7 @@ package guard
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -55,6 +56,9 @@ func TestCountFilesMissingSource(t *testing.T) {
 }
 
 func TestCountFilesSkipsUnreadableDirs(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("chmod ne retire pas le droit de lecture sous Windows")
+	}
 	if os.Geteuid() == 0 {
 		t.Skip("root lit tout")
 	}
