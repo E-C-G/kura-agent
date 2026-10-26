@@ -102,8 +102,11 @@ func (im importer) run(file, cfgPath string, noTest, force, keep bool) error {
 			continue
 		}
 		label := fmt.Sprintf("clé %s (%s)", cr.Name, maskKeyID(cr.AccessKeyID))
-		if cfg != nil && cfg.Profile.AWSCredentials != "credential:"+cr.Name {
-			fmt.Fprintf(im.out, "attention : la configuration utilise profile.aws_credentials: %s, pas credential:%s\n",
+		// Un autre nom : la clé serait rangée sans servir, la sauvegarde continuerait
+		// avec l'ancienne, puis la confirmation dans la console la désactiverait.
+		if cfg != nil && cfg.Profile.AWSCredentials != "credential:"+cr.Name && !force {
+			return fmt.Errorf("la configuration utilise profile.aws_credentials: %s, le paquet apporte credential:%s : "+
+				"la nouvelle clé ne servirait pas. Corriger la configuration, ou --force pour l'enregistrer quand même",
 				orNone(cfg.Profile.AWSCredentials), cr.Name)
 		}
 		if noTest {

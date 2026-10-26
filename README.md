@@ -331,8 +331,9 @@ kura-agent import C:\Users\alice\Downloads\acme-srv01.kura
 
 L'import vérifie que le paquet vise le bucket de la configuration installée, **essaie la nouvelle
 clé auprès de Wasabi** (`head-bucket`) puis seulement la range dans le coffre sous le nom prévu
-(`wasabi` par défaut, celui de `profile.aws_credentials`) : une clé refusée ne remplace jamais celle
-qui sauvegarde. Le fichier est ensuite supprimé (`--keep` pour le garder). Une fois la sauvegarde
+(`wasabi` par défaut) : une clé refusée ne remplace jamais celle qui sauvegarde. Si ce nom n'est
+pas celui de `profile.aws_credentials`, l'import est refusé (`--force` pour passer outre) : la clé
+serait rangée sans jamais servir. Le fichier est ensuite supprimé (`--keep` pour le garder). Une fois la sauvegarde
 suivante réussie, confirmer l'installation dans la console, qui désactive alors l'ancienne clé.
 
 Le format est défini dans `pkg/pack`, importé par la console : un seul code fait foi des deux côtés.

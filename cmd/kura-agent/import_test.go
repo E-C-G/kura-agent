@@ -115,3 +115,27 @@ func TestImportChecks(t *testing.T) {
 		t.Fatal("import sans droits d'administrateur")
 	}
 }
+
+// Un nom de secret différent de celui de la configuration : refusé sans --force, la
+// clé ne servirait pas et la confirmation dans la console couperait la sauvegarde.
+func TestImportNameMismatch(t *testing.T) {
+	h := newImportHarness(t, func(c *pack.Contents) { c.Credentials[0].Name = "wasabi-acme" })
+	h.im.store.Init()
+	h.im.store.Set("wasabi", "ANCIENNE:ancien")
+	if err := h.im.run(h.file, "config.yaml", false, false, false); err == nil || !strings.Contains(err.Error(), "ne servirait pas") {
+		t.Fatalf("nom différent accepté : %v", err)
+	}
+	if _, err := h.im.store.Get("wasabi-acme"); err == nil {
+		t.Fatal("secret enregistré malgré le refus")
+	}
+}
+
+func TestSealRefusesNameTheVaultRejects(t *testing.T) {
+	for _, name := range []string{"Wasabi.Acme", "wasabi_acme", "", strings.Repeat("a", 41)} {
+		c := pack.Contents{Kind: pack.KindCredentials, CreatedAt: time.Now(), ExpiresAt: time.Now().Add(time.Hour), Bucket: "b",
+			Credentials: []pack.Credential{{Name: name, Kind: "aws", AccessKeyID: "A", SecretAccessKey: "S"}}}
+		if _, err := pack.Seal(c, "MOT-DE-PASSE", 1000); err == nil {
+			t.Errorf("nom %q accepté par le paquet", name)
+		}
+	}
+}

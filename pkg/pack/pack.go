@@ -24,6 +24,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -77,6 +78,11 @@ func (c Contents) Expired(now time.Time) bool {
 }
 
 // Validate vérifie la cohérence du contenu.
+// CredentialName : noms de secret acceptés, les mêmes que ceux du coffre de l'agent
+// (internal/creds). La console les vérifie avant de créer une clé : un nom refusé à
+// l'import laisserait chez Wasabi une clé active sans usage.
+var CredentialName = regexp.MustCompile(`^[a-z0-9-]{1,40}$`)
+
 func (c Contents) Validate() error {
 	if !knownKinds[c.Kind] {
 		return fmt.Errorf("type de paquet %q inconnu de cette version : mettre à jour kura-agent", c.Kind)
@@ -89,8 +95,8 @@ func (c Contents) Validate() error {
 	}
 	seen := map[string]bool{}
 	for _, cr := range c.Credentials {
-		if cr.Name == "" || strings.ContainsAny(cr.Name, `/\:*?"<>| `) {
-			return fmt.Errorf("nom de secret invalide : %q", cr.Name)
+		if !CredentialName.MatchString(cr.Name) {
+			return fmt.Errorf("nom de secret invalide : %q (minuscules, chiffres et '-', 40 caractères au plus)", cr.Name)
 		}
 		if seen[cr.Name] {
 			return fmt.Errorf("secret %q en double", cr.Name)
