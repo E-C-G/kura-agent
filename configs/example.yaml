@@ -60,7 +60,8 @@ jobs:
 
 tray:
   users: [alice, admin]             # comptes qui reçoivent l'icône
-  allow_run_now: [alice]            # comptes autorisés à lancer la tâche
+  allow_run_now: [alice]            # comptes autorisés à lancer, annuler et suspendre la tâche
+  late_after: 48h                   # état « Retard » sans sauvegarde réussie depuis cette durée
 
 notify:
   toast_on: [failure, warning]   # success | warning | failure

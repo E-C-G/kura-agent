@@ -16,10 +16,11 @@ Console d'administration associée : [E-C-G/kura-ctl](https://github.com/E-C-G/k
 | 2 | `kura-agent run` sans interface : garde-fou, nouvelles tentatives, codes de sortie, `status.json`, journaux | **fait** |
 | 3 | Bilan vers healthchecks.io ou un webhook (Make, n8n…), coffre de secrets `credentials` | **fait** |
 | 4 | `install` / `uninstall` : compte `svc-kura`, tâche `\Kura\Sync` sans mot de passe, ACL, clés Wasabi dans le coffre | **fait** |
-| 5 | Icône par session, préavis et fermeture douce d'Outlook | à faire |
+| 5 | Icône par session : état, préavis et fermeture douce d'Outlook, relance, annulation, suspension | **fait** |
 | 6 | Restauration (V2) | à faire |
 
-Commandes disponibles : `run`, `validate`, `status`, `credentials`, `install`, `uninstall`, `version`.
+Commandes disponibles : `run`, `validate`, `status`, `credentials`, `install`, `uninstall`, `suspend`,
+`tray`, `version`.
 
 ## Compiler
 
@@ -103,9 +104,9 @@ une invite de commandes **« Exécuter en tant qu'administrateur »**, le zip de
        type: healthchecks
        url: credential:hc-url               # URL de ping, saisie pendant l'installation
    ```
-   `notice_seconds: 0` garde le comportement d'un script `taskkill /F` (pas de préavis tant que
-   l'icône de l'étape 5 n'existe pas).
-2. Installer :
+   `notice_seconds` est le préavis affiché par l'icône avant de fermer Outlook (120 s dans
+   l'exemple) ; `0` reproduit un script `taskkill /F`.
+2. Installer, depuis le dossier du zip (qui contient `kura-agent.exe` et `kura-agentw.exe`) :
    ```bat
    kura-agent.exe install --config C:\chemin\vers\config.yaml
    ```
@@ -125,7 +126,10 @@ une invite de commandes **« Exécuter en tant qu'administrateur »**, le zip de
      l'utilisateur n'est pas connecté » **sans mot de passe stocké** (S4U), autorisations maximales,
      déclencheur tiré de `schedule`, rattrapage si `run_if_missed`, pas de seconde instance, arrêt
      par Windows à `max_duration` + 15 min (l'agent s'arrête lui-même à `max_duration`), lancement
-     autorisé aux comptes de `tray.allow_run_now`.
+     autorisé aux comptes de `tray.allow_run_now` ; action `run --quiet --scheduled` ;
+   - copie `kura-agentw.exe` (le même programme, sans console) et le lance à chaque ouverture de
+     session (`HKLM\...\Run`) : l'icône ne reste ouverte que pour les comptes de `tray.users`. Dans
+     une session déjà ouverte, la lancer à la main : `"C:\Program Files\Kura\kura-agentw.exe" tray`.
 3. Vérifier :
    ```bat
    "C:\Program Files\Kura\kura-agent.exe" run --dry-run
@@ -157,6 +161,54 @@ Wasabi en HTTPS, mais il ne donne accès à aucun partage réseau (`\\serveur\pa
 un partage n'est pas prise en charge. Si une stratégie de sécurité interdit ce mode, en repli :
 définir un mot de passe à `svc-kura` (`net user svc-kura *`), puis dans le Planificateur décocher « Ne
 pas stocker le mot de passe » sur `\Kura\Sync` et le saisir.
+
+## L'icône (étape 5)
+
+`kura-agentw.exe tray` tourne dans la session de chaque compte de `tray.users`. Elle ne copie rien et
+n'a aucun droit particulier : si on la quitte, la sauvegarde planifiée continue seule.
+
+| Icône | État | Info-bulle (exemple) |
+| --- | --- | --- |
+| nuage + coche verte | OK | Dernière sauvegarde réussie le 24/10 22:47 |
+| nuage + flèche bleue (animée) | En cours | Sauvegarde en cours : Données serveur (1/2) |
+| nuage + point d'exclamation orange | Avertissement | 24/10 22:47 : Outlook alice – 1 fichier(s) ignoré(s) |
+| nuage + croix rouge | Erreur, garde-fou, configuration invalide | Échec le 24/10 22:47 : … |
+| nuage gris + pause | Suspendu | Planification suspendue jusqu'au 27/10 08:00 |
+| nuage + horloge orange | Retard | Aucune sauvegarde réussie depuis plus de 2 jours (`tray.late_after`, 48h par défaut) |
+
+Menu (clic gauche ou droit) : dernière sauvegarde réussie et prochaine exécution ; **Sauvegarder
+maintenant** (lance la tâche `\Kura\Sync`, comptes de `tray.allow_run_now`) ; **Annuler la
+sauvegarde** pendant une exécution (mêmes comptes) ; **Suspendre** 1 h ou jusqu'à demain 08:00, puis
+Reprendre (invite UAC : la suspension s'écrit dans `C:\ProgramData\Kura`) ; ouvrir les journaux ou la
+configuration ; vérifier la configuration ; à propos ; quitter.
+
+Notifications : fin en erreur, garde-fou ou avertissement selon `notify.toast_on` (un clic ouvre le
+journal de l'exécution), retard au démarrage puis une fois par jour.
+
+**Préavis Outlook.** Quand une exécution doit fermer Outlook, `run` demande à l'icône de la session
+où il tourne d'afficher une fenêtre au premier plan avec un compte à rebours de `notice_seconds` et
+deux boutons, *Fermer maintenant* et *Reporter de 1 h* (`allow_postpone`, au plus `max` fois).
+À l'échéance ou sur *Fermer maintenant*, l'icône ferme Outlook proprement (comme un clic sur la croix)
+et attend `graceful_timeout` ; ce qui reste ouvert est alors arrêté de force (`force: true`). Après les
+jobs, l'icône relance Outlook dans la session (post-tâche `start_process`), même si la sauvegarde a
+été annulée. Sans icône dans la session, ou sans réponse, `run` garde le comportement d'avant :
+attente du préavis puis arrêt forcé, sans relance.
+
+Sécurité : `run` et l'icône dialoguent par le canal `\\.\pipe\Kura-<n° de session>`, ouvert par
+l'icône et accessible à son seul utilisateur, à SYSTEM et aux Administrateurs. `run` vérifie que le
+canal est servi depuis la bonne session par `kura-agentw.exe` de son propre dossier, et s'y connecte
+sans que l'icône puisse emprunter son identité. Une annulation n'est acceptée que d'une session dont
+le compte figure dans `tray.allow_run_now`.
+
+**Suspension** (aussi en ligne de commande, console d'administration) :
+```bat
+kura-agent suspend 4h          :: ou tomorrow (demain 08:00), 31 jours au plus
+kura-agent suspend off         :: reprise
+```
+Pendant une suspension, la tâche (`run --scheduled`) se termine aussitôt sans rien faire ; un
+`kura-agent run` lancé à la main n'est pas concerné. healthchecks signalera l'absence de signal.
+
+Journal de l'icône : `%LOCALAPPDATA%\Kura\tray.log`.
 
 ## Bilan de chaque exécution (étape 3)
 
@@ -259,10 +311,11 @@ jamais par la ligne de commande ni les journaux.
 ## Ce que fait une exécution
 
 1. Prend le verrou `Global\Kura-Run` (une seule exécution à la fois, code 4 sinon).
-2. Si un job qui en dépend est lancé : cherche `outlook.exe` dans toutes les sessions, attend le
-   préavis, cherche de nouveau (Outlook a pu être fermé entre-temps) et arrête de force ce qui tourne
-   encore (`force: true`), après avoir revérifié le nom de chaque processus. S'il reste ouvert, les jobs
-   marqués `depends_on_pre_task` sont sautés (avertissement).
+2. Si un job qui en dépend est lancé : cherche `outlook.exe` dans toutes les sessions et, pour chaque
+   session, fait afficher le préavis par l'icône puis fermer Outlook proprement (sinon attend le
+   préavis) ; cherche de nouveau et arrête de force ce qui tourne encore (`force: true`), après avoir
+   revérifié le nom de chaque processus. S'il reste ouvert, les jobs marqués `depends_on_pre_task`
+   sont sautés (avertissement). Après les jobs, l'icône relance Outlook là où il a été fermé.
 3. Pour chaque job avec `delete: true`, **avant chaque tentative** de synchronisation : vérifie la
    source, compte ses fichiers, simule (`--dryrun`) et bloque le job si la source semble vide ou si les
    suppressions prévues dépassent les seuils. Un job bloqué ne touche pas au bucket.
@@ -302,6 +355,7 @@ C:\ProgramData\Kura\
 ├── config.yaml
 ├── status.json              état courant, réécrit atomiquement
 ├── history.jsonl            une ligne par exécution
+├── suspend.json             suspension en cours (kura-agent suspend)
 ├── credentials\             secrets chiffrés (administrateurs seulement)
 ├── pending\                 bilans webhook en attente de renvoi
 └── logs\runs\2026-10-24_2230\
@@ -315,7 +369,7 @@ C:\ProgramData\Kura\
 ## Organisation du code
 
 ```text
-cmd/kura-agent/     ligne de commande
+cmd/kura-agent/     ligne de commande (kura-agent.exe, et kura-agentw.exe compilé avec -H=windowsgui)
 pkg/config/         format de configuration (importé par kura-ctl)
 internal/runner/    orchestration d'une exécution, codes de sortie
 internal/awscli/    commandes aws s3 sync, lecture de leur sortie
@@ -325,6 +379,8 @@ internal/execx/     lancement d'aws.exe sans fenêtre, arrêt garanti
 internal/lock/      verrou machine
 internal/state/     status.json, history.jsonl
 internal/report/    bilan vers healthchecks ou webhook
+internal/ipc/       dialogue run ↔ icône : messages JSON, canal nommé par session
+internal/tray/      icône : modèle d'affichage (portable), interface Win32
 internal/creds/     coffre de secrets (DPAPI sous Windows)
 internal/setup/     compte svc-kura, droits, ACL, copie des fichiers (install)
 internal/schedtask/ tâche \Kura\Sync : XML du Planificateur, schtasks
