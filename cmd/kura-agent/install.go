@@ -217,8 +217,9 @@ func install(sys system, opt installOptions) int {
 	}
 
 	// La CLI AWS avant tout le reste : sans elle, ni validate ni la sauvegarde ne
-	// fonctionnent. Un chemin explicite (profile.aws_cli) n'est jamais installé.
-	if cfg.Profile.AWSCLI == "" {
+	// fonctionnent. Installée si profile.aws_cli est vide ou désigne l'emplacement du
+	// MSI ; un autre chemin explicite n'est jamais installé.
+	if def := awsinstall.DefaultPath(); cfg.Profile.AWSCLI == "" || (def != "" && samePath(cfg.Profile.AWSCLI, def)) {
 		res, err := sys.ensureAWS(opt.msiCandidates)
 		if err != nil {
 			return fail(exitInstallFailed, "%v", err)

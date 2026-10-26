@@ -144,8 +144,9 @@ remet un kit (exécutables, MSI de la CLI AWS, paquet `.kura` avec configuration
 
 ### CLI AWS absente
 
-Si `profile.aws_cli` est vide et que `aws` n'est ni dans le PATH ni dans
-`C:\Program Files\Amazon\AWSCLIV2`, `install` installe la CLI AWS v2 avant toute autre étape :
+Si `aws` n'est ni dans le PATH ni dans `C:\Program Files\Amazon\AWSCLIV2` (et que
+`profile.aws_cli` est vide ou désigne ce dossier), `install` installe la CLI AWS v2 avant toute
+autre étape :
 
 1. MSI fourni : `--aws-cli-msi FICHIER`, sinon `AWSCLIV2.msi` posé à côté du paquet `.kura` ou de
    `kura-agent.exe` ;
@@ -156,7 +157,7 @@ Si `profile.aws_cli` est vide et que `aws` n'est ni dans le PATH ni dans
 4. `msiexec /i … /qn /norestart`, journal dans `%TEMP%\kura-awscli\awscli-install.log`, puis
    `aws --version`.
 
-Un chemin explicite dans `profile.aws_cli` n'est jamais installé automatiquement. L'agent cherche
+Un autre chemin dans `profile.aws_cli` n'est jamais installé automatiquement. L'agent cherche
 aussi `aws.exe` dans `C:\Program Files\Amazon\AWSCLIV2` quand il n'est pas dans le PATH (cas d'une
 CLI tout juste installée, avant que les processus voient le nouveau PATH).
 
