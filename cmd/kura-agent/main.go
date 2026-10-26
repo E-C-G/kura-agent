@@ -49,6 +49,7 @@ Usage :
   kura-agent credentials set-aws NOM
   kura-agent credentials delete NOM
   kura-agent credentials list
+  kura-agent import   FICHIER.kura [--config FICHIER] [--no-test] [--force] [--keep]
   kura-agent install   [--config FICHIER] [--skip-validate]
   kura-agent uninstall [--purge]
   kura-agent suspend  DURÉE | tomorrow | off
@@ -61,6 +62,9 @@ Commandes :
   status       affiche l'état de la dernière exécution
   credentials  gère les secrets référencés par credential:NOM dans la configuration
                (set-aws : paire de clés d'accès Wasabi) ; console d'administration
+  import       range dans le coffre la clé d'un paquet .kura préparé par la console kura-ctl
+               (mot de passe affiché par la console) ; la clé est testée avant de
+               remplacer l'ancienne ; console d'administration
   install      installe ou met à jour : exécutable, configuration,
                secrets manquants, validate, tâche \Kura\Sync ; console d'administration
   uninstall    retire la tâche, le compte et l'exécutable ; --purge efface aussi les données
@@ -89,6 +93,8 @@ func main() {
 		code = cmdCredentials(os.Args[2:])
 	case "install":
 		code = cmdInstall(os.Args[2:])
+	case "import":
+		code = cmdImport(os.Args[2:])
 	case "suspend":
 		code = cmdSuspend(os.Args[2:])
 	case "tray":
