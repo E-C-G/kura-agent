@@ -17,10 +17,11 @@ Console d'administration associée : [E-C-G/kura-ctl](https://github.com/E-C-G/k
 | 3 | Bilan vers healthchecks.io ou un webhook (Make, n8n…), coffre de secrets `credentials` | **fait** |
 | 4 | `install` / `uninstall` : tâche `\Kura\Sync` sous SYSTEM, ACL, clés Wasabi dans le coffre | **fait** |
 | 5 | Icône par session : état, préavis et fermeture douce d'Outlook, relance, annulation, suspension | **fait** |
+| 5 bis | `import` : clé d'un paquet `.kura` préparé par la console kura-ctl | **fait** |
 | 6 | Restauration (V2) | à faire |
 
-Commandes disponibles : `run`, `validate`, `status`, `credentials`, `install`, `uninstall`, `suspend`,
-`tray`, `version`.
+Commandes disponibles : `run`, `validate`, `status`, `credentials`, `import`, `install`, `uninstall`,
+`suspend`, `tray`, `version`.
 
 ## Compiler
 
@@ -316,6 +317,26 @@ Administrateurs : la tâche (SYSTEM) et une console d'administration lisent les 
 utilisateur ordinaire aucun. Les clés Wasabi passent à `aws.exe` par ses variables d'environnement,
 jamais par la ligne de commande ni les journaux.
 
+### Clé remise par la console : `kura-agent import`
+
+La console [kura-ctl](https://github.com/E-C-G/kura-ctl) crée la clé du poste (limitée à son bucket,
+sans droit de supprimer une version) et la remet dans un fichier `.kura` chiffré (AES-256-GCM,
+clé dérivée par PBKDF2-SHA256), téléchargeable une seule fois et valable 72 h. Elle affiche une
+seule fois son mot de passe, de la forme `K7QM-2XRT-9HWB-P4NC-VJ3F` (casse et tirets indifférents).
+Sur le poste, depuis une console d'administration :
+
+```bat
+kura-agent import C:\Users\alice\Downloads\acme-srv01.kura
+```
+
+L'import vérifie que le paquet vise le bucket de la configuration installée, **essaie la nouvelle
+clé auprès de Wasabi** (`head-bucket`) puis seulement la range dans le coffre sous le nom prévu
+(`wasabi` par défaut, celui de `profile.aws_credentials`) : une clé refusée ne remplace jamais celle
+qui sauvegarde. Le fichier est ensuite supprimé (`--keep` pour le garder). Une fois la sauvegarde
+suivante réussie, confirmer l'installation dans la console, qui désactive alors l'ancienne clé.
+
+Le format est défini dans `pkg/pack`, importé par la console : un seul code fait foi des deux côtés.
+
 ## Ce que fait une exécution
 
 1. Prend le verrou `Global\Kura-Run` (une seule exécution à la fois, code 4 sinon).
@@ -388,6 +409,7 @@ C:\ProgramData\Kura\
 ```text
 cmd/kura-agent/     ligne de commande (kura-agent.exe, et kura-agentw.exe compilé avec -H=windowsgui)
 pkg/config/         format de configuration (importé par kura-ctl)
+pkg/pack/           paquet .kura chiffré remis par kura-ctl (scellé par kura-ctl, ouvert par import)
 internal/runner/    orchestration d'une exécution, codes de sortie
 internal/awscli/    commandes aws s3 sync, lecture de leur sortie
 internal/guard/     comptage des sources, seuils du garde-fou
