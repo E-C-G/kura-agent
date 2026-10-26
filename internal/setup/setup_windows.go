@@ -303,11 +303,14 @@ func InstallBinary(dir string) (string, error) {
 		return "", err
 	}
 	dst := filepath.Join(dir, "kura-agent.exe")
-	if samePath(src, dst) {
-		return dst, nil
-	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", err
+	}
+	if err := applySDDL(dir, ProgramDirSDDL); err != nil {
+		return "", fmt.Errorf("droits de %s : %w", dir, err)
+	}
+	if samePath(src, dst) {
+		return dst, nil
 	}
 	tmp := dst + ".new"
 	if err := copyFile(src, tmp); err != nil {

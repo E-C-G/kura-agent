@@ -31,6 +31,12 @@ var AccountRights = []string{
 // Utilisateurs.
 const DataDirSDDL = "D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)"
 
+// ProgramDirSDDL : C:\Program Files\Kura. L'exécutable lancé par la tâche (compte
+// administrateur, démarrable par les comptes de tray.allow_run_now) ne doit être
+// modifiable que par SYSTEM et les Administrateurs ; les Utilisateurs le lisent et
+// l'exécutent.
+const ProgramDirSDDL = "D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)"
+
 // Password renvoie un mot de passe aléatoire de n caractères, avec au moins une
 // majuscule, une minuscule, un chiffre et un symbole (stratégie de complexité Windows).
 // Avec une tâche S4U, personne n'a besoin de le connaître : il n'est ni affiché ni gardé.

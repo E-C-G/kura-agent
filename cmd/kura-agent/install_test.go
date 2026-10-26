@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -156,6 +157,14 @@ func TestInstallFresh(t *testing.T) {
 	}
 	if m, _ := filepath.Glob(sys.configFile + ".*.bak"); len(m) != 0 {
 		t.Fatalf("sauvegarde inutile : %v", m)
+	}
+	// Configuration en place mais illisible : jamais écrasée sans copie.
+	if runtime.GOOS != "windows" && os.Getuid() != 0 {
+		os.Chmod(sys.configFile, 0)
+		if _, err := installConfig(cfg, sys.configFile, time.Now()); err == nil {
+			t.Fatal("configuration illisible écrasée")
+		}
+		os.Chmod(sys.configFile, 0o644)
 	}
 	// Configuration modifiée : l'ancienne est gardée.
 	cfg = writeConfig(t, dir, "logging:\n  level: debug\n")

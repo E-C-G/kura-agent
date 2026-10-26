@@ -140,7 +140,12 @@ func install(sys system, cfgPath, account string, skipValidate bool) int {
 	}
 
 	for _, ref := range cfg.CredentialRefs() {
-		if _, err := sys.vault.Get(ref.Name); err == nil {
+		if v, err := sys.vault.Get(ref.Name); err == nil {
+			// Réécrit en portée machine : un secret de la v0.2.0, chiffré pour le compte
+			// qui l'a saisi, serait illisible pour svc-kura.
+			if err := sys.vault.Set(ref.Name, v); err != nil {
+				return fail(exitInstallFailed, "secret %q : %v", ref.Name, err)
+			}
 			step("secret %q présent (%s)", ref.Name, ref.Field)
 			continue
 		} else if !errors.Is(err, creds.ErrNotFound) {
@@ -214,7 +219,9 @@ func installConfig(src, dst string, now time.Time) (backup string, err error) {
 	if err != nil {
 		return "", err
 	}
-	if old, err := os.ReadFile(dst); err == nil {
+	old, err := os.ReadFile(dst)
+	switch {
+	case err == nil:
 		if bytes.Equal(old, data) {
 			return "", nil
 		}
@@ -222,6 +229,9 @@ func installConfig(src, dst string, now time.Time) (backup string, err error) {
 		if err := os.Rename(dst, backup); err != nil {
 			return "", err
 		}
+	case !errors.Is(err, os.ErrNotExist):
+		// Illisible mais présente : ne jamais l'écraser sans copie.
+		return "", fmt.Errorf("lecture de %s : %w", dst, err)
 	}
 	tmp := dst + ".tmp"
 	if err := os.WriteFile(tmp, data, 0o644); err != nil {

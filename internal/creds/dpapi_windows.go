@@ -8,8 +8,9 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// Entropie fixe : un autre programme du même compte ne déchiffre pas ces secrets
-// par un simple appel DPAPI sans la connaître.
+// Entropie fixe, publique (elle est dans l'exécutable) : elle évite seulement qu'un
+// outil DPAPI générique déchiffre ces blobs sans rien savoir de Kura. La vraie
+// protection est l'ACL du dossier (SYSTEM et Administrateurs seuls).
 var entropy = []byte("kura-agent/creds/v1")
 
 func blob(b []byte) *windows.DataBlob {
@@ -28,7 +29,8 @@ func takeBlob(out *windows.DataBlob) []byte {
 // le blob, c'est l'ACL du dossier (SYSTEM et Administrateurs seuls) qui en réserve la
 // lecture. La tâche (svc-kura, sans mot de passe stocké) et une console d'administration
 // lisent donc les mêmes secrets. Copié sur une autre machine, le blob est illisible.
-// unprotect relit aussi les blobs en portée utilisateur écrits par la v0.2.0.
+// Un blob en portée utilisateur (v0.2.0) ne se relit que sous le compte qui l'a écrit :
+// install le réécrit en portée machine (Store.Set) pour que svc-kura puisse le lire.
 func protect(plain []byte) ([]byte, error) {
 	var out windows.DataBlob
 	if err := windows.CryptProtectData(blob(plain), nil, blob(entropy), 0, nil,
