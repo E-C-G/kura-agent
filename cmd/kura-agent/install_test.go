@@ -12,10 +12,12 @@ import (
 	"time"
 	"unicode/utf16"
 
+	"github.com/E-C-G/kura-agent/internal/awsinstall"
 	"github.com/E-C-G/kura-agent/internal/creds"
 	"github.com/E-C-G/kura-agent/internal/lock"
 	"github.com/E-C-G/kura-agent/internal/schedtask"
 	"github.com/E-C-G/kura-agent/pkg/config"
+	"github.com/E-C-G/kura-agent/pkg/pack"
 )
 
 type fakeSys struct {
@@ -27,6 +29,10 @@ type fakeSys struct {
 	askErr   error
 	lockErr  error
 	legacy   bool // un compte svc-kura d'une version précédente existe
+	awsErr   error
+	msis     []string
+	removed  []string
+	password string
 }
 
 func (f *fakeSys) system(dir string) system {
@@ -61,8 +67,17 @@ func (f *fakeSys) system(dir string) system {
 		},
 		askSecret: func(p string) (string, error) {
 			f.asked = append(f.asked, p)
+			if f.password != "" && strings.Contains(p, "paquet") {
+				return f.password, nil
+			}
 			return "https://hc-ping.com/secret-uuid", f.askErr
 		},
+		ensureAWS: func(c []string) (awsinstall.Result, error) {
+			f.calls = append(f.calls, "awscli")
+			f.msis = c
+			return awsinstall.Result{Path: `C:\Program Files\Amazon\AWSCLIV2\aws.exe`, Version: "aws-cli/2.31.0", Installed: true, Signer: "Amazon.com Services LLC"}, f.awsErr
+		},
+		remove: func(p string) error { f.removed = append(f.removed, p); return os.Remove(p) },
 		askAWSKeys: func(n string) (string, error) {
 			f.asked = append(f.asked, "aws:"+n)
 			return "AKIDTEST:secret", f.askErr
@@ -124,10 +139,10 @@ func TestInstallFresh(t *testing.T) {
 	f := &fakeSys{t: t}
 	sys := f.system(dir)
 	cfg := writeConfig(t, dir, "")
-	if code := install(sys, cfg, false); code != 0 {
+	if code := install(sys, installOptions{cfgPath: cfg, skipValidate: false}); code != 0 {
 		t.Fatalf("code %d ; appels %v", code, f.calls)
 	}
-	want := "admin acl binary validate task autostart"
+	want := "admin awscli acl binary validate task autostart"
 	if got := strings.Join(f.calls, " "); got != want {
 		t.Fatalf("ordre des étapes :\n reçu   %s\n attendu %s", got, want)
 	}
@@ -155,7 +170,7 @@ func TestInstallFresh(t *testing.T) {
 	// Rejouer l'installation : secrets déjà là, rien à redemander, pas de sauvegarde de config.
 	f2 := &fakeSys{t: t}
 	sys2 := f2.system(dir)
-	if code := install(sys2, cfg, false); code != 0 || len(f2.asked) != 0 {
+	if code := install(sys2, installOptions{cfgPath: cfg, skipValidate: false}); code != 0 || len(f2.asked) != 0 {
 		t.Fatalf("réinstallation : code %d, saisies %v", code, f2.asked)
 	}
 	if m, _ := filepath.Glob(sys.configFile + ".*.bak"); len(m) != 0 {
@@ -171,7 +186,7 @@ func TestInstallFresh(t *testing.T) {
 	}
 	// Configuration modifiée : l'ancienne est gardée.
 	cfg = writeConfig(t, dir, "logging:\n  level: debug\n")
-	if code := install(f2.system(dir), cfg, false); code != 0 {
+	if code := install(f2.system(dir), installOptions{cfgPath: cfg, skipValidate: false}); code != 0 {
 		t.Fatalf("mise à jour : code %d", code)
 	}
 	if m, _ := filepath.Glob(sys.configFile + ".*.bak"); len(m) != 1 {
@@ -182,7 +197,7 @@ func TestInstallFresh(t *testing.T) {
 func TestInstallStopsWhenValidateFails(t *testing.T) {
 	dir := t.TempDir()
 	f := &fakeSys{t: t, validate: 3}
-	if code := install(f.system(dir), writeConfig(t, dir, ""), false); code == 0 {
+	if code := install(f.system(dir), installOptions{cfgPath: writeConfig(t, dir, ""), skipValidate: false}); code == 0 {
 		t.Fatal("install réussi malgré validate en échec")
 	}
 	if f.xml != "" || strings.Contains(strings.Join(f.calls, " "), "task") {
@@ -190,7 +205,7 @@ func TestInstallStopsWhenValidateFails(t *testing.T) {
 	}
 	// --skip-validate passe outre.
 	f = &fakeSys{t: t, validate: 3}
-	if code := install(f.system(dir), writeConfig(t, dir, ""), true); code != 0 || f.xml == "" {
+	if code := install(f.system(dir), installOptions{cfgPath: writeConfig(t, dir, ""), skipValidate: true}); code != 0 || f.xml == "" {
 		t.Fatalf("--skip-validate : code %d", code)
 	}
 }
@@ -198,7 +213,7 @@ func TestInstallStopsWhenValidateFails(t *testing.T) {
 func TestInstallStopsWhenSecretMissing(t *testing.T) {
 	dir := t.TempDir()
 	f := &fakeSys{t: t, askErr: errors.New("EOF")}
-	if code := install(f.system(dir), writeConfig(t, dir, ""), false); code == 0 {
+	if code := install(f.system(dir), installOptions{cfgPath: writeConfig(t, dir, ""), skipValidate: false}); code == 0 {
 		t.Fatal("install réussi sans secret")
 	}
 	if got := strings.Join(f.calls, " "); strings.Contains(got, "validate") || strings.Contains(got, "task") {
@@ -211,7 +226,7 @@ func TestInstallBadConfigTouchesNothing(t *testing.T) {
 	f := &fakeSys{t: t}
 	bad := filepath.Join(dir, "bad.yaml")
 	os.WriteFile(bad, []byte("version: 1\n"), 0o644)
-	if code := install(f.system(dir), bad, false); code != exitInstallConfig {
+	if code := install(f.system(dir), installOptions{cfgPath: bad, skipValidate: false}); code != exitInstallConfig {
 		t.Fatalf("code %d", code)
 	}
 	if got := strings.Join(f.calls, " "); got != "admin" {
@@ -274,7 +289,7 @@ func TestInstallFallsBackWithoutRunNowRights(t *testing.T) {
 	}
 	out := &strings.Builder{}
 	sys.out = out
-	if code := install(sys, writeConfig(t, dir, ""), false); code != 0 {
+	if code := install(sys, installOptions{cfgPath: writeConfig(t, dir, ""), skipValidate: false}); code != 0 {
 		t.Fatalf("code %d", code)
 	}
 	if !strings.Contains(out.String(), "que pour les administrateurs") {
@@ -288,10 +303,10 @@ func TestInstallFallsBackWithoutRunNowRights(t *testing.T) {
 func TestInstallRemovesLegacyAccount(t *testing.T) {
 	dir := t.TempDir()
 	f := &fakeSys{t: t, legacy: true}
-	if code := install(f.system(dir), writeConfig(t, dir, ""), false); code != 0 {
+	if code := install(f.system(dir), installOptions{cfgPath: writeConfig(t, dir, ""), skipValidate: false}); code != 0 {
 		t.Fatalf("code %d", code)
 	}
-	if got := strings.Join(f.calls, " "); got != "admin acl binary validate task rmaccount:svc-kura autostart" {
+	if got := strings.Join(f.calls, " "); got != "admin awscli acl binary validate task rmaccount:svc-kura autostart" {
 		t.Fatalf("étapes : %s", got)
 	}
 }
@@ -305,4 +320,117 @@ func fromUTF16(b []byte) string {
 		u[i] = uint16(b[2+2*i]) | uint16(b[3+2*i])<<8
 	}
 	return string(utf16.Decode(u))
+}
+
+// writePackage scelle la configuration de writeConfig dans un paquet d'installation.
+func writePackage(t *testing.T, dir string, edit func(*pack.Contents)) (path, password string) {
+	t.Helper()
+	y, err := os.ReadFile(writeConfig(t, dir, ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 10, 26, 8, 0, 0, 0, time.Local)
+	c := pack.Contents{Kind: pack.KindInstall, CreatedAt: now, ExpiresAt: now.Add(72 * time.Hour),
+		Client: "acme", Host: "SRV01", Bucket: "acme-srv01", Config: string(y),
+		Credentials: []pack.Credential{
+			{Name: "wasabi", Kind: "aws", AccessKeyID: "AKIDPAQUET", SecretAccessKey: "secretpaquet"},
+			{Name: "hc-url", Kind: "secret", Value: "https://hc-ping.example/paquet"},
+		}}
+	if edit != nil {
+		edit(&c)
+	}
+	password = "K7QM-2XRT-9HWB-P4NC-VJ3F"
+	data, err := pack.Seal(c, password, 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path = filepath.Join(dir, "acme-srv01.kura")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path, password
+}
+
+func TestInstallFromPackage(t *testing.T) {
+	dir := t.TempDir()
+	file, pw := writePackage(t, dir, nil)
+	f := &fakeSys{t: t, password: pw}
+	sys := f.system(dir)
+	msi := filepath.Join(dir, awsinstall.MSIName)
+	if code := install(sys, installOptions{pkgPath: file, msiCandidates: []string{msi}}); code != 0 {
+		t.Fatalf("code %d ; appels %v", code, f.calls)
+	}
+	if got := strings.Join(f.calls, " "); got != "admin awscli acl binary validate task autostart" {
+		t.Fatalf("étapes : %s", got)
+	}
+	if len(f.asked) != 1 || len(f.msis) != 1 || f.msis[0] != msi {
+		t.Fatalf("saisies %v, MSI %v", f.asked, f.msis)
+	}
+	for name, want := range map[string]string{"wasabi": "AKIDPAQUET:secretpaquet", "hc-url": "https://hc-ping.example/paquet"} {
+		if v, err := sys.vault.Get(name); err != nil || v != want {
+			t.Errorf("coffre %s = %q, %v", name, v, err)
+		}
+	}
+	if b, err := os.ReadFile(sys.configFile); err != nil || !strings.Contains(string(b), "bucket: acme-srv01") {
+		t.Fatalf("configuration du paquet non installée : %v", err)
+	}
+	if _, err := os.Stat(file); !os.IsNotExist(err) {
+		t.Fatal("le paquet doit être supprimé après installation")
+	}
+}
+
+func TestInstallPackageRefusals(t *testing.T) {
+	cases := map[string]func(*pack.Contents){
+		"clé seule": func(c *pack.Contents) { c.Kind = pack.KindCredentials; c.Config = "" },
+		"expiré":    func(c *pack.Contents) { c.ExpiresAt = c.CreatedAt.Add(30 * time.Minute) },
+		"bucket":    func(c *pack.Contents) { c.Bucket = "autre-bucket" },
+		"clé absente": func(c *pack.Contents) {
+			c.Credentials[0].Name = "wasabi-2"
+		},
+		"configuration invalide": func(c *pack.Contents) { c.Config = "version: 1\nprofile: {}\n" },
+	}
+	for name, edit := range cases {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			file, pw := writePackage(t, dir, edit)
+			f := &fakeSys{t: t, password: pw}
+			sys := f.system(dir)
+			if code := install(sys, installOptions{pkgPath: file, keep: false}); code == 0 {
+				t.Fatal("installé")
+			}
+			if strings.Contains(strings.Join(f.calls, " "), "acl") {
+				t.Fatalf("modifications avant refus : %v", f.calls)
+			}
+			if _, err := os.Stat(file); err != nil {
+				t.Fatal("paquet supprimé malgré l'échec")
+			}
+		})
+	}
+}
+
+func TestInstallPackageWrongPassword(t *testing.T) {
+	dir := t.TempDir()
+	file, _ := writePackage(t, dir, nil)
+	f := &fakeSys{t: t, password: "AAAA-BBBB-CCCC-DDDD-EEEE"}
+	if code := install(f.system(dir), installOptions{pkgPath: file}); code == 0 || len(f.asked) != 3 {
+		t.Fatalf("code %d, saisies %v", code, f.asked)
+	}
+}
+
+func TestInstallStopsWhenAWSCLIFails(t *testing.T) {
+	dir := t.TempDir()
+	f := &fakeSys{t: t, awsErr: errors.New("signature HashMismatch")}
+	if code := install(f.system(dir), installOptions{cfgPath: writeConfig(t, dir, "")}); code == 0 || f.xml != "" {
+		t.Fatalf("code %d, appels %v", code, f.calls)
+	}
+	// Chemin explicite : jamais d'installation automatique.
+	f = &fakeSys{t: t}
+	aws := filepath.Join(dir, "aws.exe")
+	os.WriteFile(aws, nil, 0o755)
+	cfg := writeConfig(t, dir, "")
+	b, _ := os.ReadFile(cfg)
+	os.WriteFile(cfg, []byte(strings.Replace(string(b), "profile:\n", "profile:\n  aws_cli: "+filepath.ToSlash(aws)+"\n", 1)), 0o644)
+	if code := install(f.system(dir), installOptions{cfgPath: cfg}); code != 0 || strings.Contains(strings.Join(f.calls, " "), "awscli") {
+		t.Fatalf("code %d, appels %v", code, f.calls)
+	}
 }

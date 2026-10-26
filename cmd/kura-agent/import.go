@@ -87,6 +87,9 @@ func (im importer) run(file, cfgPath string, noTest, force, keep bool) error {
 		}
 		fmt.Fprintln(im.out, "mot de passe incorrect")
 	}
+	if c.Kind == pack.KindInstall {
+		return fmt.Errorf("paquet d'installation complète : l'installer avec « kura-agent install --package %s »", file)
+	}
 	if c.Expired(im.now()) {
 		return fmt.Errorf("paquet expiré depuis le %s : en générer un nouveau dans la console", c.ExpiresAt.Local().Format("02/01/2006 15:04"))
 	}

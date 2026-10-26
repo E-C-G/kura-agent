@@ -139,3 +139,13 @@ func TestSealRefusesNameTheVaultRejects(t *testing.T) {
 		}
 	}
 }
+
+func TestImportRefusesInstallPackage(t *testing.T) {
+	h := newImportHarness(t, func(c *pack.Contents) { c.Kind = pack.KindInstall; c.Config = "version: 1\n" })
+	if err := h.im.run(h.file, "config.yaml", false, false, false); err == nil || !strings.Contains(err.Error(), "install --package") {
+		t.Fatalf("%v", err)
+	}
+	if len(h.tested) != 0 {
+		t.Fatal("clé testée")
+	}
+}

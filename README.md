@@ -18,6 +18,7 @@ Console d'administration associée : [E-C-G/kura-ctl](https://github.com/E-C-G/k
 | 4 | `install` / `uninstall` : tâche `\Kura\Sync` sous SYSTEM, ACL, clés Wasabi dans le coffre | **fait** |
 | 5 | Icône par session : état, préavis et fermeture douce d'Outlook, relance, annulation, suspension | **fait** |
 | 5 bis | `import` : clé d'un paquet `.kura` préparé par la console kura-ctl | **fait** |
+| 5 ter | `install --package` : poste installé en une fois depuis un paquet de la console, CLI AWS comprise | **fait** |
 | 6 | Restauration (V2) | à faire |
 
 Commandes disponibles : `run`, `validate`, `status`, `credentials`, `import`, `install`, `uninstall`,
@@ -91,8 +92,12 @@ des actions GitHub.
 
 ## Installer sur un serveur (étape 4)
 
-Prérequis : AWS CLI v2 installée pour tous les utilisateurs (`C:\Program Files\Amazon\AWSCLIV2\aws.exe`),
-une invite de commandes **« Exécuter en tant qu'administrateur »**, le zip de la release décompressé.
+Prérequis : une invite de commandes **« Exécuter en tant qu'administrateur »**, le zip de la release
+décompressé. La CLI AWS v2 est installée par `install` si elle manque (voir plus bas).
+
+Le plus simple : préparer le poste dans la console [kura-ctl](https://github.com/E-C-G/kura-ctl), qui
+remet un kit (exécutables, MSI de la CLI AWS, paquet `.kura` avec configuration et secrets) ; voir
+[Installer depuis un paquet de la console](#installer-depuis-un-paquet-de-la-console). À la main :
 
 1. Préparer la configuration à partir de `configs/example.yaml` : remplacer les valeurs fictives
    (`acme-srv01`, `alice`, région, chemins) et garder les secrets hors du fichier :
@@ -136,6 +141,43 @@ une invite de commandes **« Exécuter en tant qu'administrateur »**, le zip de
    ```
    La simulation ne ferme pas Outlook et ne modifie rien dans le bucket. `schtasks /Run` lance une
    vraie exécution sous SYSTEM, comme la nuit.
+
+### CLI AWS absente
+
+Si `profile.aws_cli` est vide et que `aws` n'est ni dans le PATH ni dans
+`C:\Program Files\Amazon\AWSCLIV2`, `install` installe la CLI AWS v2 avant toute autre étape :
+
+1. MSI fourni : `--aws-cli-msi FICHIER`, sinon `AWSCLIV2.msi` posé à côté du paquet `.kura` ou de
+   `kura-agent.exe` ;
+2. sinon, téléchargé depuis `https://awscli.amazonaws.com/AWSCLIV2.msi` (HTTPS) ;
+3. dans les deux cas, **signature Authenticode vérifiée** (`Get-AuthenticodeSignature` : chaîne de
+   certificats, horodatage) : état `Valid` et organisation du signataire parmi `Amazon.com Services
+   LLC`, `Amazon Web Services, Inc.`, `Amazon.com, Inc.` ; sinon rien n'est installé ;
+4. `msiexec /i … /qn /norestart`, journal dans `%TEMP%\kura-awscli\awscli-install.log`, puis
+   `aws --version`.
+
+Un chemin explicite dans `profile.aws_cli` n'est jamais installé automatiquement. L'agent cherche
+aussi `aws.exe` dans `C:\Program Files\Amazon\AWSCLIV2` quand il n'est pas dans le PATH (cas d'une
+CLI tout juste installée, avant que les processus voient le nouveau PATH).
+
+### Installer depuis un paquet de la console
+
+La console prépare, pour un bucket, la configuration du poste et un **paquet d'installation**
+`.kura` (configuration, clé du poste et autres secrets, chiffrés comme pour `import`), qu'elle remet
+dans un kit zip avec `kura-agent.exe`, `kura-agentw.exe` et `AWSCLIV2.msi`. Sur le poste, kit
+décompressé, depuis une console d'administration :
+
+```bat
+kura-agent.exe install --package acme-srv01.kura
+```
+
+`install` demande le mot de passe affiché par la console (trois essais), refuse un paquet expiré,
+un paquet de clé seule (à passer par `import`) et une configuration dont le bucket ou
+`profile.aws_credentials` ne correspond pas au paquet. Il installe ensuite la CLI AWS si besoin (le
+MSI du kit est pris en premier), range les secrets du paquet dans le coffre (ils remplacent ceux de
+même nom), puis suit les étapes ci-dessus. Le paquet est supprimé une fois l'installation réussie
+(`--keep` pour le garder). Une fois la première sauvegarde réussie, confirmer l'installation de la
+clé dans la console.
 
 ### Migrer depuis un script planifié
 
@@ -426,7 +468,7 @@ C:\ProgramData\Kura\
 ```text
 cmd/kura-agent/     ligne de commande (kura-agent.exe, et kura-agentw.exe compilé avec -H=windowsgui)
 pkg/config/         format de configuration (importé par kura-ctl)
-pkg/pack/           paquet .kura chiffré remis par kura-ctl (scellé par kura-ctl, ouvert par import)
+pkg/pack/           paquet .kura chiffré remis par kura-ctl (scellé par kura-ctl, ouvert par import et install)
 internal/runner/    orchestration d'une exécution, codes de sortie
 internal/awscli/    commandes aws s3 sync, lecture de leur sortie
 internal/guard/     comptage des sources, seuils du garde-fou
@@ -439,6 +481,7 @@ internal/ipc/       dialogue run ↔ icône : messages JSON, canal nommé par se
 internal/tray/      icône : modèle d'affichage (portable), interface Win32
 internal/creds/     coffre de secrets (DPAPI sous Windows)
 internal/setup/     ACL, copie des fichiers, icône au démarrage, ancien compte svc-kura (install)
+internal/awsinstall/ CLI AWS absente : MSI fourni ou téléchargé, signature Amazon vérifiée, msiexec
 internal/schedtask/ tâche \Kura\Sync : XML du Planificateur, schtasks
 internal/paths/     emplacements sur disque
 ```

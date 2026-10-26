@@ -1,0 +1,138 @@
+package awsinstall
+
+import (
+	"errors"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+func TestCheckSigner(t *testing.T) {
+	ok := []struct{ subject, org string }{
+		{"CN=Amazon.com Services LLC, O=Amazon.com Services LLC, L=Seattle, S=Washington, C=US", "Amazon.com Services LLC"},
+		{`CN="Amazon Web Services, Inc.", O="Amazon Web Services, Inc.", L=Seattle, S=Washington, C=US`, "Amazon Web Services, Inc."},
+		{`O="Amazon.com, Inc.", C=US`, "Amazon.com, Inc."},
+	}
+	for _, c := range ok {
+		got, err := CheckSigner("Valid", c.subject)
+		if err != nil || got != c.org {
+			t.Errorf("%q : %q, %v", c.subject, got, err)
+		}
+	}
+	bad := []struct{ status, subject string }{
+		{"NotSigned", ""},
+		{"HashMismatch", "CN=Amazon.com Services LLC, O=Amazon.com Services LLC"},
+		{"", ""},
+		{"Valid", "CN=Amazon.com Services LLC"}, // pas d'organisation
+		{"Valid", "CN=Evil, O=Amazon.com Services LLC Fake, C=US"},      // nom approchant
+		{"Valid", "CN=Amazon.com Services LLC, O=Mallory Ltd, C=US"},    // CN trompeur
+		{"Valid", `CN=x, O="Amazon.com Services LLC, Evil", C=US`},      // virgule dans O
+		{"Valid", `CN="a, O=Amazon.com Services LLC", O=Mallory, C=US`}, // O= dans un CN entre guillemets
+		{"Valid", `O=Amazon.com Services LLC, O=Mallory`},               // deux organisations
+	}
+	for _, c := range bad {
+		if org, err := CheckSigner(c.status, c.subject); err == nil {
+			t.Errorf("%s %q accepté (%s)", c.status, c.subject, org)
+		}
+	}
+}
+
+type fake struct {
+	installed  bool
+	downloaded string
+	ran        string
+	status     string
+	subject    string
+	dlErr      error
+}
+
+func (f *fake) installer(dir string) Installer {
+	return Installer{
+		Find: func() (string, error) {
+			if f.installed {
+				return `C:\Program Files\Amazon\AWSCLIV2\aws.exe`, nil
+			}
+			return "", errors.New("absent")
+		},
+		Signature: func(msi string) (string, string, error) { return f.status, f.subject, nil },
+		Download: func(url, dst string) error {
+			f.downloaded = url
+			if f.dlErr != nil {
+				return f.dlErr
+			}
+			return os.WriteFile(dst, []byte("msi"), 0o600)
+		},
+		RunMSI: func(msi, log string) (bool, error) {
+			f.ran = msi
+			f.installed = true
+			return false, nil
+		},
+		Version: func(string) (string, error) { return "aws-cli/2.31.0 Python/3.13 Windows/11", nil },
+		TempDir: filepath.Join(dir, "tmp"),
+		Out:     &strings.Builder{},
+	}
+}
+
+const amazon = "CN=Amazon.com Services LLC, O=Amazon.com Services LLC, L=Seattle, S=Washington, C=US"
+
+func TestEnsureAlreadyInstalled(t *testing.T) {
+	f := &fake{installed: true}
+	res, err := f.installer(t.TempDir()).Ensure(nil)
+	if err != nil || res.Installed || f.ran != "" || f.downloaded != "" || !strings.HasPrefix(res.Version, "aws-cli/2") {
+		t.Fatalf("%+v %v %+v", res, err, f)
+	}
+}
+
+func TestEnsureUsesProvidedMSI(t *testing.T) {
+	dir := t.TempDir()
+	msi := filepath.Join(dir, MSIName)
+	if err := os.WriteFile(msi, []byte("msi"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f := &fake{status: "Valid", subject: amazon}
+	res, err := f.installer(dir).Ensure([]string{"", filepath.Join(dir, "absent.msi"), msi})
+	if err != nil || !res.Installed || f.ran != msi || f.downloaded != "" || res.Source != msi || res.Signer != "Amazon.com Services LLC" {
+		t.Fatalf("%+v %v %+v", res, err, f)
+	}
+	if _, err := os.Stat(msi); err != nil {
+		t.Fatal("le MSI fourni ne doit pas être supprimé")
+	}
+}
+
+func TestEnsureDownloadsWhenNoMSI(t *testing.T) {
+	dir := t.TempDir()
+	f := &fake{status: "Valid", subject: amazon}
+	res, err := f.installer(dir).Ensure([]string{filepath.Join(dir, "absent.msi")})
+	if err != nil || f.downloaded != DownloadURL || res.Source != DownloadURL || f.ran == "" {
+		t.Fatalf("%+v %v %+v", res, err, f)
+	}
+	if _, err := os.Stat(f.ran); !os.IsNotExist(err) {
+		t.Fatal("le MSI téléchargé doit être supprimé après installation")
+	}
+}
+
+func TestEnsureRefusesBadSignature(t *testing.T) {
+	for _, c := range []struct{ status, subject string }{{"HashMismatch", amazon}, {"Valid", "CN=x, O=Mallory Ltd"}, {"NotSigned", ""}} {
+		dir := t.TempDir()
+		f := &fake{status: c.status, subject: c.subject}
+		_, err := f.installer(dir).Ensure(nil)
+		if err == nil || f.ran != "" {
+			t.Fatalf("%s %q : msiexec lancé (%v)", c.status, c.subject, err)
+		}
+	}
+}
+
+func TestEnsureDownloadFailure(t *testing.T) {
+	f := &fake{dlErr: errors.New("HTTP 403")}
+	_, err := f.installer(t.TempDir()).Ensure(nil)
+	if err == nil || !strings.Contains(err.Error(), MSIName) || f.ran != "" {
+		t.Fatalf("%v %+v", err, f)
+	}
+}
+
+func TestHTTPDownloadRefusesHTTP(t *testing.T) {
+	if err := HTTPDownload("http://example.invalid/x.msi", filepath.Join(t.TempDir(), "x")); err == nil {
+		t.Fatal("http accepté")
+	}
+}

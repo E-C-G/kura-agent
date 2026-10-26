@@ -1,6 +1,6 @@
 // Package pack définit le paquet .kura : ce que la console kura-ctl remet à un poste
-// (clé d'accès du poste, plus tard configuration complète), chiffré par un mot de
-// passe que la console affiche une seule fois.
+// (clé d'accès seule, ou installation complète : configuration et secrets), chiffré
+// par un mot de passe que la console affiche une seule fois.
 //
 // Format (JSON) :
 //
@@ -42,11 +42,15 @@ const (
 
 // Types de paquet.
 const (
-	KindCredentials = "credentials" // clé seule (lot 2), configuration inchangée
+	KindCredentials = "credentials"  // clé seule, configuration inchangée : kura-agent import
+	KindInstall     = "installation" // configuration et secrets : kura-agent install --package
 )
 
+// MaxConfigSize : taille maximale de la configuration d'un paquet d'installation.
+const MaxConfigSize = 256 << 10
+
 // Kinds connus de cette version.
-var knownKinds = map[string]bool{KindCredentials: true}
+var knownKinds = map[string]bool{KindCredentials: true, KindInstall: true}
 
 // Credential est un secret à ranger dans le coffre du poste sous Name, référencé
 // dans la configuration par credential:<Name>.
@@ -69,7 +73,10 @@ type Contents struct {
 	Endpoint    string       `json:"endpoint,omitempty"`
 	Region      string       `json:"region,omitempty"`
 	Credentials []Credential `json:"credentials"`
-	Note        string       `json:"note,omitempty"`
+	// Config : texte YAML de la configuration du poste (KindInstall). Les secrets n'y
+	// figurent que par référence credential:<nom>, leurs valeurs sont dans Credentials.
+	Config string `json:"config,omitempty"`
+	Note   string `json:"note,omitempty"`
 }
 
 // Expired indique si le paquet a dépassé sa date limite.
@@ -92,6 +99,14 @@ func (c Contents) Validate() error {
 	}
 	if len(c.Credentials) == 0 {
 		return errors.New("paquet sans clé")
+	}
+	switch {
+	case c.Kind == KindInstall && strings.TrimSpace(c.Config) == "":
+		return errors.New("paquet d'installation sans configuration")
+	case c.Kind == KindInstall && len(c.Config) > MaxConfigSize:
+		return errors.New("configuration du paquet trop grande")
+	case c.Kind != KindInstall && c.Config != "":
+		return fmt.Errorf("paquet %q avec une configuration", c.Kind)
 	}
 	seen := map[string]bool{}
 	for _, cr := range c.Credentials {

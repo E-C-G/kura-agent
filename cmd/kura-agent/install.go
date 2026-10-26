@@ -11,12 +11,14 @@ import (
 	"strings"
 	"time"
 
+	"github.com/E-C-G/kura-agent/internal/awsinstall"
 	"github.com/E-C-G/kura-agent/internal/creds"
 	"github.com/E-C-G/kura-agent/internal/lock"
 	"github.com/E-C-G/kura-agent/internal/paths"
 	"github.com/E-C-G/kura-agent/internal/schedtask"
 	"github.com/E-C-G/kura-agent/internal/setup"
 	"github.com/E-C-G/kura-agent/pkg/config"
+	"github.com/E-C-G/kura-agent/pkg/pack"
 )
 
 // system regroupe les opérations système d'install et d'uninstall, remplaçables
@@ -39,7 +41,10 @@ type system struct {
 	acquireLock      func() (lock.Release, error)
 	askSecret        func(prompt string) (string, error)
 	askAWSKeys       func(name string) (string, error)
-	now              func() time.Time
+	// ensureAWS installe la CLI AWS si elle manque (MSI fourni, sinon téléchargé).
+	ensureAWS func(candidates []string) (awsinstall.Result, error)
+	remove    func(path string) error
+	now       func() time.Time
 
 	vault      creds.Store
 	dataDir    string
@@ -66,11 +71,15 @@ func realSystem() system {
 		acquireLock:      lock.Acquire,
 		askSecret:        askSecret,
 		askAWSKeys:       askAWSKeys,
-		now:              time.Now,
-		vault:            vault(),
-		dataDir:          paths.DataDir(),
-		configFile:       paths.ConfigFile(),
-		out:              os.Stdout,
+		ensureAWS: func(c []string) (awsinstall.Result, error) {
+			return awsinstall.System(os.Stdout, filepath.Join(os.TempDir(), "kura-awscli")).Ensure(c)
+		},
+		remove:     os.Remove,
+		now:        time.Now,
+		vault:      vault(),
+		dataDir:    paths.DataDir(),
+		configFile: paths.ConfigFile(),
+		out:        os.Stdout,
 	}
 }
 
@@ -80,21 +89,83 @@ const (
 	exitInstallConfig = 3
 )
 
+// installOptions : options de la commande install.
+type installOptions struct {
+	cfgPath      string
+	skipValidate bool
+	// pkgPath : paquet d'installation .kura (configuration et secrets) préparé par la
+	// console ; remplace cfgPath.
+	pkgPath string
+	keep    bool // garder le .kura après une installation réussie
+	// msiCandidates : emplacements possibles de AWSCLIV2.msi, si la CLI AWS manque.
+	msiCandidates []string
+}
+
 func cmdInstall(args []string) int {
 	fs := flag.NewFlagSet("install", flag.ContinueOnError)
 	cfgPath := fs.String("config", paths.ConfigFile(), "configuration à installer (copiée dans "+paths.ConfigFile()+")")
+	pkg := fs.String("package", "", "paquet d'installation .kura préparé par la console (configuration et secrets)")
+	keep := fs.Bool("keep", false, "garder le fichier .kura après l'installation")
+	msi := fs.String("aws-cli-msi", "", "MSI de la CLI AWS à utiliser si elle manque (défaut : "+awsinstall.MSIName+" à côté du paquet ou de kura-agent.exe, sinon téléchargé chez AWS)")
 	skipValidate := fs.Bool("skip-validate", false, "créer la tâche même si validate échoue (déconseillé)")
 	if err := fs.Parse(args); err != nil {
 		return exitInstallConfig
 	}
-	return install(realSystem(), *cfgPath, *skipValidate)
+	if fs.NArg() != 0 {
+		fmt.Fprintln(os.Stderr, "usage : kura-agent install [--config FICHIER | --package FICHIER.kura] [--aws-cli-msi FICHIER] [--keep] [--skip-validate]")
+		return exitInstallConfig
+	}
+	opt := installOptions{cfgPath: *cfgPath, skipValidate: *skipValidate, pkgPath: *pkg, keep: *keep}
+	opt.msiCandidates = []string{*msi}
+	if *msi == "" {
+		if *pkg != "" {
+			opt.msiCandidates = append(opt.msiCandidates, filepath.Join(filepath.Dir(*pkg), awsinstall.MSIName))
+		}
+		if exe, err := os.Executable(); err == nil {
+			opt.msiCandidates = append(opt.msiCandidates, filepath.Join(filepath.Dir(exe), awsinstall.MSIName))
+		}
+	}
+	return install(realSystem(), opt)
+}
+
+// openInstallPackage ouvre un paquet d'installation (trois essais de mot de passe).
+func openInstallPackage(sys system, file string) (pack.Contents, error) {
+	data, err := os.ReadFile(file)
+	if err != nil {
+		return pack.Contents{}, err
+	}
+	var c pack.Contents
+	for try := 1; ; try++ {
+		pw, err := sys.askSecret("mot de passe du paquet (affiché par la console) : ")
+		if err != nil {
+			return c, fmt.Errorf("lecture du mot de passe : %w", err)
+		}
+		c, err = pack.Open(data, pw)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, pack.ErrWrongPassword) || try == 3 {
+			return c, err
+		}
+		fmt.Fprintln(sys.out, "mot de passe incorrect")
+	}
+	switch {
+	case c.Kind == pack.KindCredentials:
+		return c, errors.New("ce paquet n'apporte qu'une clé : l'importer avec « kura-agent import " + file + " »")
+	case c.Kind != pack.KindInstall:
+		return c, fmt.Errorf("paquet de type %q : pas un paquet d'installation", c.Kind)
+	case c.Expired(sys.now()):
+		return c, fmt.Errorf("paquet expiré depuis le %s : en générer un nouveau dans la console", c.ExpiresAt.Local().Format("02/01/2006 15:04"))
+	}
+	return c, nil
 }
 
 // La tâche s'exécute sous SYSTEM : Windows refuse, sur certains postes, une tâche sans
 // mot de passe (S4U) pour un autre compte que celui qui l'enregistre, et un compte
 // dédié administrateur n'apportait pas de séparation réelle face à SYSTEM.
-func install(sys system, cfgPath string, skipValidate bool) int {
+func install(sys system, opt installOptions) int {
 	out := sys.out
+	cfgPath, skipValidate := opt.cfgPath, opt.skipValidate
 	step := func(format string, a ...any) { fmt.Fprintf(out, "• "+format+"\n", a...) }
 	fail := func(code int, format string, a ...any) int {
 		fmt.Fprintf(os.Stderr, "ÉCHEC : "+format+"\n", a...)
@@ -104,9 +175,62 @@ func install(sys system, cfgPath string, skipValidate bool) int {
 	if err := sys.checkAdmin(); err != nil {
 		return fail(exitInstallFailed, "%v", err)
 	}
+	var pkg *pack.Contents
+	if opt.pkgPath != "" {
+		c, err := openInstallPackage(sys, opt.pkgPath)
+		if err != nil {
+			return fail(exitInstallConfig, "%v", err)
+		}
+		pkg = &c
+		fmt.Fprintf(out, "Paquet d'installation du %s pour %s / %s, bucket %s\n",
+			c.CreatedAt.Local().Format("02/01/2006 15:04"), c.Client, c.Host, c.Bucket)
+		// La configuration du paquet passe par un fichier, copié ensuite comme une
+		// configuration --config (avec copie de l'ancienne).
+		tmp, err := os.MkdirTemp("", "kura-install-")
+		if err != nil {
+			return fail(exitInstallFailed, "%v", err)
+		}
+		defer os.RemoveAll(tmp)
+		cfgPath = filepath.Join(tmp, "config.yaml")
+		if err := os.WriteFile(cfgPath, []byte(c.Config), 0o600); err != nil {
+			return fail(exitInstallFailed, "%v", err)
+		}
+	}
 	cfg, err := config.Load(cfgPath, config.LoadOptions{CheckSystem: true})
 	if err != nil {
+		if pkg != nil {
+			return fail(exitInstallConfig, "configuration du paquet : %v", err)
+		}
 		return fail(exitInstallConfig, "%v", err)
+	}
+	if pkg != nil {
+		if cfg.Profile.Bucket != pkg.Bucket {
+			return fail(exitInstallConfig, "paquet incohérent : bucket %s, configuration %s", pkg.Bucket, cfg.Profile.Bucket)
+		}
+		provided := map[string]bool{}
+		for _, cr := range pkg.Credentials {
+			provided[cr.Name] = true
+		}
+		if ref := strings.TrimPrefix(cfg.Profile.AWSCredentials, "credential:"); ref == cfg.Profile.AWSCredentials || !provided[ref] {
+			return fail(exitInstallConfig, "paquet incohérent : profile.aws_credentials (%s) ne désigne pas la clé du paquet", orNone(cfg.Profile.AWSCredentials))
+		}
+	}
+
+	// La CLI AWS avant tout le reste : sans elle, ni validate ni la sauvegarde ne
+	// fonctionnent. Un chemin explicite (profile.aws_cli) n'est jamais installé.
+	if cfg.Profile.AWSCLI == "" {
+		res, err := sys.ensureAWS(opt.msiCandidates)
+		if err != nil {
+			return fail(exitInstallFailed, "%v", err)
+		}
+		if res.Installed {
+			step("CLI AWS installée : %s (%s, MSI signé par %s)", res.Version, res.Path, res.Signer)
+			if res.RebootRequired {
+				fmt.Fprintln(out, "Attention : Windows demande un redémarrage pour terminer l'installation de la CLI AWS.")
+			}
+		} else {
+			step("CLI AWS : %s", res.Version)
+		}
 	}
 	if cfg.Profile.AWSCredentials == "" {
 		fmt.Fprintf(out, "Attention : sans profile.aws_credentials, la CLI AWS cherchera ses clés dans le dossier .aws de SYSTEM\n"+
@@ -120,6 +244,23 @@ func install(sys system, cfgPath string, skipValidate bool) int {
 		return fail(exitInstallFailed, "coffre %s : %v", sys.vault.Dir, err)
 	}
 	step("dossier %s protégé (Utilisateurs en lecture, coffre réservé aux administrateurs)", sys.dataDir)
+
+	if pkg != nil {
+		// Les secrets du paquet remplacent ceux du coffre : c'est la configuration
+		// préparée pour ce poste.
+		for _, cr := range pkg.Credentials {
+			value := cr.Value
+			if cr.Kind == "aws" {
+				if value, err = creds.JoinAWSKeys(cr.AccessKeyID, cr.SecretAccessKey); err != nil {
+					return fail(exitInstallFailed, "secret %q : %v", cr.Name, err)
+				}
+			}
+			if err := sys.vault.Set(cr.Name, value); err != nil {
+				return fail(exitInstallFailed, "secret %q : %v", cr.Name, err)
+			}
+		}
+		step("%d secret(s) du paquet enregistré(s) dans le coffre", len(pkg.Credentials))
+	}
 
 	backup, err := installConfig(cfgPath, sys.configFile, sys.now())
 	if err != nil {
@@ -224,6 +365,17 @@ func install(sys system, cfgPath string, skipValidate bool) int {
 			return fail(exitInstallFailed, "lancement de l'icône à l'ouverture de session : %v", err)
 		}
 		step("icône lancée à chaque ouverture de session pour %s", strings.Join(cfg.Tray.Users, ", "))
+	}
+
+	if pkg != nil && !opt.keep {
+		if err := sys.remove(opt.pkgPath); err == nil {
+			step("paquet %s supprimé (il contenait la clé du poste)", opt.pkgPath)
+		} else {
+			fmt.Fprintf(out, "Attention : paquet %s non supprimé (%v) : le supprimer, il contient la clé du poste.\n", opt.pkgPath, err)
+		}
+	}
+	if pkg != nil {
+		fmt.Fprintln(out, "\nUne fois la première sauvegarde réussie, confirmer l'installation de la clé dans la console.")
 	}
 
 	fmt.Fprintf(out, `

@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/E-C-G/kura-agent/internal/awscli"
+	"github.com/E-C-G/kura-agent/internal/awsinstall"
 	"github.com/E-C-G/kura-agent/internal/creds"
 	"github.com/E-C-G/kura-agent/internal/execx"
 	"github.com/E-C-G/kura-agent/internal/ipc"
@@ -262,9 +263,11 @@ func resolveAWS(configured string) (string, error) {
 		}
 		return configured, nil
 	}
-	p, err := exec.LookPath("aws")
+	// Aussi à l'emplacement par défaut du MSI : juste après une installation par
+	// kura-agent install, le PATH des processus déjà lancés n'en sait encore rien.
+	p, err := awsinstall.Find()
 	if err != nil {
-		return "", errors.New("aws introuvable dans le PATH : installer AWS CLI v2 ou renseigner profile.aws_cli")
+		return "", errors.New("aws introuvable dans le PATH : installer AWS CLI v2 (ou relancer kura-agent install) ou renseigner profile.aws_cli")
 	}
 	return p, nil
 }

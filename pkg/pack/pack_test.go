@@ -87,3 +87,33 @@ func TestPasswordAlphabetUnambiguous(t *testing.T) {
 		}
 	}
 }
+
+func TestInstallPackage(t *testing.T) {
+	c := sample()
+	c.Kind = KindInstall
+	if err := c.Validate(); err == nil {
+		t.Fatal("paquet d'installation sans configuration accepté")
+	}
+	c.Config = "version: 1\nprofile:\n  bucket: acme-srv01\n"
+	c.Credentials = append(c.Credentials, Credential{Name: "hc-url", Kind: "secret", Value: "https://hc-ping.example/uuid"})
+	data, err := Seal(c, "K7QM-2XRT-9HWB-P4NC-VJ3F", 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(data, []byte("acme-srv01")) {
+		t.Fatal("configuration en clair dans le paquet")
+	}
+	got, err := Open(data, "K7QM-2XRT-9HWB-P4NC-VJ3F")
+	if err != nil || got.Config != c.Config || len(got.Credentials) != 2 {
+		t.Fatalf("%+v %v", got, err)
+	}
+	c.Config = strings.Repeat("x", MaxConfigSize+1)
+	if err := c.Validate(); err == nil {
+		t.Fatal("configuration trop grande acceptée")
+	}
+	k := sample()
+	k.Config = "version: 1"
+	if err := k.Validate(); err == nil {
+		t.Fatal("paquet de clé seule avec configuration accepté")
+	}
+}
