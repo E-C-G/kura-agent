@@ -3,6 +3,7 @@ package runner
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -306,5 +307,32 @@ func TestPostponeDoesNotDelayIndependentJobs(t *testing.T) {
 	}
 	if st.Jobs[0].ID != "data" || st.Jobs[1].ID != "outlook" {
 		t.Fatalf("ordre des jobs : %+v", st.Jobs)
+	}
+}
+
+func TestJobDurationIsRecorded(t *testing.T) {
+	b := newBench(t)
+	var mu sync.Mutex
+	clock := time.Date(2026, 10, 26, 12, 30, 0, 0, time.UTC)
+	st, err := Run(context.Background(), b.cfg, Options{}, Deps{
+		Exec: b.aws, Procs: b.procs, AWSCLI: "aws",
+		StatusFile:  filepath.Join(b.dir, "status.json"),
+		HistoryFile: filepath.Join(b.dir, "history.jsonl"),
+		RunsDir:     filepath.Join(b.dir, "logs", "runs"),
+		Sleep:       func(ctx context.Context, d time.Duration) error { return ctx.Err() },
+		Now: func() time.Time { // chaque lecture de l'horloge avance d'une seconde
+			mu.Lock()
+			defer mu.Unlock()
+			clock = clock.Add(time.Second)
+			return clock
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, j := range st.Jobs {
+		if j.DurationS <= 0 {
+			t.Errorf("job %s : durée %v", j.ID, j.DurationS)
+		}
 	}
 }

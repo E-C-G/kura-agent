@@ -602,8 +602,10 @@ func (r *run) noteClosed(process string, session int, list []procs.Process) {
 	r.closed[key][session] = path
 }
 
-func (r *run) job(ctx context.Context, j config.Job, preOK map[string]bool) state.JobStatus {
-	js := state.JobStatus{ID: j.ID, Name: j.Name, Result: state.ResultOK}
+// Résultat nommé : le defer qui mesure la durée doit modifier la valeur renvoyée
+// (avec un résultat anonyme, il modifiait une copie et la durée restait à 0).
+func (r *run) job(ctx context.Context, j config.Job, preOK map[string]bool) (js state.JobStatus) {
+	js = state.JobStatus{ID: j.ID, Name: j.Name, Result: state.ResultOK}
 	start := r.d.Now()
 	defer func() { js.DurationS = r.d.Now().Sub(start).Seconds() }()
 	log := r.log.With("job", j.ID)
