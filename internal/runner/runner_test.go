@@ -305,6 +305,28 @@ func TestLockedFilesGiveWarning(t *testing.T) {
 	}
 }
 
+// Liens cassés dans un dossier exclu (.venv créé sous WSL) : la CLI les signale et
+// sort en code 2, mais rien de ce qui devait être sauvegardé n'a manqué.
+func TestSkippedExcludedFilesAreNotAWarning(t *testing.T) {
+	b := newBench(t)
+	b.cfg.Jobs[0].Exclude = append(b.cfg.Jobs[0].Exclude, "*/.venv/*")
+	skip := "warning: Skipping file " + filepath.Join(b.data, "outil", ".venv", "lib64") + ". File does not exist.\n"
+	b.aws.behave["DATA"] = func(dry bool, n int) (string, int) { return skip, 2 }
+	st := b.run(context.Background(), Options{})
+	j := b.job(st, "data")
+	if st.ExitCode != ExitOK || j.Result != state.ResultOK || j.Skipped != 0 || !strings.Contains(j.Message, "exclu") {
+		t.Fatalf("code %d, job %+v", st.ExitCode, j)
+	}
+	// Un fichier non exclu reste un avertissement.
+	b = newBench(t)
+	b.aws.behave["DATA"] = func(dry bool, n int) (string, int) {
+		return "warning: Skipping file " + filepath.Join(b.data, "Compta", "verrou.xlsx") + ". File/Directory is not readable.\n", 2
+	}
+	if st := b.run(context.Background(), Options{}); st.ExitCode != ExitWarning {
+		t.Fatalf("fichier verrouillé : code %d", st.ExitCode)
+	}
+}
+
 func TestTransientErrorIsRetried(t *testing.T) {
 	b := newBench(t)
 	b.aws.behave["DATA"] = func(dry bool, n int) (string, int) {

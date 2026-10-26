@@ -5,6 +5,7 @@ import (
 	"bufio"
 	"bytes"
 	"io"
+	"regexp"
 	"strings"
 	"sync"
 
@@ -95,7 +96,12 @@ func Classify(code int) Outcome {
 type Counts struct {
 	Uploaded int
 	Deleted  int
-	Skipped  int // lignes "warning: Skipping file …"
+	Skipped  int // lignes "warning: Skipping file …" (hors fichiers exclus)
+	// SkippedExcluded : fichiers signalés par la CLI alors qu'une exclusion du job les
+	// écarte de toute façon. La CLI vérifie l'existence de chaque fichier avant
+	// d'appliquer --exclude : un lien symbolique cassé dans un dossier exclu (.venv
+	// créé sous WSL…) sort en « File does not exist » et en code 2 à chaque passage.
+	SkippedExcluded int
 }
 
 // Counter compte les opérations au fil de la sortie et la recopie dans un io.Writer.
@@ -105,6 +111,8 @@ type Counter struct {
 	out    io.Writer
 	buf    bytes.Buffer
 	counts Counts
+	// Excluded dit si un chemin local est écarté par les exclusions du job (nil : aucun).
+	Excluded func(path string) bool
 }
 
 // NewCounter recopie tout ce qu'il reçoit dans out (le journal du job).
@@ -149,8 +157,82 @@ func (c *Counter) countLine(line string) {
 	case strings.HasPrefix(l, "delete:"):
 		c.counts.Deleted++
 	case strings.HasPrefix(strings.ToLower(l), "warning: skipping file"):
-		c.counts.Skipped++
+		if c.Excluded != nil && c.Excluded(skippedPath(l)) {
+			c.counts.SkippedExcluded++
+		} else {
+			c.counts.Skipped++
+		}
 	}
+}
+
+// skippedPath extrait le chemin de « warning: Skipping file <chemin>. <raison>. ».
+func skippedPath(l string) string {
+	rest := strings.TrimSpace(l[len("warning: skipping file"):])
+	if i := strings.LastIndex(rest, ". "); i >= 0 {
+		return rest[:i]
+	}
+	return rest
+}
+
+// ExcludeMatcher reproduit le filtrage --exclude de la CLI AWS pour une source locale :
+// chaque motif est joint au dossier source, puis comparé au chemin complet du fichier
+// à la manière de fnmatch (« * » traverse les dossiers, « ? » un caractère, [...]
+// une classe), sans tenir compte de la casse ni du sens des barres (Windows).
+func ExcludeMatcher(source string, patterns []string) func(string) bool {
+	norm := func(s string) string { return strings.ToLower(strings.ReplaceAll(s, "/", `\`)) }
+	root := strings.TrimRight(norm(source), `\`)
+	var res []*regexp.Regexp
+	for _, p := range patterns {
+		if re, err := regexp.Compile("^" + fnmatchToRegexp(root+`\`+norm(p)) + "$"); err == nil {
+			res = append(res, re)
+		}
+	}
+	return func(path string) bool {
+		p := norm(path)
+		for _, re := range res {
+			if re.MatchString(p) {
+				return true
+			}
+		}
+		return false
+	}
+}
+
+// fnmatchToRegexp traduit un motif fnmatch (Python) en expression régulière.
+func fnmatchToRegexp(pat string) string {
+	var b strings.Builder
+	for i := 0; i < len(pat); i++ {
+		switch c := pat[i]; c {
+		case '*':
+			b.WriteString("(?s:.*)")
+		case '?':
+			b.WriteString("(?s:.)")
+		case '[':
+			j := i + 1
+			if j < len(pat) && pat[j] == '!' {
+				j++
+			}
+			if j < len(pat) && pat[j] == ']' {
+				j++
+			}
+			for j < len(pat) && pat[j] != ']' {
+				j++
+			}
+			if j >= len(pat) {
+				b.WriteString(`\[`)
+				continue
+			}
+			class := pat[i+1 : j]
+			if strings.HasPrefix(class, "!") {
+				class = "^" + class[1:]
+			}
+			b.WriteString("[" + strings.ReplaceAll(class, `\`, `\\`) + "]")
+			i = j
+		default:
+			b.WriteString(regexp.QuoteMeta(string(c)))
+		}
+	}
+	return b.String()
 }
 
 // CountLines compte les opérations d'une sortie complète (tests, relecture de journal).

@@ -671,6 +671,13 @@ func (r *run) job(ctx context.Context, j config.Job, preOK map[string]bool) (js 
 			js.Result, js.Message = state.ResultOK, ""
 			break
 		}
+		if outcome == awscli.Warning && counts.Skipped == 0 && counts.SkippedExcluded > 0 {
+			// Seuls des fichiers exclus ont été signalés (liens cassés d'un .venv…) :
+			// rien de ce qui devait être sauvegardé n'a manqué.
+			js.Result = state.ResultOK
+			js.Message = fmt.Sprintf("%d fichier(s) exclu(s) signalé(s) par aws (liens cassés…), sans effet ; voir %s.log", counts.SkippedExcluded, j.ID)
+			break
+		}
 		if outcome == awscli.Warning {
 			js.Result = state.ResultWarning
 			js.Message = fmt.Sprintf("%d fichier(s) ignoré(s), souvent verrouillés ; voir %s.log", counts.Skipped, j.ID)
@@ -775,6 +782,7 @@ func (r *run) syncOnce(ctx context.Context, j config.Job, dryRun bool, out io.Wr
 	args := awscli.SyncArgs(r.cfg.Profile, j, dryRun)
 	fmt.Fprintf(out, "$ %s %s\n", r.d.AWSCLI, strings.Join(quoteArgs(args), " "))
 	c := awscli.NewCounter(out)
+	c.Excluded = awscli.ExcludeMatcher(j.Source, j.Exclude)
 	env := append(awscli.Env(r.cfg.Profile), r.d.AWSEnv...)
 	code, err := r.d.Exec.Run(ctx, r.d.AWSCLI, args, env, c)
 	fmt.Fprintf(out, "== code de sortie %d ==\n", code)

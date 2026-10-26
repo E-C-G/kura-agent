@@ -70,3 +70,34 @@ func TestCounterCountsAcrossChunks(t *testing.T) {
 		t.Error("la sortie doit être recopiée telle quelle dans le journal")
 	}
 }
+
+// Le filtrage reproduit celui de la CLI (motif joint au dossier source, fnmatch).
+func TestExcludeMatcher(t *testing.T) {
+	m := ExcludeMatcher("D:/Projets", []string{"*/.git/*", "*/.venv/*", "*.pyc", "*Thumbs.db", "build[0-9]/*"})
+	for path, want := range map[string]bool{
+		`D:\Projets\outils\agent\.venv\lib64`:              true,
+		`D:\Projets\outils\agent\.venv\bin\\U0001d70bthon`: true,
+		`d:\projets\x\.GIT\config`:                         true, // casse indifférente
+		`D:\Projets\a\b\c.pyc`:                             true,
+		`D:\Projets\photos\Thumbs.db`:                      true,
+		`D:\Projets\build7\out.bin`:                        true,
+		`D:\Projets\buildx\out.bin`:                        false,
+		`D:\Projets\.venv-notes.txt`:                       false,
+		`D:\Projets\src\main.go`:                           false,
+		`E:\Autre\.venv\lib64`:                             false, // hors de la source
+	} {
+		if got := m(path); got != want {
+			t.Errorf("%s : %v, attendu %v", path, got, want)
+		}
+	}
+}
+
+func TestSkippedExcludedAreSeparated(t *testing.T) {
+	c := NewCounter(nil)
+	c.Excluded = ExcludeMatcher("D:/Projets", []string{"*/.venv/*"})
+	c.Write([]byte("warning: Skipping file D:\\Projets\\p\\.venv\\lib64. File does not exist.\n" +
+		"warning: Skipping file D:\\Projets\\p\\notes. version 2.docx. File/Directory is not readable.\n"))
+	if got := c.Counts(); got.Skipped != 1 || got.SkippedExcluded != 1 {
+		t.Fatalf("comptes : %+v", got)
+	}
+}

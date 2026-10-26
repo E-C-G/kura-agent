@@ -397,6 +397,12 @@ crc32, actual checksum Type: null`. L'agent lance donc toujours `aws.exe` avec
 | 5 | Au moins un job bloqué par le garde-fou |
 | 6 | Annulée |
 
+Un fichier que la CLI signale (« Skipping file … ») alors qu'une exclusion du job l'écarte de
+toute façon ne compte pas : la CLI vérifie l'existence des fichiers avant d'appliquer
+`--exclude`, si bien qu'un lien symbolique cassé dans un dossier exclu (`.venv` créé sous WSL,
+par exemple) la fait sortir en code 2 à chaque passage. L'agent rejoue le filtrage de la CLI
+sur le chemin signalé ; seuls les fichiers réellement manqués donnent un avertissement.
+
 ## Fichiers sur la machine
 
 ```text
