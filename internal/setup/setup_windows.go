@@ -20,10 +20,8 @@ import (
 )
 
 var (
-	netapi32                    = windows.NewLazySystemDLL("netapi32.dll")
-	procNetUserAdd              = netapi32.NewProc("NetUserAdd")
-	procNetUserDel              = netapi32.NewProc("NetUserDel")
-	procNetLocalGroupAddMembers = netapi32.NewProc("NetLocalGroupAddMembers")
+	netapi32       = windows.NewLazySystemDLL("netapi32.dll")
+	procNetUserDel = netapi32.NewProc("NetUserDel")
 
 	advapi32                   = windows.NewLazySystemDLL("advapi32.dll")
 	procLsaOpenPolicy          = advapi32.NewProc("LsaOpenPolicy")
@@ -116,46 +114,8 @@ func AccountSID(name string) (string, error) {
 	return sid.String(), nil
 }
 
-// EnsureAccount crée le compte de service s'il manque, l'ajoute aux Administrateurs,
-// lui donne ses droits et le masque de l'écran d'accueil. Rejouable sans effet de bord :
-// un compte existant garde son mot de passe.
-func EnsureAccount(name string) (sid string, created bool, err error) {
-	if _, err := LocalAccountSID(name); err != nil {
-		pw, err := Password(40)
-		if err != nil {
-			return "", false, err
-		}
-		if err := netUserAdd(name, pw); err != nil {
-			return "", false, fmt.Errorf("création du compte %s : %w", name, err)
-		}
-		created = true
-	}
-	sid, err = LocalAccountSID(name)
-	if err != nil {
-		return "", created, err
-	}
-	s, err := windows.StringToSid(sid)
-	if err != nil {
-		return "", created, err
-	}
-	if err := addToAdministrators(s); err != nil {
-		return sid, created, fmt.Errorf("ajout aux Administrateurs : %w", err)
-	}
-	if err := lsaRights(s, AccountRights, false); err != nil {
-		return sid, created, fmt.Errorf("droits du compte : %w", err)
-	}
-	k, _, err := registry.CreateKey(registry.LOCAL_MACHINE, specialAccountsPath, registry.SET_VALUE)
-	if err != nil {
-		return sid, created, fmt.Errorf("masquage de l'écran d'accueil : %w", err)
-	}
-	defer k.Close()
-	if err := k.SetDWordValue(name, 0); err != nil {
-		return sid, created, fmt.Errorf("masquage de l'écran d'accueil : %w", err)
-	}
-	return sid, created, nil
-}
-
-// RemoveAccount défait EnsureAccount et supprime le profil du compte. Absent : rien à faire.
+// RemoveAccount supprime le compte de service d'une version précédente : droits LSA,
+// masquage de l'écran d'accueil, profil, compte. Absent : rien à faire.
 func RemoveAccount(name string) error {
 	sid, err := LocalAccountSID(name)
 	if err != nil {
@@ -186,50 +146,6 @@ func RemoveAccount(name string) error {
 		errs = append(errs, fmt.Errorf("suppression du compte : %w", syscall.Errno(r)))
 	}
 	return errors.Join(errs...)
-}
-
-func netUserAdd(name, password string) error {
-	n, err := windows.UTF16PtrFromString(name)
-	if err != nil {
-		return err
-	}
-	p, err := windows.UTF16PtrFromString(password)
-	if err != nil {
-		return err
-	}
-	c, _ := windows.UTF16PtrFromString("Kura : exécute la sauvegarde planifiée. Ne pas utiliser pour ouvrir une session.")
-	info := userInfo1{Name: n, Password: p, Priv: userPrivUser, Comment: c,
-		Flags: ufScript | ufNormalAccount | ufDontExpirePasswd | ufPasswdCantChange}
-	var parmErr uint32
-	r, _, _ := procNetUserAdd.Call(0, 1, uintptr(unsafe.Pointer(&info)), uintptr(unsafe.Pointer(&parmErr)))
-	switch r {
-	case 0, nerrUserExists:
-		return nil
-	default:
-		return fmt.Errorf("NetUserAdd : erreur %d (paramètre %d)", r, parmErr)
-	}
-}
-
-func addToAdministrators(sid *windows.SID) error {
-	admins, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
-	if err != nil {
-		return err
-	}
-	// Nom localisé du groupe (« Administrateurs » sur un Windows français).
-	group, _, _, err := admins.LookupAccount("")
-	if err != nil {
-		return err
-	}
-	g, err := windows.UTF16PtrFromString(group)
-	if err != nil {
-		return err
-	}
-	member := struct{ sid *windows.SID }{sid} // LOCALGROUP_MEMBERS_INFO_0
-	r, _, _ := procNetLocalGroupAddMembers.Call(0, uintptr(unsafe.Pointer(g)), 0, uintptr(unsafe.Pointer(&member)), 1)
-	if r != 0 && r != errorMemberInAlias {
-		return syscall.Errno(r)
-	}
-	return nil
 }
 
 // lsaRights ajoute des droits, ou retire tous ceux du compte (removeAll).

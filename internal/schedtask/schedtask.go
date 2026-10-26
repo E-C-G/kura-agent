@@ -22,9 +22,12 @@ const Name = `\Kura\Sync`
 // processus qu'en dernier recours.
 const Margin = 15 * time.Minute
 
+// SystemSID est le compte SYSTEM (NT AUTHORITY\SYSTEM).
+const SystemSID = "S-1-5-18"
+
 // Params complète la planification de la configuration.
 type Params struct {
-	UserID     string    // compte qui exécute la tâche : SID (recommandé) ou MACHINE\nom
+	UserID     string    // compte qui exécute la tâche : SID ; défaut SYSTEM
 	Command    string    // chemin de kura-agent.exe
 	Arguments  string    // ex. "run --quiet"
 	WorkingDir string    // ex. C:\ProgramData\Kura
@@ -34,11 +37,18 @@ type Params struct {
 
 // XML renvoie la définition de la tâche.
 //
-// Principal : ouverture de session S4U (« exécuter même si l'utilisateur n'est pas
-// connecté », sans mot de passe stocké) avec les autorisations maximales.
+// Principal : SYSTEM (compte de service, aucun mot de passe), ou un autre compte en
+// ouverture de session S4U ; autorisations maximales dans les deux cas.
 func XML(s config.Schedule, p Params) (string, error) {
-	if p.UserID == "" || p.Command == "" {
-		return "", fmt.Errorf("compte et commande obligatoires")
+	if p.Command == "" {
+		return "", fmt.Errorf("commande obligatoire")
+	}
+	if p.UserID == "" {
+		p.UserID = SystemSID
+	}
+	logon := "S4U"
+	if p.UserID == SystemSID {
+		logon = "ServiceAccount"
 	}
 	trig, err := trigger(s, p.Now)
 	if err != nil {
@@ -66,7 +76,7 @@ func XML(s config.Schedule, p Params) (string, error) {
 		},
 		Triggers: triggers{Calendar: trig},
 		Principals: principals{Principal: principal{
-			ID: "Author", UserID: p.UserID, LogonType: "S4U", RunLevel: "HighestAvailable",
+			ID: "Author", UserID: p.UserID, LogonType: logon, RunLevel: "HighestAvailable",
 		}},
 		Settings: settings{
 			MultipleInstancesPolicy:    "IgnoreNew",

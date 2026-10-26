@@ -14,7 +14,7 @@ var day = time.Date(2026, 10, 26, 9, 0, 0, 0, time.Local)
 
 func params() Params {
 	return Params{
-		UserID: "S-1-5-21-1-2-3-1001", Command: `C:\Program Files\Kura\kura-agent.exe`,
+		Command:   `C:\Program Files\Kura\kura-agent.exe`,
 		Arguments: "run --quiet", WorkingDir: `C:\ProgramData\Kura`,
 		RunNowSIDs: []string{"S-1-5-21-1-2-3-1002"}, Now: day,
 	}
@@ -51,7 +51,7 @@ func TestWeekdaysAtNight(t *testing.T) {
 		`<URI>\Kura\Sync</URI>`,
 		"<StartBoundary>2026-10-26T22:30:00</StartBoundary>",
 		"<ScheduleByWeek>", "<Monday></Monday>", "<Friday></Friday>", "<WeeksInterval>1</WeeksInterval>",
-		"<UserId>S-1-5-21-1-2-3-1001</UserId>", "<LogonType>S4U</LogonType>", "<RunLevel>HighestAvailable</RunLevel>",
+		"<UserId>S-1-5-18</UserId>", "<LogonType>ServiceAccount</LogonType>", "<RunLevel>HighestAvailable</RunLevel>",
 		"<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>",
 		"<StartWhenAvailable>true</StartWhenAvailable>",
 		"<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>",
@@ -90,8 +90,13 @@ func TestRejects(t *testing.T) {
 	if _, err := XML(config.Schedule{Type: "daily", Time: "25:00"}, params()); err == nil {
 		t.Error("heure invalide acceptée")
 	}
-	if _, err := XML(config.Schedule{Type: "daily", Time: "22:30"}, Params{Command: "x"}); err == nil {
-		t.Error("compte vide accepté")
+	if _, err := XML(config.Schedule{Type: "daily", Time: "22:30"}, Params{UserID: SystemSID}); err == nil {
+		t.Error("commande vide acceptée")
+	}
+	p = params()
+	p.UserID = "S-1-5-21-1-2-3-1001"
+	if x, _ := XML(config.Schedule{Type: "daily", Time: "22:30"}, p); !strings.Contains(x, "<LogonType>S4U</LogonType>") {
+		t.Error("autre compte : S4U attendu")
 	}
 }
 

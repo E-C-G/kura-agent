@@ -49,8 +49,8 @@ Usage :
   kura-agent credentials set-aws NOM
   kura-agent credentials delete NOM
   kura-agent credentials list
-  kura-agent install   [--config FICHIER] [--account svc-kura] [--skip-validate]
-  kura-agent uninstall [--account svc-kura] [--keep-account] [--purge]
+  kura-agent install   [--config FICHIER] [--skip-validate]
+  kura-agent uninstall [--purge]
   kura-agent suspend  DURÉE | tomorrow | off
   kura-agent tray     [--config FICHIER]
   kura-agent version
@@ -61,7 +61,7 @@ Commandes :
   status       affiche l'état de la dernière exécution
   credentials  gère les secrets référencés par credential:NOM dans la configuration
                (set-aws : paire de clés d'accès Wasabi) ; console d'administration
-  install      installe ou met à jour : exécutable, configuration, compte svc-kura,
+  install      installe ou met à jour : exécutable, configuration,
                secrets manquants, validate, tâche \Kura\Sync ; console d'administration
   uninstall    retire la tâche, le compte et l'exécutable ; --purge efface aussi les données
   suspend      suspend la planification (ex. 1h, tomorrow = demain 08:00) ; off pour reprendre

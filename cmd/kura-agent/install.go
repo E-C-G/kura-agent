@@ -29,7 +29,7 @@ type system struct {
 	removeAutostart  func() error
 	stopTrays        func() int
 	programDir       func() string
-	ensureAccount    func(name string) (sid string, created bool, err error)
+	legacyAccount    func(name string) bool // compte svc-kura d'une version précédente
 	removeAccount    func(name string) error
 	accountSID       func(name string) (string, error)
 	validate         func(configFile string) int
@@ -56,7 +56,7 @@ func realSystem() system {
 		removeAutostart:  setup.RemoveTrayAutostart,
 		stopTrays:        setup.StopTrays,
 		programDir:       setup.ProgramDir,
-		ensureAccount:    setup.EnsureAccount,
+		legacyAccount:    func(n string) bool { _, err := setup.LocalAccountSID(n); return err == nil },
 		removeAccount:    setup.RemoveAccount,
 		accountSID:       setup.AccountSID,
 		validate:         func(f string) int { return cmdValidate([]string{"--config", f}) },
@@ -83,15 +83,17 @@ const (
 func cmdInstall(args []string) int {
 	fs := flag.NewFlagSet("install", flag.ContinueOnError)
 	cfgPath := fs.String("config", paths.ConfigFile(), "configuration à installer (copiée dans "+paths.ConfigFile()+")")
-	account := fs.String("account", setup.DefaultAccount, "compte local qui exécute la tâche")
 	skipValidate := fs.Bool("skip-validate", false, "créer la tâche même si validate échoue (déconseillé)")
 	if err := fs.Parse(args); err != nil {
 		return exitInstallConfig
 	}
-	return install(realSystem(), *cfgPath, *account, *skipValidate)
+	return install(realSystem(), *cfgPath, *skipValidate)
 }
 
-func install(sys system, cfgPath, account string, skipValidate bool) int {
+// La tâche s'exécute sous SYSTEM : Windows refuse, sur certains postes, une tâche sans
+// mot de passe (S4U) pour un autre compte que celui qui l'enregistre, et un compte
+// dédié administrateur n'apportait pas de séparation réelle face à SYSTEM.
+func install(sys system, cfgPath string, skipValidate bool) int {
 	out := sys.out
 	step := func(format string, a ...any) { fmt.Fprintf(out, "• "+format+"\n", a...) }
 	fail := func(code int, format string, a ...any) int {
@@ -107,8 +109,8 @@ func install(sys system, cfgPath, account string, skipValidate bool) int {
 		return fail(exitInstallConfig, "%v", err)
 	}
 	if cfg.Profile.AWSCredentials == "" {
-		fmt.Fprintf(out, "Attention : sans profile.aws_credentials, la CLI AWS cherchera ses clés dans le dossier .aws du compte %s,\n"+
-			"qui n'existe pas. Conseillé : aws_credentials: credential:wasabi (clés saisies pendant l'installation).\n", account)
+		fmt.Fprintf(out, "Attention : sans profile.aws_credentials, la CLI AWS cherchera ses clés dans le dossier .aws de SYSTEM\n"+
+			"(C:\\Windows\\System32\\config\\systemprofile). Conseillé : aws_credentials: credential:wasabi.\n")
 	}
 
 	if err := sys.secureDataDir(sys.dataDir); err != nil {
@@ -138,20 +140,10 @@ func install(sys system, cfgPath, account string, skipValidate bool) int {
 		fmt.Fprintf(out, "Attention : %s absent à côté de l'exécutable : pas d'icône (préavis par simple attente, pas de relance d'Outlook).\n", setup.GUIName)
 	}
 
-	sid, created, err := sys.ensureAccount(account)
-	if err != nil {
-		return fail(exitInstallFailed, "compte %s : %v", account, err)
-	}
-	if created {
-		step("compte %s créé (Administrateurs, sans ouverture de session locale ni Bureau à distance, masqué de l'écran d'accueil)", account)
-	} else {
-		step("compte %s vérifié (droits et groupe réappliqués)", account)
-	}
-
 	for _, ref := range cfg.CredentialRefs() {
 		if v, err := sys.vault.Get(ref.Name); err == nil {
 			// Réécrit en portée machine : un secret de la v0.2.0, chiffré pour le compte
-			// qui l'a saisi, serait illisible pour svc-kura.
+			// qui l'a saisi, serait illisible pour la tâche.
 			if err := sys.vault.Set(ref.Name, v); err != nil {
 				return fail(exitInstallFailed, "secret %q : %v", ref.Name, err)
 			}
@@ -197,7 +189,7 @@ func install(sys system, cfgPath, account string, skipValidate bool) int {
 		runNow = append(runNow, s)
 	}
 	def, err := schedtask.XML(cfg.Schedule, schedtask.Params{
-		UserID: sid, Command: exe, Arguments: "run --quiet --scheduled", WorkingDir: sys.dataDir,
+		UserID: schedtask.SystemSID, Command: exe, Arguments: "run --quiet --scheduled", WorkingDir: sys.dataDir,
 		RunNowSIDs: runNow, Now: sys.now(),
 	})
 	if err != nil {
@@ -215,7 +207,16 @@ func install(sys system, cfgPath, account string, skipValidate bool) int {
 	case err != nil:
 		return fail(exitInstallFailed, "tâche planifiée : %v\n(définition : %s)", err, taskXML)
 	}
-	step("tâche %s enregistrée : %s, compte %s sans mot de passe stocké (S4U), autorisations maximales", schedtask.Name, describeSchedule(cfg.Schedule), account)
+	step("tâche %s enregistrée : %s, compte SYSTEM, autorisations maximales", schedtask.Name, describeSchedule(cfg.Schedule))
+
+	// Compte de service des versions 0.3 à 0.4.1 : la tâche ne l'utilise plus.
+	if sys.legacyAccount(setup.LegacyAccount) {
+		if err := sys.removeAccount(setup.LegacyAccount); err != nil {
+			fmt.Fprintf(out, "Attention : ancien compte %s non supprimé (%v)\n", setup.LegacyAccount, err)
+		} else {
+			step("ancien compte %s supprimé (la tâche tourne désormais sous SYSTEM)", setup.LegacyAccount)
+		}
+	}
 
 	if gui != "" {
 		if err := sys.setAutostart(gui); err != nil {
@@ -228,11 +229,11 @@ func install(sys system, cfgPath, account string, skipValidate bool) int {
 Installation terminée.
 Suite conseillée :
   1. kura-agent run --dry-run          simulation, rien n'est copié ni supprimé
-  2. schtasks /Run /TN %s        une vraie exécution sous %s, puis kura-agent status
+  2. schtasks /Run /TN %s        une vraie exécution, comme planifiée, puis kura-agent status
   3. après une nuit sans erreur, désactiver puis supprimer l'ancienne tâche et son script
 L'icône apparaît à la prochaine ouverture de session ; pour l'ouvrir tout de suite dans
 une session déjà ouverte, y lancer « %s tray » (sans élévation).
-`, schedtask.Name, account, filepath.Join(sys.programDir(), setup.GUIName))
+`, schedtask.Name, filepath.Join(sys.programDir(), setup.GUIName))
 	return exitInstallOK
 }
 
@@ -309,16 +310,14 @@ func describeSchedule(s config.Schedule) string {
 
 func cmdUninstall(args []string) int {
 	fs := flag.NewFlagSet("uninstall", flag.ContinueOnError)
-	account := fs.String("account", setup.DefaultAccount, "compte local créé par install")
-	keepAccount := fs.Bool("keep-account", false, "garder le compte de service")
 	purge := fs.Bool("purge", false, "supprimer aussi "+paths.DataDir()+" (configuration, secrets, journaux)")
 	if err := fs.Parse(args); err != nil {
 		return exitInstallConfig
 	}
-	return uninstall(realSystem(), *account, *keepAccount, *purge)
+	return uninstall(realSystem(), *purge)
 }
 
-func uninstall(sys system, account string, keepAccount, purge bool) int {
+func uninstall(sys system, purge bool) int {
 	out := sys.out
 	step := func(format string, a ...any) { fmt.Fprintf(out, "• "+format+"\n", a...) }
 	if err := sys.checkAdmin(); err != nil {
@@ -344,11 +343,11 @@ func uninstall(sys system, account string, keepAccount, purge bool) int {
 	} else {
 		step("tâche %s supprimée", schedtask.Name)
 	}
-	if !keepAccount {
-		if err := sys.removeAccount(account); err != nil {
-			errs = append(errs, fmt.Errorf("compte %s : %w", account, err))
+	if sys.legacyAccount(setup.LegacyAccount) {
+		if err := sys.removeAccount(setup.LegacyAccount); err != nil {
+			errs = append(errs, fmt.Errorf("compte %s : %w", setup.LegacyAccount, err))
 		} else {
-			step("compte %s et son profil supprimés", account)
+			step("ancien compte %s et son profil supprimés", setup.LegacyAccount)
 		}
 	}
 	if dir := sys.programDir(); dir != "" {

@@ -11,9 +11,6 @@ func LocalAccountSID(string) (string, error) { return "", ErrUnsupported }
 // AccountSID : Windows uniquement.
 func AccountSID(string) (string, error) { return "", ErrUnsupported }
 
-// EnsureAccount : Windows uniquement.
-func EnsureAccount(string) (string, bool, error) { return "", false, ErrUnsupported }
-
 // RemoveAccount : Windows uniquement.
 func RemoveAccount(string) error { return ErrUnsupported }
 

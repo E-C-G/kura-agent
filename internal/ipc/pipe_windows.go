@@ -150,7 +150,7 @@ func (c *conn) Close() error {
 }
 
 // Listener est le canal de l'icône, accessible au seul utilisateur de la session,
-// à SYSTEM et aux Administrateurs (dont svc-kura).
+// à SYSTEM (la tâche) et aux Administrateurs.
 type Listener struct {
 	h    windows.Handle
 	Name string

@@ -810,7 +810,7 @@ func (r *run) failureOf(ctx context.Context, err error) string {
 }
 
 // postTasks relance les processus fermés par les pré-tâches, dans la session où ils
-// tournaient : seule l'icône de cette session peut le faire (un processus de svc-kura
+// tournaient : seule l'icône de cette session peut le faire (un processus de la tâche, sous SYSTEM,
 // ne peut pas ouvrir Outlook dans la session d'un utilisateur). Même après une
 // annulation : l'utilisateur doit retrouver son Outlook.
 func (r *run) postTasks() {

@@ -25,6 +25,7 @@ type fakeSys struct {
 	asked    []string
 	askErr   error
 	lockErr  error
+	legacy   bool // un compte svc-kura d'une version précédente existe
 }
 
 func (f *fakeSys) system(dir string) system {
@@ -40,12 +41,9 @@ func (f *fakeSys) system(dir string) system {
 		removeAutostart: func() error { f.calls = append(f.calls, "rmautostart"); return nil },
 		stopTrays:       func() int { f.calls = append(f.calls, "stoptrays"); return 1 },
 		programDir:      func() string { return filepath.Join(dir, "prog") },
-		ensureAccount: func(n string) (string, bool, error) {
-			f.calls = append(f.calls, "account:"+n)
-			return "S-1-5-21-9-9-9-1001", true, nil
-		},
-		removeAccount: func(n string) error { f.calls = append(f.calls, "rmaccount:"+n); return nil },
-		accountSID:    func(n string) (string, error) { return "S-1-5-21-9-9-9-2000", nil },
+		legacyAccount:   func(n string) bool { return f.legacy },
+		removeAccount:   func(n string) error { f.calls = append(f.calls, "rmaccount:"+n); return nil },
+		accountSID:      func(n string) (string, error) { return "S-1-5-21-9-9-9-2000", nil },
 		validate: func(c string) int {
 			f.calls = append(f.calls, "validate")
 			return f.validate
@@ -125,10 +123,10 @@ func TestInstallFresh(t *testing.T) {
 	f := &fakeSys{t: t}
 	sys := f.system(dir)
 	cfg := writeConfig(t, dir, "")
-	if code := install(sys, cfg, "svc-kura", false); code != 0 {
+	if code := install(sys, cfg, false); code != 0 {
 		t.Fatalf("code %d ; appels %v", code, f.calls)
 	}
-	want := "admin acl binary account:svc-kura validate task autostart"
+	want := "admin acl binary validate task autostart"
 	if got := strings.Join(f.calls, " "); got != want {
 		t.Fatalf("ordre des étapes :\n reçu   %s\n attendu %s", got, want)
 	}
@@ -143,7 +141,7 @@ func TestInstallFresh(t *testing.T) {
 	if b, err := os.ReadFile(sys.configFile); err != nil || !strings.Contains(string(b), "acme-srv01") {
 		t.Fatalf("configuration non copiée : %v", err)
 	}
-	for _, w := range []string{"<UserId>S-1-5-21-9-9-9-1001</UserId>", "(A;;FRFX;;;S-1-5-21-9-9-9-2000)",
+	for _, w := range []string{"<UserId>S-1-5-18</UserId>", "(A;;FRFX;;;S-1-5-21-9-9-9-2000)",
 		"kura-agent.exe</Command>", "<Arguments>run --quiet --scheduled</Arguments>", "<Monday></Monday>"} {
 		if !strings.Contains(f.xml, w) {
 			t.Errorf("%q absent de la tâche", w)
@@ -156,7 +154,7 @@ func TestInstallFresh(t *testing.T) {
 	// Rejouer l'installation : secrets déjà là, rien à redemander, pas de sauvegarde de config.
 	f2 := &fakeSys{t: t}
 	sys2 := f2.system(dir)
-	if code := install(sys2, cfg, "svc-kura", false); code != 0 || len(f2.asked) != 0 {
+	if code := install(sys2, cfg, false); code != 0 || len(f2.asked) != 0 {
 		t.Fatalf("réinstallation : code %d, saisies %v", code, f2.asked)
 	}
 	if m, _ := filepath.Glob(sys.configFile + ".*.bak"); len(m) != 0 {
@@ -172,7 +170,7 @@ func TestInstallFresh(t *testing.T) {
 	}
 	// Configuration modifiée : l'ancienne est gardée.
 	cfg = writeConfig(t, dir, "logging:\n  level: debug\n")
-	if code := install(f2.system(dir), cfg, "svc-kura", false); code != 0 {
+	if code := install(f2.system(dir), cfg, false); code != 0 {
 		t.Fatalf("mise à jour : code %d", code)
 	}
 	if m, _ := filepath.Glob(sys.configFile + ".*.bak"); len(m) != 1 {
@@ -183,7 +181,7 @@ func TestInstallFresh(t *testing.T) {
 func TestInstallStopsWhenValidateFails(t *testing.T) {
 	dir := t.TempDir()
 	f := &fakeSys{t: t, validate: 3}
-	if code := install(f.system(dir), writeConfig(t, dir, ""), "svc-kura", false); code == 0 {
+	if code := install(f.system(dir), writeConfig(t, dir, ""), false); code == 0 {
 		t.Fatal("install réussi malgré validate en échec")
 	}
 	if f.xml != "" || strings.Contains(strings.Join(f.calls, " "), "task") {
@@ -191,7 +189,7 @@ func TestInstallStopsWhenValidateFails(t *testing.T) {
 	}
 	// --skip-validate passe outre.
 	f = &fakeSys{t: t, validate: 3}
-	if code := install(f.system(dir), writeConfig(t, dir, ""), "svc-kura", true); code != 0 || f.xml == "" {
+	if code := install(f.system(dir), writeConfig(t, dir, ""), true); code != 0 || f.xml == "" {
 		t.Fatalf("--skip-validate : code %d", code)
 	}
 }
@@ -199,7 +197,7 @@ func TestInstallStopsWhenValidateFails(t *testing.T) {
 func TestInstallStopsWhenSecretMissing(t *testing.T) {
 	dir := t.TempDir()
 	f := &fakeSys{t: t, askErr: errors.New("EOF")}
-	if code := install(f.system(dir), writeConfig(t, dir, ""), "svc-kura", false); code == 0 {
+	if code := install(f.system(dir), writeConfig(t, dir, ""), false); code == 0 {
 		t.Fatal("install réussi sans secret")
 	}
 	if got := strings.Join(f.calls, " "); strings.Contains(got, "validate") || strings.Contains(got, "task") {
@@ -212,7 +210,7 @@ func TestInstallBadConfigTouchesNothing(t *testing.T) {
 	f := &fakeSys{t: t}
 	bad := filepath.Join(dir, "bad.yaml")
 	os.WriteFile(bad, []byte("version: 1\n"), 0o644)
-	if code := install(f.system(dir), bad, "svc-kura", false); code != exitInstallConfig {
+	if code := install(f.system(dir), bad, false); code != exitInstallConfig {
 		t.Fatalf("code %d", code)
 	}
 	if got := strings.Join(f.calls, " "); got != "admin" {
@@ -225,7 +223,8 @@ func TestUninstall(t *testing.T) {
 	f := &fakeSys{t: t}
 	sys := f.system(dir)
 	os.MkdirAll(sys.dataDir, 0o755)
-	if code := uninstall(sys, "svc-kura", false, false); code != 0 {
+	f.legacy = true
+	if code := uninstall(sys, false); code != 0 {
 		t.Fatalf("code %d", code)
 	}
 	if got := strings.Join(f.calls, " "); got != "admin lock rmautostart stoptrays rmtask rmaccount:svc-kura rmprog" {
@@ -235,17 +234,17 @@ func TestUninstall(t *testing.T) {
 		t.Fatal("données effacées sans --purge")
 	}
 	f = &fakeSys{t: t}
-	if code := uninstall(f.system(dir), "svc-kura", true, true); code != 0 {
+	if code := uninstall(f.system(dir), true); code != 0 {
 		t.Fatalf("code %d", code)
 	}
 	if strings.Contains(strings.Join(f.calls, " "), "rmaccount") {
-		t.Fatal("compte supprimé malgré --keep-account")
+		t.Fatal("aucun ancien compte : rien à supprimer")
 	}
 	if _, err := os.Stat(sys.dataDir); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("--purge n'a pas effacé les données")
 	}
 	f = &fakeSys{t: t, lockErr: lock.ErrBusy}
-	if code := uninstall(f.system(dir), "svc-kura", false, false); code == 0 || strings.Contains(strings.Join(f.calls, " "), "rmtask") {
+	if code := uninstall(f.system(dir), false); code == 0 || strings.Contains(strings.Join(f.calls, " "), "rmtask") {
 		t.Fatalf("désinstallation pendant une sauvegarde : code %d, %v", code, f.calls)
 	}
 }
@@ -274,13 +273,24 @@ func TestInstallFallsBackWithoutRunNowRights(t *testing.T) {
 	}
 	out := &strings.Builder{}
 	sys.out = out
-	if code := install(sys, writeConfig(t, dir, ""), "svc-kura", false); code != 0 {
+	if code := install(sys, writeConfig(t, dir, ""), false); code != 0 {
 		t.Fatalf("code %d", code)
 	}
 	if !strings.Contains(out.String(), "que pour les administrateurs") {
 		t.Fatalf("avertissement absent :\n%s", out)
 	}
-	if b, err := os.ReadFile(filepath.Join(sys.dataDir, "task.xml")); err != nil || !strings.Contains(string(b), "<LogonType>S4U</LogonType>") {
+	if b, err := os.ReadFile(filepath.Join(sys.dataDir, "task.xml")); err != nil || !strings.Contains(string(b), "<LogonType>ServiceAccount</LogonType>") {
 		t.Fatalf("task.xml : %v", err)
+	}
+}
+
+func TestInstallRemovesLegacyAccount(t *testing.T) {
+	dir := t.TempDir()
+	f := &fakeSys{t: t, legacy: true}
+	if code := install(f.system(dir), writeConfig(t, dir, ""), false); code != 0 {
+		t.Fatalf("code %d", code)
+	}
+	if got := strings.Join(f.calls, " "); got != "admin acl binary validate task rmaccount:svc-kura autostart" {
+		t.Fatalf("étapes : %s", got)
 	}
 }

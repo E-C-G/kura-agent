@@ -1,6 +1,6 @@
 // Package procs trouve et arrête des processus par nom, toutes sessions confondues.
 //
-// Sur un Windows Server multi-sessions, run tourne sous svc-kura (session 0) alors
+// Sur un Windows Server multi-sessions, run tourne sous SYSTEM (session 0) alors
 // qu'Outlook tourne dans la session de l'utilisateur : seul un arrêt forcé est
 // possible d'ici. La fermeture douce passe par l'icône de la session.
 package procs

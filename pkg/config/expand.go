@@ -42,8 +42,8 @@ func (e UnresolvedError) Error() string { return e.msg }
 // ExpandString remplace ${PROFILE:compte} et ${VAR} dans s.
 //
 // ${PROFILE:compte} est la forme à utiliser pour tout chemin d'utilisateur :
-// la tâche tourne sous svc-kura, donc ${LOCALAPPDATA} ou ${USERNAME}
-// désigneraient le profil de svc-kura et non celui de l'utilisateur.
+// la tâche tourne sous SYSTEM, donc ${LOCALAPPDATA} ou ${USERNAME}
+// désigneraient le profil de SYSTEM et non celui de l'utilisateur.
 func ExpandString(s string, env Env) (string, error) {
 	var firstErr error
 	out := varPattern.ReplaceAllStringFunc(s, func(m string) string {

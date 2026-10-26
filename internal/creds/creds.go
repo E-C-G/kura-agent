@@ -4,7 +4,7 @@
 // Sous Windows, chaque secret est chiffré par DPAPI dans la portée de la machine, et
 // le dossier n'est lisible que par SYSTEM et les Administrateurs (ACL protégée, posée
 // à chaque écriture). `kura-agent credentials set` se lance donc depuis une console
-// d'administration, et la tâche (svc-kura, administrateur) relit les mêmes secrets.
+// d'administration, et la tâche (SYSTEM) relit les mêmes secrets.
 //
 // Hors Windows (développement uniquement), le secret est stocké en clair, lisible
 // par le seul propriétaire du fichier.

@@ -11,7 +11,7 @@ profile:
   name: acme-srv01
   aws_cli: "C:/Program Files/Amazon/AWSCLIV2/aws.exe"   # vide = recherche dans le PATH
   aws_credentials: credential:wasabi   # clés du coffre : kura-agent credentials set-aws wasabi
-  # aws_profile: wasabi          # ou un profil de ~/.aws/credentials (pas avec svc-kura)
+  # aws_profile: wasabi          # ou un profil de ~/.aws/credentials (déconseillé : tâche sous SYSTEM)
   endpoint: https://s3.eu-central-1.wasabisys.com
   region: eu-central-1
   bucket: acme-srv01
@@ -53,7 +53,7 @@ jobs:
 
   - id: outlook
     name: Outlook alice
-    source: "${PROFILE:alice}/AppData/Local/Microsoft/Outlook"   # profil de alice, pas celui de svc-kura
+    source: "${PROFILE:alice}/AppData/Local/Microsoft/Outlook"   # profil de alice, pas celui de SYSTEM
     destination: "C/alice/Outlook"
     delete: true
     depends_on_pre_task: outlook.exe   # job sauté si Outlook n'a pas pu être fermé

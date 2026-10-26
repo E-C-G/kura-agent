@@ -15,7 +15,7 @@ Console d'administration associée : [E-C-G/kura-ctl](https://github.com/E-C-G/k
 | 1 | `pkg/config` : format YAML, `${PROFILE:compte}`, validation | **fait** |
 | 2 | `kura-agent run` sans interface : garde-fou, nouvelles tentatives, codes de sortie, `status.json`, journaux | **fait** |
 | 3 | Bilan vers healthchecks.io ou un webhook (Make, n8n…), coffre de secrets `credentials` | **fait** |
-| 4 | `install` / `uninstall` : compte `svc-kura`, tâche `\Kura\Sync` sans mot de passe, ACL, clés Wasabi dans le coffre | **fait** |
+| 4 | `install` / `uninstall` : tâche `\Kura\Sync` sous SYSTEM, ACL, clés Wasabi dans le coffre | **fait** |
 | 5 | Icône par session : état, préavis et fermeture douce d'Outlook, relance, annulation, suspension | **fait** |
 | 6 | Restauration (V2) | à faire |
 
@@ -115,18 +115,15 @@ une invite de commandes **« Exécuter en tant qu'administrateur »**, le zip de
    - protège `C:\ProgramData\Kura` (Utilisateurs en lecture seule, coffre réservé aux administrateurs) ;
    - copie la configuration dans `C:\ProgramData\Kura\config.yaml` et l'exécutable dans
      `C:\Program Files\Kura\` ;
-   - crée le compte local **`svc-kura`** : membre des Administrateurs (il doit lire le profil des
-     utilisateurs et arrêter Outlook dans leur session), droit « Ouvrir une session en tant que tâche »,
-     ouverture de session locale et Bureau à distance refusées, masqué de l'écran d'accueil. Son mot de
-     passe est aléatoire et n'est ni affiché ni gardé : personne n'en a besoin ;
    - demande les secrets référencés par `credential:` qui manquent au coffre (saisie masquée) ;
    - lance `validate` (configuration, aws.exe, accès au bucket, bilan) et **s'arrête là** en cas
      d'échec, sans toucher à la tâche ;
-   - crée ou remplace la tâche **`\Kura\Sync`** : compte `svc-kura` en mode « exécuter même si
-     l'utilisateur n'est pas connecté » **sans mot de passe stocké** (S4U), autorisations maximales,
+   - crée ou remplace la tâche **`\Kura\Sync`** : compte **SYSTEM** (aucun mot de passe ; il lit
+     le profil des utilisateurs et arrête Outlook dans leur session), autorisations maximales,
      déclencheur tiré de `schedule`, rattrapage si `run_if_missed`, pas de seconde instance, arrêt
      par Windows à `max_duration` + 15 min (l'agent s'arrête lui-même à `max_duration`), lancement
      autorisé aux comptes de `tray.allow_run_now` ; action `run --quiet --scheduled` ;
+   - supprime le compte `svc-kura` des versions 0.3.0 à 0.4.1 s'il existe ;
    - copie `kura-agentw.exe` (le même programme, sans console) et le lance à chaque ouverture de
      session (`HKLM\...\Run`) : l'icône ne reste ouverte que pour les comptes de `tray.users`. Dans
      une session déjà ouverte, la lancer à la main : `"C:\Program Files\Kura\kura-agentw.exe" tray`.
@@ -137,7 +134,7 @@ une invite de commandes **« Exécuter en tant qu'administrateur »**, le zip de
    "C:\Program Files\Kura\kura-agent.exe" status
    ```
    La simulation ne ferme pas Outlook et ne modifie rien dans le bucket. `schtasks /Run` lance une
-   vraie exécution sous `svc-kura`, comme la nuit.
+   vraie exécution sous SYSTEM, comme la nuit.
 
 ### Migrer depuis un script planifié
 
@@ -148,19 +145,22 @@ mécanismes et comparer, puis désactiver et supprimer l'ancienne tâche et son 
 ### Désinstaller
 
 ```bat
-kura-agent uninstall              :: tâche, compte svc-kura et son profil, C:\Program Files\Kura
+kura-agent uninstall              :: tâche, icône, C:\Program Files\Kura
 kura-agent uninstall --purge      :: efface aussi C:\ProgramData\Kura (configuration, secrets, journaux)
 ```
 
-`--keep-account` garde le compte. `uninstall` refuse de s'exécuter pendant une sauvegarde.
+`uninstall` refuse de s'exécuter pendant une sauvegarde.
 
-### Si la tâche ne démarre pas
+### Pourquoi SYSTEM
 
-Le mode sans mot de passe (S4U) suffit pour lire les disques locaux, arrêter Outlook et joindre
-Wasabi en HTTPS, mais il ne donne accès à aucun partage réseau (`\\serveur\partage`) : une source sur
-un partage n'est pas prise en charge. Si une stratégie de sécurité interdit ce mode, en repli :
-définir un mot de passe à `svc-kura` (`net user svc-kura *`), puis dans le Planificateur décocher « Ne
-pas stocker le mot de passe » sur `\Kura\Sync` et le saisir.
+Jusqu'à la v0.4.1, la tâche tournait sous un compte dédié `svc-kura`, administrateur, sans mot de
+passe stocké (mode S4U). Sur un poste Windows 11, Windows a refusé toute tâche S4U pour un autre compte
+(« Accès refusé », même en autorisations limitées), alors qu'une tâche sous SYSTEM est acceptée.
+`svc-kura` étant administrateur, il n'apportait pas de séparation réelle face à SYSTEM ; SYSTEM évite
+en plus tout compte et tout mot de passe à gérer.
+
+Une source sur un partage réseau (`\\serveur\partage`) serait lue avec le compte de la machine :
+non prise en charge.
 
 ## L'icône (étape 5)
 
@@ -312,7 +312,7 @@ kura-agent credentials delete webhook
 
 Sous Windows, chaque secret est chiffré par DPAPI dans la portée de la machine (illisible copié
 ailleurs) et rangé dans `C:\ProgramData\Kura\credentials\`, dont l'ACL n'autorise que SYSTEM et les
-Administrateurs : la tâche (`svc-kura`) et une console d'administration lisent les mêmes secrets, un
+Administrateurs : la tâche (SYSTEM) et une console d'administration lisent les mêmes secrets, un
 utilisateur ordinaire aucun. Les clés Wasabi passent à `aws.exe` par ses variables d'environnement,
 jamais par la ligne de commande ni les journaux.
 
@@ -399,7 +399,7 @@ internal/report/    bilan vers healthchecks ou webhook
 internal/ipc/       dialogue run ↔ icône : messages JSON, canal nommé par session
 internal/tray/      icône : modèle d'affichage (portable), interface Win32
 internal/creds/     coffre de secrets (DPAPI sous Windows)
-internal/setup/     compte svc-kura, droits, ACL, copie des fichiers (install)
+internal/setup/     ACL, copie des fichiers, icône au démarrage, ancien compte svc-kura (install)
 internal/schedtask/ tâche \Kura\Sync : XML du Planificateur, schtasks
 internal/paths/     emplacements sur disque
 ```

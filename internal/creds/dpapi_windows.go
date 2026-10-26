@@ -27,10 +27,10 @@ func takeBlob(out *windows.DataBlob) []byte {
 
 // protect chiffre dans la portée de la machine : tout compte de ce poste peut déchiffrer
 // le blob, c'est l'ACL du dossier (SYSTEM et Administrateurs seuls) qui en réserve la
-// lecture. La tâche (svc-kura, sans mot de passe stocké) et une console d'administration
+// lecture. La tâche (SYSTEM) et une console d'administration
 // lisent donc les mêmes secrets. Copié sur une autre machine, le blob est illisible.
 // Un blob en portée utilisateur (v0.2.0) ne se relit que sous le compte qui l'a écrit :
-// install le réécrit en portée machine (Store.Set) pour que svc-kura puisse le lire.
+// install le réécrit en portée machine (Store.Set) pour que la tâche puisse le lire.
 func protect(plain []byte) ([]byte, error) {
 	var out windows.DataBlob
 	if err := windows.CryptProtectData(blob(plain), nil, blob(entropy), 0, nil,

@@ -39,7 +39,7 @@ type Profile struct {
 	AWSProfile string `yaml:"aws_profile"` // profil de ~/.aws/credentials ; jamais de clé ici
 	// AWSCredentials désigne les clés d'accès rangées dans le coffre de l'agent
 	// (credential:<nom>, saisies par `kura-agent credentials set-aws <nom>`). C'est la
-	// forme à utiliser avec le compte svc-kura, qui n'a pas de ~/.aws. Exclut aws_profile.
+	// forme à utiliser : la tâche tourne sous SYSTEM, qui n'a pas de ~/.aws utile. Exclut aws_profile.
 	AWSCredentials    string `yaml:"aws_credentials"`
 	Endpoint          string `yaml:"endpoint"`
 	Region            string `yaml:"region"`
