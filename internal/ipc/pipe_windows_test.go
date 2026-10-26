@@ -84,3 +84,41 @@ func pipeOfCurrentUser() (string, error) {
 	v, _, err := k.GetStringValue(regValue)
 	return v, err
 }
+
+// Fermer le canal pendant qu'Accept attend ne doit pas bloquer (l'icône qui quitte).
+func TestCloseWhileAccepting(t *testing.T) {
+	self, _ := os.Executable()
+	saved := serverPrefix
+	serverPrefix = append(serverPrefix, strings.ToLower(filepath.Base(self)))
+	defer func() { serverPrefix = saved }()
+	for i := 0; i < 5; i++ {
+		l, err := Listen()
+		if err != nil {
+			t.Fatal(err)
+		}
+		accepted := make(chan error, 1)
+		go func() {
+			_, err := l.Accept()
+			accepted <- err
+		}()
+		for !l.isAccepting() {
+			time.Sleep(time.Millisecond)
+		}
+		time.Sleep(20 * time.Millisecond) // laisse ConnectNamedPipe commencer son attente
+		closed := make(chan error, 1)
+		go func() { closed <- l.Close() }()
+		select {
+		case <-closed:
+		case <-time.After(5 * time.Second):
+			t.Fatal("Close bloqué pendant qu'Accept attend")
+		}
+		select {
+		case err := <-accepted:
+			if err == nil {
+				t.Fatal("Accept a rendu une connexion après Close")
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("Accept toujours en attente après Close")
+		}
+	}
+}

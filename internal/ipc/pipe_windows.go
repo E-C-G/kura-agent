@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -154,6 +155,10 @@ func (c *conn) Close() error {
 type Listener struct {
 	h    windows.Handle
 	Name string
+
+	mu        sync.Mutex
+	closed    bool
+	accepting bool // un ConnectNamedPipe synchrone attend sur h
 }
 
 // Listen crée le canal de l'icône sous un nom aléatoire et le publie dans
@@ -201,6 +206,11 @@ func Listen() (*Listener, error) {
 }
 
 // Close retire la publication et ferme le canal.
+//
+// Fermer le handle pendant qu'un autre fil attend dans ConnectNamedPipe (synchrone)
+// peut bloquer indéfiniment : Windows sérialise les opérations sur un handle
+// synchrone, la fermeture attend la fin de l'attente. Close réveille donc d'abord
+// Accept en se connectant lui-même au canal, puis ferme.
 func (l *Listener) Close() error {
 	if k, err := registry.OpenKey(registry.CURRENT_USER, regKey, registry.QUERY_VALUE|registry.SET_VALUE); err == nil {
 		if v, _, err := k.GetStringValue(regValue); err == nil && v == l.Name {
@@ -208,13 +218,51 @@ func (l *Listener) Close() error {
 		}
 		k.Close()
 	}
+	l.mu.Lock()
+	if l.closed {
+		l.mu.Unlock()
+		return nil
+	}
+	l.closed = true
+	l.mu.Unlock()
+	if name, err := windows.UTF16PtrFromString(`\\.\pipe\` + l.Name); err == nil {
+		for deadline := time.Now().Add(2 * time.Second); l.isAccepting() && time.Now().Before(deadline); {
+			h, err := windows.CreateFile(name, windows.GENERIC_READ|windows.GENERIC_WRITE, 0, nil, windows.OPEN_EXISTING, 0, 0)
+			if err == nil {
+				windows.CloseHandle(h)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
 	return windows.CloseHandle(l.h)
+}
+
+func (l *Listener) isAccepting() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.accepting
 }
 
 // Accept attend la connexion de run. La connexion rendue, une fois fermée, libère le
 // canal pour la suivante (le handle est gardé d'une exécution à l'autre).
 func (l *Listener) Accept() (io.ReadWriteCloser, error) {
+	l.mu.Lock()
+	if l.closed {
+		l.mu.Unlock()
+		return nil, net.ErrClosed
+	}
+	l.accepting = true
+	l.mu.Unlock()
 	err := windows.ConnectNamedPipe(l.h, nil)
+	l.mu.Lock()
+	l.accepting = false
+	closed := l.closed
+	l.mu.Unlock()
+	if closed {
+		// Réveillé par Close : la connexion est la sienne.
+		_ = windows.DisconnectNamedPipe(l.h)
+		return nil, net.ErrClosed
+	}
 	if err != nil && !errors.Is(err, windows.ERROR_PIPE_CONNECTED) {
 		return nil, err
 	}

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"os/exec"
 	"os/user"
@@ -534,6 +535,9 @@ func (a *app) serve() {
 	a.mu.Unlock()
 	for {
 		conn, err := l.Accept()
+		if errors.Is(err, net.ErrClosed) {
+			return // icône qui quitte
+		}
 		if err != nil {
 			a.log.Warn("connexion de run", "err", err)
 			time.Sleep(time.Second)
