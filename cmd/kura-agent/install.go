@@ -195,9 +195,10 @@ func install(sys system, cfgPath string, skipValidate bool) int {
 	if err != nil {
 		return fail(exitInstallConfig, "tâche planifiée : %v", err)
 	}
-	// Copie de la définition, sans secret, pour diagnostiquer un refus de schtasks.
+	// Copie de la définition, sans secret, pour diagnostiquer un refus de schtasks ;
+	// même encodage que le fichier passé à schtasks (UTF-16), donc réutilisable tel quel.
 	taskXML := filepath.Join(sys.dataDir, "task.xml")
-	if err := os.WriteFile(taskXML, []byte(def), 0o644); err != nil {
+	if err := os.WriteFile(taskXML, schedtask.UTF16(def), 0o644); err != nil {
 		fmt.Fprintf(out, "Attention : %s non écrit (%v)\n", taskXML, err)
 	}
 	var partial *schedtask.RunNowNotAppliedError

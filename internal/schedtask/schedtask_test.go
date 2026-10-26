@@ -51,14 +51,14 @@ func TestWeekdaysAtNight(t *testing.T) {
 		`<URI>\Kura\Sync</URI>`,
 		"<StartBoundary>2026-10-26T22:30:00</StartBoundary>",
 		"<ScheduleByWeek>", "<Monday></Monday>", "<Friday></Friday>", "<WeeksInterval>1</WeeksInterval>",
-		"<UserId>S-1-5-18</UserId>", "<LogonType>ServiceAccount</LogonType>", "<RunLevel>HighestAvailable</RunLevel>",
+		"<UserId>S-1-5-18</UserId>\n      <RunLevel>HighestAvailable</RunLevel>",
 		"<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>",
 		"<StartWhenAvailable>true</StartWhenAvailable>",
 		"<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>",
 		"<ExecutionTimeLimit>PT6H15M</ExecutionTimeLimit>",
 		`<Command>C:\Program Files\Kura\kura-agent.exe</Command>`, "<Arguments>run --quiet</Arguments>",
 		"<SecurityDescriptor>D:(A;;FA;;;SY)(A;;FA;;;BA)(A;;FRFX;;;S-1-5-21-1-2-3-1002)</SecurityDescriptor>")
-	for _, absent := range []string{"Saturday", "Sunday", "ScheduleByDay", "Repetition"} {
+	for _, absent := range []string{"Saturday", "Sunday", "ScheduleByDay", "Repetition", "LogonType"} {
 		if strings.Contains(x, absent) {
 			t.Errorf("%s inattendu", absent)
 		}

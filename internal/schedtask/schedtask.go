@@ -46,9 +46,11 @@ func XML(s config.Schedule, p Params) (string, error) {
 	if p.UserID == "" {
 		p.UserID = SystemSID
 	}
+	// Dans le XML, une tâche SYSTEM n'a pas de LogonType (c'est ainsi que Windows
+	// l'exporte) : « ServiceAccount » n'est qu'une valeur de l'API COM, refusée ici.
 	logon := "S4U"
 	if p.UserID == SystemSID {
-		logon = "ServiceAccount"
+		logon = ""
 	}
 	trig, err := trigger(s, p.Now)
 	if err != nil {
@@ -302,7 +304,7 @@ type principals struct {
 type principal struct {
 	ID        string `xml:"id,attr"`
 	UserID    string `xml:"UserId"`
-	LogonType string `xml:"LogonType"`
+	LogonType string `xml:"LogonType,omitempty"`
 	RunLevel  string `xml:"RunLevel"`
 }
 

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf16"
 
 	"github.com/E-C-G/kura-agent/internal/creds"
 	"github.com/E-C-G/kura-agent/internal/lock"
@@ -279,7 +280,7 @@ func TestInstallFallsBackWithoutRunNowRights(t *testing.T) {
 	if !strings.Contains(out.String(), "que pour les administrateurs") {
 		t.Fatalf("avertissement absent :\n%s", out)
 	}
-	if b, err := os.ReadFile(filepath.Join(sys.dataDir, "task.xml")); err != nil || !strings.Contains(string(b), "<LogonType>ServiceAccount</LogonType>") {
+	if b, err := os.ReadFile(filepath.Join(sys.dataDir, "task.xml")); err != nil || !strings.Contains(fromUTF16(b), "<UserId>S-1-5-18</UserId>") {
 		t.Fatalf("task.xml : %v", err)
 	}
 }
@@ -293,4 +294,15 @@ func TestInstallRemovesLegacyAccount(t *testing.T) {
 	if got := strings.Join(f.calls, " "); got != "admin acl binary validate task rmaccount:svc-kura autostart" {
 		t.Fatalf("étapes : %s", got)
 	}
+}
+
+func fromUTF16(b []byte) string {
+	if len(b) < 2 || b[0] != 0xFF || b[1] != 0xFE {
+		return ""
+	}
+	u := make([]uint16, (len(b)-2)/2)
+	for i := range u {
+		u[i] = uint16(b[2+2*i]) | uint16(b[3+2*i])<<8
+	}
+	return string(utf16.Decode(u))
 }
