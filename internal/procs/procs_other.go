@@ -35,3 +35,6 @@ func (system) Find(name string) ([]Process, error) {
 }
 
 func (system) Terminate(p Process) error { return syscall.Kill(p.PID, syscall.SIGKILL) }
+
+// EnableDebugPrivilege : sans objet hors Windows.
+func EnableDebugPrivilege() error { return nil }

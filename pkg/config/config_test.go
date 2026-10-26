@@ -339,3 +339,35 @@ func TestReadTray(t *testing.T) {
 		t.Fatalf("ReadTray = %+v, %v", tr, err)
 	}
 }
+
+func TestMissingProfileOnlyDisablesItsJob(t *testing.T) {
+	y := `
+version: 1
+profile:
+  endpoint: https://s3.eu-central-1.wasabisys.com
+  bucket: acme-srv01
+schedule:
+  type: daily
+  time: "22:30"
+jobs:
+  - id: data
+    source: E:/
+    destination: DATA
+  - id: outlook-bob
+    source: ${PROFILE:bob}/AppData/Local/Microsoft/Outlook
+    destination: C/bob/Outlook
+`
+	c, err := Parse([]byte(y), LoadOptions{Env: testEnv()})
+	if err != nil {
+		t.Fatalf("un profil absent ne doit pas invalider toute la configuration : %v", err)
+	}
+	if c.Jobs[0].Unavailable != "" || !strings.Contains(c.Jobs[1].Unavailable, "bob") || len(c.Unavailable()) != 1 {
+		t.Fatalf("jobs : %+v", c.Jobs)
+	}
+	if _, err := Parse([]byte(y), LoadOptions{Env: testEnv(), CheckSystem: true}); err == nil || !strings.Contains(err.Error(), "jobs[1].source") {
+		t.Fatalf("validate doit signaler le profil absent : %v", err)
+	}
+	if _, err := Parse([]byte(strings.Replace(y, "${PROFILE:bob}", "${PROFILE}", 1)), LoadOptions{Env: testEnv()}); err == nil {
+		t.Fatal("une variable mal écrite reste une erreur de configuration")
+	}
+}

@@ -52,8 +52,10 @@ var (
 	taskDialogErr  error
 )
 
-// loadTaskDialog active comctl32 v6 sur le thread courant (le thread de l'interface,
-// verrouillé) et résout TaskDialogIndirect.
+// loadTaskDialog active comctl32 v6 sur le thread courant et résout
+// TaskDialogIndirect. Appelée une fois dans Main, sur le thread de l'interface
+// (verrouillé), avant la boucle de messages : le contexte reste actif pour toute la
+// vie du thread et n'est jamais désactivé.
 func loadTaskDialog() (uintptr, error) {
 	taskDialogOnce.Do(func() {
 		dir := filepath.Join(os.TempDir(), "Kura")
@@ -101,12 +103,23 @@ const (
 	tdWarningIcon    = 0xFFFF // TD_WARNING_ICON = MAKEINTRESOURCEW(-1)
 )
 
-// État du dialogue en cours (un seul à la fois, sur le thread de l'interface).
+// État du dialogue en cours (un seul à la fois : les préavis sont mis en file par
+// app.prompt, et l'affichage se fait sur le thread de l'interface).
 var dlg struct {
 	deadline time.Time
 	shown    int
 	timedOut bool
 	process  string
+}
+
+// dlgMem garde sur le tas tout ce que comctl32 lit ou écrit pendant le dialogue :
+// la pile d'une goroutine peut être déplacée pendant que le dialogue est ouvert (le
+// rappel exécute du Go), une adresse de pile passée au code natif deviendrait fausse.
+var dlgMem struct {
+	cfg     *[160]byte
+	buttons []byte
+	pressed *int32
+	strs    []*uint16
 }
 
 var dialogCallback = windows.NewCallback(func(hwnd, msg, wParam, lParam, data uintptr) uintptr {
@@ -166,6 +179,7 @@ func closeDialog(owner uintptr, m ipc.Msg) (string, error) {
 	closeTxt := utf16("Fermer maintenant")
 	var postponeTxt *uint16
 	buttons := make([]byte, 0, 24)
+	dlgMem.strs = []*uint16{title, instr, content, closeTxt}
 	addButton := func(id int32, text *uint16) {
 		var b [12]byte // TASKDIALOG_BUTTON, structure compactée (pack 1)
 		binary.LittleEndian.PutUint32(b[0:], uint32(id))
@@ -181,15 +195,19 @@ func closeDialog(owner uintptr, m ipc.Msg) (string, error) {
 			label += " (dernier report)"
 		}
 		postponeTxt = utf16(label)
+		dlgMem.strs = append(dlgMem.strs, postponeTxt)
 		addButton(btnPostpone, postponeTxt)
 	}
+	dlgMem.buttons = buttons
 
 	// TASKDIALOGCONFIG est déclarée avec #pragma pack(1) : on la construit octet par
 	// octet (160 octets en 64 bits) plutôt qu'avec une structure Go alignée.
 	if runtime.GOARCH != "amd64" && runtime.GOARCH != "arm64" {
 		return "", errors.New("fenêtre de préavis : Windows 64 bits uniquement")
 	}
-	var cfg [160]byte
+	dlgMem.cfg = new([160]byte)
+	dlgMem.pressed = new(int32)
+	cfg := dlgMem.cfg
 	put32 := func(off int, v uint32) { binary.LittleEndian.PutUint32(cfg[off:], v) }
 	putp := func(off int, v uintptr) { binary.LittleEndian.PutUint64(cfg[off:], uint64(v)) }
 	put32(0, uint32(len(cfg)))
@@ -200,18 +218,13 @@ func closeDialog(owner uintptr, m ipc.Msg) (string, error) {
 	putp(44, uintptr(unsafe.Pointer(instr)))
 	putp(52, uintptr(unsafe.Pointer(content)))
 	put32(60, uint32(len(buttons)/12))
-	putp(64, uintptr(unsafe.Pointer(&buttons[0])))
+	putp(64, uintptr(unsafe.Pointer(&dlgMem.buttons[0])))
 	put32(72, btnCloseNow)
 	putp(140, dialogCallback)
 
-	var pressed int32
-	hr, _, _ := syscallN(proc, uintptr(unsafe.Pointer(&cfg[0])), uintptr(unsafe.Pointer(&pressed)), 0, 0)
-	runtime.KeepAlive(title)
-	runtime.KeepAlive(instr)
-	runtime.KeepAlive(content)
-	runtime.KeepAlive(closeTxt)
-	runtime.KeepAlive(postponeTxt)
-	runtime.KeepAlive(buttons)
+	hr, _, _ := syscallN(proc, uintptr(unsafe.Pointer(&dlgMem.cfg[0])), uintptr(unsafe.Pointer(dlgMem.pressed)), 0, 0)
+	pressed := *dlgMem.pressed
+	dlgMem.cfg, dlgMem.buttons, dlgMem.pressed, dlgMem.strs = nil, nil, nil, nil
 	if hr != 0 {
 		return "", fmt.Errorf("TaskDialogIndirect : 0x%x", uint32(hr))
 	}

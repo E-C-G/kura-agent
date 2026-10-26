@@ -3,18 +3,23 @@
 package ipc
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
+	"golang.org/x/sys/windows/registry"
 )
 
 var (
@@ -29,25 +34,49 @@ const (
 	wtsUserName   = 5
 	wtsDomainName = 7
 	pollEvery     = 50 * time.Millisecond
+	writeTimeout  = 10 * time.Second
+
+	// Clé de l'utilisateur où l'icône publie le nom de son canal.
+	regKey   = `Software\Kura`
+	regValue = "Pipe"
 )
 
-// serverNames : exécutables admis à servir le canal (en minuscules). Les tests y
-// ajoutent leur propre binaire.
-var serverNames = map[string]bool{"kura-agent.exe": true, "kura-agentw.exe": true}
+// serverPrefix : seuls les exécutables Kura (y compris un kura-agentw.exe.old-…
+// renommé par une mise à jour pendant qu'il tournait) peuvent servir le canal. Le
+// dossier de l'exécutable, réservé aux administrateurs, fait la vraie garantie.
+var serverPrefix = []string{"kura-agent"}
 
-// PipeName est le canal de l'icône d'une session.
-func PipeName(session int) string { return `\\.\pipe\Kura-` + strconv.Itoa(session) }
+// Le nom du canal est aléatoire et publié dans HKCU de l'utilisateur de la session :
+// un autre utilisateur ne peut ni le deviner pour le prendre avant l'icône, ni le
+// remplacer (il n'a pas accès à cette ruche).
+func pipePattern(session int) *regexp.Regexp {
+	return regexp.MustCompile(`^Kura-` + strconv.Itoa(session) + `-[0-9a-f]{32}$`)
+}
+
+func newPipeName(session uint32) (string, error) {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("Kura-%d-%s", session, hex.EncodeToString(b[:])), nil
+}
 
 // conn lit par PeekNamedPipe : une lecture synchrone bloquée sur un canal empêcherait
 // toute écriture sur le même handle (Windows sérialise les E/S synchrones d'un handle).
 // On ne lit donc que ce qui est déjà arrivé, et on attend par petites pauses.
 type conn struct {
-	mu     sync.Mutex // handle et lecture
-	wmu    sync.Mutex
-	h      windows.Handle
-	closed bool
-	close  func(windows.Handle) error
+	mu        sync.Mutex // handle et lecture
+	wmu       sync.Mutex
+	h         windows.Handle
+	closed    bool
+	gone      atomic.Bool // fermée : plus aucune écriture
+	nowait    bool        // côté run : écritures non bloquantes, avec délai
+	close     func(windows.Handle) error
+	serverSID string // côté run : compte du processus qui sert le canal
 }
+
+// ServerSID renvoie le SID du compte de l'icône qui sert le canal (côté run).
+func (c *conn) ServerSID() string { return c.serverSID }
 
 func (c *conn) Read(b []byte) (int, error) {
 	for {
@@ -83,21 +112,34 @@ func (c *conn) Read(b []byte) (int, error) {
 	}
 }
 
+// Write : côté run, le handle est en PIPE_NOWAIT : une icône qui ne lit plus (ou un
+// canal au tampon nul) ne bloque jamais run, l'écriture abandonne après writeTimeout.
 func (c *conn) Write(b []byte) (int, error) {
 	c.wmu.Lock()
 	defer c.wmu.Unlock()
+	deadline := time.Now().Add(writeTimeout)
 	written := 0
 	for written < len(b) {
+		if c.gone.Load() {
+			return written, io.ErrClosedPipe
+		}
 		var n uint32
 		if err := windows.WriteFile(c.h, b[written:], &n, nil); err != nil {
 			return written, err
 		}
 		written += int(n)
+		if n == 0 {
+			if !c.nowait || time.Now().After(deadline) {
+				return written, errors.New("canal saturé : l'icône ne lit plus")
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
 	}
 	return written, nil
 }
 
 func (c *conn) Close() error {
+	c.gone.Store(true)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.closed {
@@ -110,11 +152,12 @@ func (c *conn) Close() error {
 // Listener est le canal de l'icône, accessible au seul utilisateur de la session,
 // à SYSTEM et aux Administrateurs (dont svc-kura).
 type Listener struct {
-	h windows.Handle
+	h    windows.Handle
+	Name string
 }
 
-// Listen crée le canal de la session courante. Il échoue si le nom est déjà pris
-// (autre icône, ou processus qui usurperait le canal).
+// Listen crée le canal de l'icône sous un nom aléatoire et le publie dans
+// HKCU\Software\Kura (valeur Pipe), où run le lit.
 func Listen() (*Listener, error) {
 	var session uint32
 	if err := windows.ProcessIdToSessionId(windows.GetCurrentProcessId(), &session); err != nil {
@@ -129,7 +172,11 @@ func Listen() (*Listener, error) {
 		return nil, err
 	}
 	sa := windows.SecurityAttributes{Length: uint32(unsafe.Sizeof(windows.SecurityAttributes{})), SecurityDescriptor: sd}
-	name, err := windows.UTF16PtrFromString(PipeName(int(session)))
+	pipe, err := newPipeName(session)
+	if err != nil {
+		return nil, err
+	}
+	name, err := windows.UTF16PtrFromString(`\\.\pipe\` + pipe)
 	if err != nil {
 		return nil, err
 	}
@@ -138,14 +185,34 @@ func Listen() (*Listener, error) {
 		windows.PIPE_TYPE_BYTE|windows.PIPE_READMODE_BYTE|windows.PIPE_WAIT|windows.PIPE_REJECT_REMOTE_CLIENTS,
 		1, 64<<10, 64<<10, 0, &sa)
 	if err != nil {
-		return nil, fmt.Errorf("canal %s : %w", PipeName(int(session)), err)
+		return nil, fmt.Errorf("canal %s : %w", pipe, err)
 	}
-	return &Listener{h: h}, nil
+	k, _, err := registry.CreateKey(registry.CURRENT_USER, regKey, registry.SET_VALUE)
+	if err != nil {
+		windows.CloseHandle(h)
+		return nil, fmt.Errorf("publication du canal : %w", err)
+	}
+	defer k.Close()
+	if err := k.SetStringValue(regValue, pipe); err != nil {
+		windows.CloseHandle(h)
+		return nil, fmt.Errorf("publication du canal : %w", err)
+	}
+	return &Listener{h: h, Name: pipe}, nil
+}
+
+// Close retire la publication et ferme le canal.
+func (l *Listener) Close() error {
+	if k, err := registry.OpenKey(registry.CURRENT_USER, regKey, registry.QUERY_VALUE|registry.SET_VALUE); err == nil {
+		if v, _, err := k.GetStringValue(regValue); err == nil && v == l.Name {
+			_ = k.DeleteValue(regValue)
+		}
+		k.Close()
+	}
+	return windows.CloseHandle(l.h)
 }
 
 // Accept attend la connexion de run. La connexion rendue, une fois fermée, libère le
-// canal pour la suivante (le handle est gardé : aucun autre processus ne peut
-// prendre le nom entre deux exécutions).
+// canal pour la suivante (le handle est gardé d'une exécution à l'autre).
 func (l *Listener) Accept() (io.ReadWriteCloser, error) {
 	err := windows.ConnectNamedPipe(l.h, nil)
 	if err != nil && !errors.Is(err, windows.ERROR_PIPE_CONNECTED) {
@@ -157,12 +224,43 @@ func (l *Listener) Accept() (io.ReadWriteCloser, error) {
 	}}, nil
 }
 
+// pipeOf lit le canal publié par l'icône de la session dans la ruche de son utilisateur.
+func pipeOf(session int) (string, error) {
+	user, err := SessionUser(session)
+	if err != nil {
+		return "", err
+	}
+	sid, _, _, err := windows.LookupSID("", user)
+	if err != nil {
+		return "", err
+	}
+	k, err := registry.OpenKey(registry.USERS, sid.String()+`\`+regKey, registry.QUERY_VALUE)
+	if err != nil {
+		return "", ErrNoTray
+	}
+	defer k.Close()
+	pipe, _, err := k.GetStringValue(regValue)
+	if err != nil || !pipePattern(session).MatchString(pipe) {
+		return "", ErrNoTray
+	}
+	return pipe, nil
+}
+
 // Dial ouvre le canal de l'icône d'une session, après avoir vérifié que le serveur est
-// bien une icône Kura de cette session : même dossier que l'exécutable courant.
+// bien une icône Kura de cette session, lancée depuis le dossier de l'exécutable courant.
 // Le niveau SECURITY_IDENTIFICATION interdit à l'icône d'emprunter l'identité de run
-// (administrateur).
+// (administrateur). Il faut SeDebugPrivilege pour inspecter le processus de l'icône
+// (procs.EnableDebugPrivilege).
 func Dial(session int) (io.ReadWriteCloser, error) {
-	name, err := windows.UTF16PtrFromString(PipeName(session))
+	pipe, err := pipeOf(session)
+	if err != nil {
+		return nil, err
+	}
+	return dialPipe(pipe, session)
+}
+
+func dialPipe(pipe string, session int) (io.ReadWriteCloser, error) {
+	name, err := windows.UTF16PtrFromString(`\\.\pipe\` + pipe)
 	if err != nil {
 		return nil, err
 	}
@@ -180,44 +278,64 @@ func Dial(session int) (io.ReadWriteCloser, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := checkServer(h, session); err != nil {
+	sid, err := checkServer(h, session)
+	if err != nil {
 		windows.CloseHandle(h)
 		return nil, err
 	}
-	return &conn{h: h, close: windows.CloseHandle}, nil
+	mode := uint32(windows.PIPE_READMODE_BYTE | windows.PIPE_NOWAIT)
+	if err := windows.SetNamedPipeHandleState(h, &mode, nil, nil); err != nil {
+		windows.CloseHandle(h)
+		return nil, err
+	}
+	return &conn{h: h, close: windows.CloseHandle, nowait: true, serverSID: sid}, nil
 }
 
-func checkServer(h windows.Handle, session int) error {
+// checkServer vérifie session et exécutable du serveur, et renvoie le SID de son compte.
+func checkServer(h windows.Handle, session int) (string, error) {
 	var pid, sid uint32
 	if err := windows.GetNamedPipeServerProcessId(h, &pid); err != nil {
-		return err
+		return "", err
 	}
 	if err := windows.ProcessIdToSessionId(pid, &sid); err != nil {
-		return err
+		return "", err
 	}
 	if int(sid) != session {
-		return fmt.Errorf("canal de la session %d servi depuis la session %d : ignoré", session, sid)
+		return "", fmt.Errorf("canal de la session %d servi depuis la session %d : ignoré", session, sid)
 	}
 	p, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer windows.CloseHandle(p)
 	buf := make([]uint16, windows.MAX_LONG_PATH)
 	size := uint32(len(buf))
 	if err := windows.QueryFullProcessImageName(p, 0, &buf[0], &size); err != nil {
-		return err
+		return "", err
 	}
 	server := windows.UTF16ToString(buf[:size])
 	self, err := os.Executable()
 	if err != nil {
-		return err
+		return "", err
 	}
 	base := strings.ToLower(filepath.Base(server))
-	if !strings.EqualFold(filepath.Dir(server), filepath.Dir(self)) || !serverNames[base] {
-		return fmt.Errorf("canal servi par %s, pas par une icône Kura : ignoré", server)
+	allowed := false
+	for _, pre := range serverPrefix {
+		allowed = allowed || strings.HasPrefix(base, pre)
 	}
-	return nil
+	if !strings.EqualFold(filepath.Dir(server), filepath.Dir(self)) || !allowed {
+		return "", fmt.Errorf("canal servi par %s, pas par une icône Kura : ignoré", server)
+	}
+	var tok windows.Token
+	if err := windows.OpenProcessToken(p, windows.TOKEN_QUERY, &tok); err != nil {
+		return "", err
+	}
+	defer tok.Close()
+	u, err := tok.GetTokenUser()
+	if err != nil {
+		return "", err
+	}
+	return u.User.Sid.String(), nil
 }
 
 // Sessions liste les sessions Windows ouvertes (hors session 0 des services).

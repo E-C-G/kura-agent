@@ -10,7 +10,10 @@ import (
 var errUnsupported = errors.New("canal de l'icône : Windows uniquement")
 
 // Listener n'existe que sous Windows.
-type Listener struct{}
+type Listener struct{ Name string }
+
+// Close n'existe que sous Windows.
+func (*Listener) Close() error { return errUnsupported }
 
 // Listen n'existe que sous Windows.
 func Listen() (*Listener, error) { return nil, errUnsupported }

@@ -44,6 +44,7 @@ var (
 	procGetWindowThreadProcessId  = user32.NewProc("GetWindowThreadProcessId")
 	procIsWindowVisible           = user32.NewProc("IsWindowVisible")
 	procGetWindow                 = user32.NewProc("GetWindow")
+	procGetClassNameW             = user32.NewProc("GetClassNameW")
 	procSetProcessDpiAwarenessCtx = user32.NewProc("SetProcessDpiAwarenessContext")
 
 	gdi32                = windows.NewLazySystemDLL("gdi32.dll")

@@ -122,3 +122,7 @@ func (system) Terminate(p Process) error {
 	}
 	return nil
 }
+
+// EnableDebugPrivilege active SeDebugPrivilege pour tout le processus : nécessaire
+// aussi pour inspecter le processus d'une icône d'une autre session (ipc.Dial).
+func EnableDebugPrivilege() error { return debugPrivilege() }

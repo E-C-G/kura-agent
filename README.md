@@ -321,7 +321,7 @@ jamais par la ligne de commande ni les journaux.
    suppressions prévues dépassent les seuils. Un job bloqué ne touche pas au bucket.
    - Tout job avec `delete: true` exige au moins 1 fichier dans sa source, même avec une section
      `guard` partielle.
-   - `--force-deletes`, toujours avec `--job`, lève les plafonds de suppressions (`max_deletes`,
+   - `--force-deletes`, toujours avec un seul `--job`, lève les plafonds de suppressions (`max_deletes`,
      `max_delete_ratio`) pour ce job et cette exécution. Il ne lève jamais `min_source_files` : une
      source vide ou démontée ne se force pas ; si c'est voulu, baisser le seuil dans la configuration.
 4. Lance `aws s3 sync` ; en cas d'erreur passagère (codes 1, 254, 255), 2 nouvelles tentatives à 5 min
@@ -332,6 +332,13 @@ jamais par la ligne de commande ni les journaux.
 Dans `status.json`, `last_success` n'avance que si **tous** les jobs configurés ont réussi (OK ou
 avertissement) ; un job sauté ou une exécution partielle (`--job`) ne compte pas.
 `job_last_success` donne la dernière réussite de chaque job.
+
+Un job dont la source ne se résout pas sur la machine (`${PROFILE:bob}` d'un compte supprimé, variable
+absente) finit seul en erreur : les autres jobs s'exécutent. `validate` et `install` le signalent.
+
+Coût en temps : chaque tentative d'un job avec `delete: true` parcourt la source puis simule
+(`--dryrun`, qui liste tout le préfixe du bucket) avant de synchroniser. Sur un gros volume, mesurer la
+durée d'une nuit dans `run.log` et ajuster `max_duration`.
 
 La déconnexion d'un utilisateur du serveur n'interrompt pas la sauvegarde ; Ctrl+C l'annule (code 6).
 Dépasser `max_duration` termine l'exécution en erreur (code 2).

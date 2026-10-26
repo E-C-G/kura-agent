@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -332,20 +333,30 @@ func InstallBinary(dir string) (exe, gui string, err error) {
 	return exe, gui, nil
 }
 
+// replaceFile remplace dst par une copie de src. Une version en cours d'exécution (une
+// icône ouverte dans une autre session) est renommée sous un nom unique, effacé au
+// redémarrage ; les anciennes copies libérées sont supprimées au passage.
 func replaceFile(src, dst string) error {
 	if samePath(src, dst) {
 		return nil
+	}
+	if olds, _ := filepath.Glob(dst + ".old*"); len(olds) > 0 {
+		for _, o := range olds {
+			_ = os.Remove(o)
+		}
 	}
 	tmp := dst + ".new"
 	if err := copyFile(src, tmp); err != nil {
 		return err
 	}
-	old := dst + ".old"
-	_ = os.Remove(old)
 	if _, err := os.Stat(dst); err == nil {
-		if err := os.Rename(dst, old); err != nil {
-			os.Remove(tmp)
-			return fmt.Errorf("remplacement de %s : %w", dst, err)
+		if err := os.Remove(dst); err != nil {
+			old := fmt.Sprintf("%s.old-%d", dst, time.Now().UnixNano())
+			if err := os.Rename(dst, old); err != nil {
+				os.Remove(tmp)
+				return fmt.Errorf("remplacement de %s : %w", dst, err)
+			}
+			_ = deleteAtReboot(old)
 		}
 	}
 	return os.Rename(tmp, dst)
@@ -410,7 +421,7 @@ func RemoveProgramDir(dir string) (pendingReboot bool, err error) {
 			// Exécutable en cours (uninstall lui-même, une icône restée ouverte) :
 			// effacé au redémarrage.
 			lower := strings.ToLower(p)
-			if !samePath(p, self) && !strings.HasSuffix(lower, ".old") && !strings.HasSuffix(lower, ".exe") {
+			if !samePath(p, self) && !strings.Contains(lower, ".old") && !strings.HasSuffix(lower, ".exe") {
 				return pendingReboot, err
 			}
 			if err := deleteAtReboot(p); err != nil {

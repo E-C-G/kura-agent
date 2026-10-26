@@ -41,22 +41,33 @@ func ownProcesses(name string) map[uint32]bool {
 }
 
 var (
-	enumMu   sync.Mutex
-	enumPIDs map[uint32]bool
-	enumWins []uintptr
-	enumCB   = windows.NewCallback(func(hwnd, _ uintptr) uintptr {
+	enumMu     sync.Mutex
+	enumPIDs   map[uint32]bool
+	enumWins   []uintptr
+	enumHidden []uintptr // fenêtres principales masquées (Outlook « masquer une fois réduit »)
+	enumCB     = windows.NewCallback(func(hwnd, _ uintptr) uintptr {
 		var pid uint32
 		procGetWindowThreadProcessId.Call(hwnd, uintptr(unsafe.Pointer(&pid)))
 		if enumPIDs[pid] {
 			visible, _, _ := procIsWindowVisible.Call(hwnd)
 			owner, _, _ := procGetWindow.Call(hwnd, gwOwner)
-			if visible != 0 && owner == 0 {
+			switch {
+			case owner != 0:
+			case visible != 0:
 				enumWins = append(enumWins, hwnd)
+			case windowClass(hwnd) == "rctrl_renwnd32": // fenêtre principale d'Outlook
+				enumHidden = append(enumHidden, hwnd)
 			}
 		}
 		return 1 // continuer
 	})
 )
+
+func windowClass(hwnd uintptr) string {
+	var buf [64]uint16
+	n, _, _ := procGetClassNameW.Call(hwnd, uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
+	return windows.UTF16ToString(buf[:n])
+}
 
 // closeApp ferme en douceur les processus de ce nom dans la session : WM_CLOSE à leurs
 // fenêtres principales, comme un clic sur la croix, puis attente de leur sortie au plus
@@ -67,10 +78,13 @@ func closeApp(name string, graceful time.Duration) int {
 		return 0
 	}
 	enumMu.Lock()
-	enumPIDs, enumWins = pids, nil
+	enumPIDs, enumWins, enumHidden = pids, nil, nil
 	procEnumWindows.Call(enumCB, 0)
 	wins := enumWins
-	enumPIDs, enumWins = nil, nil
+	if len(wins) == 0 {
+		wins = enumHidden
+	}
+	enumPIDs, enumWins, enumHidden = nil, nil, nil
 	enumMu.Unlock()
 	for _, w := range wins {
 		procPostMessageW.Call(w, wmClose, 0, 0)

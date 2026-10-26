@@ -72,6 +72,9 @@ type app struct {
 	mu    sync.Mutex
 	queue []func()
 	peer  *ipc.Peer // exécution connectée, s'il y en a une
+
+	promptMu sync.Mutex // un préavis à la fois
+	listener *ipc.Listener
 }
 
 // Main lance l'icône dans la session courante. Elle se ferme aussitôt pour un compte
@@ -104,6 +107,9 @@ func Main(opt Options) int {
 	a.exe, _ = os.Executable()
 	procSetProcessDpiAwarenessCtx.Call(^uintptr(3)) // DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 (-4)
 
+	if _, err := loadTaskDialog(); err != nil {
+		a.log.Warn("fenêtre de préavis indisponible (comctl32 v6)", "err", err)
+	}
 	if err := a.createWindow(); err != nil {
 		a.log.Error("fenêtre de l'icône", "err", err)
 		return 1
@@ -124,6 +130,11 @@ func Main(opt Options) int {
 		procDispatchMessageW.Call(uintptr(unsafe.Pointer(&m2)))
 	}
 	a.removeIcon()
+	a.mu.Lock()
+	if a.listener != nil {
+		_ = a.listener.Close()
+	}
+	a.mu.Unlock()
 	return 0
 }
 
@@ -518,6 +529,9 @@ func (a *app) serve() {
 		a.log.Error("canal de l'icône indisponible : préavis et relance d'Outlook désactivés", "err", err)
 		return
 	}
+	a.mu.Lock()
+	a.listener = l
+	a.mu.Unlock()
 	for {
 		conn, err := l.Accept()
 		if err != nil {
@@ -580,6 +594,10 @@ func (a *app) onRunMsg(p *ipc.Peer, m ipc.Msg) {
 // prompt affiche le préavis sur le thread de l'interface et attend le choix. Si la
 // fenêtre ne peut pas s'ouvrir, une notification prévient et le délai s'écoule.
 func (a *app) prompt(m ipc.Msg) string {
+	// Un seul préavis à la fois : une exécution interrompue en plein préavis peut être
+	// suivie d'une autre qui en demande un nouveau ; il attend la fin du premier.
+	a.promptMu.Lock()
+	defer a.promptMu.Unlock()
 	type result struct {
 		choice string
 		err    error

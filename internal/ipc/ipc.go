@@ -140,8 +140,10 @@ func (p *Peer) shutdown(err error) {
 		p.mu.Lock()
 		p.err = err
 		p.mu.Unlock()
-		close(p.done)
+		// Fermer (et, côté icône, déconnecter le canal) avant de signaler la fin : la
+		// connexion suivante ne doit jamais trouver le canal encore occupé par celle-ci.
 		_ = p.conn.Close()
+		close(p.done)
 	})
 }
 

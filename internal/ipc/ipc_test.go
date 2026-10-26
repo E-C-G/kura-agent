@@ -72,7 +72,7 @@ func TestRequestReply(t *testing.T) {
 func TestCancelFromTray(t *testing.T) {
 	a, b := net.Pipe()
 	cancelled := make(chan int, 1)
-	hub := NewHub(func(int) (io.ReadWriteCloser, error) { return a, nil }, Msg{}, func(s int) { cancelled <- s })
+	hub := NewHub(func(int) (io.ReadWriteCloser, error) { return a, nil }, Msg{}, func(s int, _ string) { cancelled <- s })
 	defer hub.Close()
 	tray := fakeTray(t, b, func(*Peer, Msg) {})
 	defer tray.Close()
@@ -164,5 +164,38 @@ func TestGarbageLineIsIgnored(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("message valide perdu après une ligne illisible")
+	}
+}
+
+func TestDiscoverJoinsLateTrays(t *testing.T) {
+	var mu sync.Mutex
+	sessions := []int{}
+	dialed := map[int]int{}
+	hub := NewHub(func(s int) (io.ReadWriteCloser, error) {
+		a, b := net.Pipe()
+		NewPeer(b, nil)
+		mu.Lock()
+		dialed[s]++
+		mu.Unlock()
+		return a, nil
+	}, Msg{}, nil)
+	defer hub.Close()
+	hub.Discover(func() ([]int, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]int(nil), sessions...), nil
+	})
+	mu.Lock()
+	sessions = []int{4} // icône ouverte après le début de l'exécution
+	mu.Unlock()
+	hub.Broadcast(Msg{Type: TypeJob}) // moins de 30 s : pas de nouvelle recherche
+	hub.mu.Lock()
+	hub.lastScan = time.Time{}
+	hub.mu.Unlock()
+	hub.Broadcast(Msg{Type: TypeJob})
+	mu.Lock()
+	defer mu.Unlock()
+	if dialed[4] != 1 {
+		t.Fatalf("icône tardive jointe %d fois", dialed[4])
 	}
 }

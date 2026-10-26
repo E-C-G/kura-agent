@@ -23,6 +23,7 @@ type fakeTrays struct {
 	choice    func(m ipc.Msg) string // réponse au préavis ; défaut : fermer maintenant
 	silent    bool                   // ne répond jamais (délai écoulé)
 	stubborn  bool                   // la fermeture douce n'aboutit pas
+	onClose   func()                 // appelé après la fermeture douce
 	events    []ipc.Msg
 	requests  []ipc.Msg
 	sessionOf []int
@@ -61,6 +62,10 @@ func (f *fakeTrays) Request(ctx context.Context, s int, m ipc.Msg) (ipc.Msg, err
 				return p.Session == s && strings.EqualFold(p.Name, m.Process)
 			})
 			f.procs.mu.Unlock()
+		}
+		if f.onClose != nil {
+			f.onClose()
+			return ipc.Msg{}, ctx.Err()
 		}
 		return ipc.Msg{Type: ipc.TypeClosed}, nil
 	case ipc.TypeStart:
@@ -220,5 +225,54 @@ func TestDryRunNeverPromptsButReportsProgress(t *testing.T) {
 	}
 	if len(ft.events) == 0 || !ft.events[0].DryRun {
 		t.Fatalf("événements : %+v", ft.events)
+	}
+}
+
+func TestOutlookRestartedAfterCancelDuringClose(t *testing.T) {
+	b, ft := trayBench(t)
+	ctx, cancel := context.WithCancelCause(context.Background())
+	ft.onClose = func() { cancel(errors.New("annulée depuis l'icône par alice")) }
+	st := b.run(ctx, Options{})
+	if st.Result != state.ResultCancelled {
+		t.Fatalf("résultat %s", st.Result)
+	}
+	if !slices.Contains(ft.types(), ipc.TypeStart) {
+		t.Fatalf("Outlook fermé par l'icône puis annulation : relance attendue, requêtes %v", ft.types())
+	}
+}
+
+func TestUserClosedOutlookDuringCountdownIsNotRestarted(t *testing.T) {
+	b, ft := trayBench(t)
+	ft.choice = func(ipc.Msg) string {
+		b.procs.mu.Lock()
+		b.procs.running = nil // l'utilisateur ferme Outlook lui-même
+		b.procs.mu.Unlock()
+		return ipc.ChoiceTimeout
+	}
+	st := b.run(context.Background(), Options{})
+	if st.ExitCode != ExitOK || st.PreTasks[0].Closed != 0 || slices.Contains(ft.types(), ipc.TypeStart) {
+		t.Fatalf("aucune relance attendue : %+v, requêtes %v", st.PreTasks[0], ft.types())
+	}
+}
+
+func TestAttemptsCountOnlyRealSyncs(t *testing.T) {
+	b := newBench(t)
+	st := b.run(context.Background(), Options{})
+	for _, j := range st.Jobs {
+		if j.Attempts != 1 {
+			t.Errorf("job %s : %d tentative(s) pour une nuit normale (la simulation du garde-fou ne compte pas)", j.ID, j.Attempts)
+		}
+	}
+}
+
+func TestUnavailableJobFailsAlone(t *testing.T) {
+	b := newBench(t)
+	b.cfg.Jobs[1].Unavailable = "jobs[1].source : ${PROFILE:bob} : profil introuvable"
+	st := b.run(context.Background(), Options{})
+	if b.job(st, "data").Result != state.ResultOK || b.job(st, "outlook").Result != state.ResultError {
+		t.Fatalf("jobs : %+v", st.Jobs)
+	}
+	if st.ExitCode != ExitError || b.aws.real("C/alice/Outlook") != 0 {
+		t.Fatalf("code %d, appels outlook %d", st.ExitCode, b.aws.real("C/alice/Outlook"))
 	}
 }

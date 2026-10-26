@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"sync"
+	"time"
 )
 
 // Dialer ouvre le canal de l'icône d'une session ; une erreur signifie « pas d'icône ».
@@ -17,20 +18,50 @@ var ErrNoTray = errors.New("pas d'icône dans cette session")
 type Hub struct {
 	dial     Dialer
 	hello    Msg
-	onCancel func(session int)
+	onCancel func(session int, serverSID string)
 
-	mu    sync.Mutex
-	peers map[int]*Peer
+	mu       sync.Mutex
+	peers    map[int]*Peer
+	sessions func() ([]int, error)
+	lastScan time.Time
 }
 
+// rescanEvery : à chaque événement, au plus une fois par période, run cherche les
+// icônes lancées depuis le début de l'exécution.
+const rescanEvery = 30 * time.Second
+
 // NewHub prépare le côté run. hello est envoyé à chaque nouvelle connexion ;
-// onCancel est appelé quand une icône demande l'annulation.
-func NewHub(dial Dialer, hello Msg, onCancel func(session int)) *Hub {
+// onCancel reçoit la session et le SID du compte de l'icône qui demande l'annulation
+// (vide si le transport ne le connaît pas).
+func NewHub(dial Dialer, hello Msg, onCancel func(session int, serverSID string)) *Hub {
 	if onCancel == nil {
-		onCancel = func(int) {}
+		onCancel = func(int, string) {}
 	}
 	hello.Type = TypeHello
 	return &Hub{dial: dial, hello: hello, onCancel: onCancel, peers: map[int]*Peer{}}
+}
+
+// Discover joint toutes les icônes des sessions renvoyées par sessions, maintenant
+// puis à chaque Broadcast (au plus toutes les 30 s).
+func (h *Hub) Discover(sessions func() ([]int, error)) {
+	h.mu.Lock()
+	h.sessions = sessions
+	h.mu.Unlock()
+	h.rescan(true)
+}
+
+func (h *Hub) rescan(force bool) {
+	h.mu.Lock()
+	f := h.sessions
+	if f == nil || (!force && time.Since(h.lastScan) < rescanEvery) {
+		h.mu.Unlock()
+		return
+	}
+	h.lastScan = time.Now()
+	h.mu.Unlock()
+	if list, err := f(); err == nil {
+		h.Connect(list)
+	}
 }
 
 // Connect tente de joindre l'icône de chaque session ; les échecs sont silencieux.
@@ -60,9 +91,13 @@ func (h *Hub) peer(session int) (*Peer, error) {
 	if err != nil {
 		return nil, ErrNoTray
 	}
+	sid := ""
+	if s, ok := conn.(interface{ ServerSID() string }); ok {
+		sid = s.ServerSID()
+	}
 	p = NewPeer(conn, func(m Msg) {
 		if m.Type == TypeCancel {
-			h.onCancel(session)
+			h.onCancel(session, sid)
 		}
 	})
 	if err := p.Send(h.hello); err != nil {
@@ -83,6 +118,7 @@ func (h *Hub) Has(session int) bool {
 
 // Broadcast envoie un événement à toutes les icônes jointes.
 func (h *Hub) Broadcast(m Msg) {
+	h.rescan(false)
 	h.mu.Lock()
 	peers := make([]*Peer, 0, len(h.peers))
 	for _, p := range h.peers {

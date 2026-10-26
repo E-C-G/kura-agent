@@ -462,12 +462,24 @@ func (r *run) closeInSession(ctx context.Context, p config.PreTask, session int,
 			break
 		}
 		if answered {
+			// Ce qui tourne au moment de la demande : ce qui en disparaît ensuite a été
+			// fermé par l'icône et sera relancé. Ce que l'utilisateur a fermé lui-même
+			// pendant le compte à rebours n'est pas relancé.
+			before, _ := remaining()
 			graceful := p.GracefulTimeout.Duration
 			rctx, cancel := context.WithTimeout(ctx, graceful+replyMargin)
 			ans, err := r.d.Trays.Request(rctx, session, ipc.Msg{Type: ipc.TypeClose, Process: p.Process,
 				GracefulS: int(graceful / time.Second)})
 			cancel()
+			countClosed := func() {
+				if after, err := remaining(); err == nil && len(before) > len(after) {
+					res.closed += len(before) - len(after)
+					res.graceful += len(before) - len(after)
+				}
+			}
 			if ctx.Err() != nil {
+				// Annulation pendant la fermeture : ce qui a été fermé doit être relancé.
+				countClosed()
 				return interrupted("la fermeture douce")
 			}
 			if err != nil {
@@ -475,6 +487,7 @@ func (r *run) closeInSession(ctx context.Context, p config.PreTask, session int,
 			} else {
 				log.Info("pré-tâche : fermeture douce faite par l'icône", "restants", ans.Remaining)
 			}
+			countClosed()
 		}
 	} else {
 		log.Info("pré-tâche : pas d'icône dans la session, attente du préavis avant arrêt forcé", "préavis_s", p.NoticeSeconds)
@@ -492,12 +505,6 @@ func (r *run) closeInSession(ctx context.Context, p config.PreTask, session int,
 	if err != nil {
 		res.result, res.message = state.ResultWarning, "liste des processus impossible : "+err.Error()
 		return res
-	}
-	// Ce qui a disparu après la fermeture douce a été fermé par l'icône (et sera
-	// relancé) ; sans icône, c'est l'utilisateur qui l'a fermé : rien à relancer.
-	if n := len(list) - len(still); answered && n > 0 {
-		res.closed += n
-		res.graceful += n
 	}
 	if len(still) == 0 {
 		log.Info("pré-tâche : processus fermé")
@@ -556,6 +563,11 @@ func (r *run) job(ctx context.Context, j config.Job, preOK map[string]bool) stat
 
 	if ctx.Err() != nil {
 		js.Result, js.Message = r.interrupted(ctx), "non exécuté : "+r.interruptReason(ctx)
+		return js
+	}
+	if j.Unavailable != "" {
+		js.Result, js.Message = state.ResultError, j.Unavailable
+		log.Error("job impossible sur cette machine, les autres continuent", "raison", j.Unavailable)
 		return js
 	}
 	if dep := j.DependsOnPreTask; dep != "" && !preOK[strings.ToLower(dep)] {
@@ -682,7 +694,11 @@ func (r *run) simulate(ctx context.Context, j config.Job, out io.Writer, log *sl
 	for attempt := 0; ; attempt++ {
 		fmt.Fprintf(out, "== simulation %s ==\n", r.d.Now().Format(time.RFC3339))
 		counts, code, err := r.syncOnce(ctx, j, true, out)
-		js.Attempts++
+		if r.opt.DryRun {
+			// En exécution réelle, la simulation du garde-fou n'est pas une tentative de
+			// synchronisation : seules ces dernières comptent dans attempts.
+			js.Attempts++
+		}
 		js.ExitCode = code
 		if err != nil {
 			js.Result, js.Message = r.failureOf(ctx, err), err.Error()

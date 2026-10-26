@@ -26,6 +26,7 @@ import (
 	"github.com/E-C-G/kura-agent/internal/procs"
 	"github.com/E-C-G/kura-agent/internal/report"
 	"github.com/E-C-G/kura-agent/internal/runner"
+	"github.com/E-C-G/kura-agent/internal/setup"
 	"github.com/E-C-G/kura-agent/internal/state"
 	"github.com/E-C-G/kura-agent/pkg/config"
 )
@@ -135,8 +136,8 @@ func cmdRun(args []string) int {
 		}
 	}
 
-	if *force && len(jobs) == 0 {
-		fmt.Fprintln(os.Stderr, "--force-deletes exige --job : on ne lève le garde-fou que pour le job vérifié")
+	if *force && len(jobs) != 1 {
+		fmt.Fprintln(os.Stderr, "--force-deletes exige un seul --job : on ne lève le garde-fou que pour le job vérifié")
 		return runner.ExitConfig
 	}
 
@@ -178,19 +179,27 @@ func cmdRun(args []string) int {
 	defer cancel(nil)
 
 	// Icônes des sessions : préavis, fermeture douce et relance d'Outlook, annulation.
-	// Seuls les comptes de tray.allow_run_now peuvent annuler.
-	hub := ipc.NewHub(ipc.Dial, ipc.Msg{Version: version}, func(session int) {
-		user, err := ipc.SessionUser(session)
-		if err != nil || !config.Listed(cfg.Tray.AllowRunNow, user) {
-			fmt.Fprintf(os.Stderr, "annulation demandée depuis la session %d (%s) : refusée, compte hors de tray.allow_run_now\n", session, user)
+	// Seuls les comptes de tray.allow_run_now peuvent annuler : on compare le compte du
+	// processus de l'icône (SID de son jeton) à ceux de la liste.
+	if err := procs.EnableDebugPrivilege(); err != nil {
+		fmt.Fprintln(os.Stderr, "icônes : SeDebugPrivilege indisponible :", err)
+	}
+	cancelSIDs := map[string]string{}
+	for _, name := range cfg.Tray.AllowRunNow {
+		if sid, err := setup.AccountSID(name); err == nil {
+			cancelSIDs[sid] = name
+		}
+	}
+	hub := ipc.NewHub(ipc.Dial, ipc.Msg{Version: version}, func(session int, sid string) {
+		name, ok := cancelSIDs[sid]
+		if sid == "" || !ok {
+			fmt.Fprintf(os.Stderr, "annulation demandée depuis la session %d : refusée, compte hors de tray.allow_run_now\n", session)
 			return
 		}
-		cancel(fmt.Errorf("annulée depuis l'icône par %s", user))
+		cancel(fmt.Errorf("annulée depuis l'icône par %s", name))
 	})
 	defer hub.Close()
-	if sessions, err := ipc.Sessions(); err == nil {
-		hub.Connect(sessions)
-	}
+	hub.Discover(ipc.Sessions)
 
 	var console io.Writer = os.Stdout
 	if *quiet {

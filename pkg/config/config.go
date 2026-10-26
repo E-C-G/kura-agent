@@ -89,6 +89,22 @@ type Job struct {
 	Exclude          []string `yaml:"exclude"`
 	Guard            *Guard   `yaml:"guard"`
 	DependsOnPreTask string   `yaml:"depends_on_pre_task"`
+
+	// Unavailable : la source ou la destination ne se résout pas sur cette machine
+	// (ex. ${PROFILE:bob} d'un compte supprimé). Le job finit en erreur avec ce
+	// message ; les autres jobs s'exécutent. Rempli par Expand, jamais lu du YAML.
+	Unavailable string `yaml:"-"`
+}
+
+// Unavailable renvoie les jobs inutilisables sur cette machine (voir Job.Unavailable).
+func (c *Config) Unavailable() []Job {
+	var out []Job
+	for _, j := range c.Jobs {
+		if j.Unavailable != "" {
+			out = append(out, j)
+		}
+	}
+	return out
 }
 
 // Guard est le garde-fou contre les suppressions massives.

@@ -160,9 +160,15 @@ func (c *Config) Validate(opt ValidateOptions) error {
 		}
 		ids[j.ID] = true
 
-		if j.Source == "" {
+		switch {
+		case j.Source == "":
 			add(f+".source", "obligatoire")
-		} else if opt.CheckSystem {
+		case j.Unavailable != "":
+			// run passe outre (seul ce job échoue) ; validate et install le signalent.
+			if opt.CheckSystem {
+				add(f+".source", "%s", j.Unavailable)
+			}
+		case opt.CheckSystem:
 			if st, err := os.Stat(j.Source); err != nil {
 				add(f+".source", "%q inaccessible : %v", j.Source, err)
 			} else if !st.IsDir() {
