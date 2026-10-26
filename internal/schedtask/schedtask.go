@@ -95,6 +95,33 @@ func XML(s config.Schedule, p Params) (string, error) {
 	return `<?xml version="1.0" encoding="UTF-16"?>` + "\n" + string(out) + "\n", nil
 }
 
+// RunNowNotAppliedError : la tâche est créée, mais sans le descripteur de sécurité qui
+// autorise les comptes de tray.allow_run_now à la lancer (refusé par schtasks).
+// Les administrateurs peuvent toujours la lancer.
+type RunNowNotAppliedError struct{ Cause string }
+
+func (e *RunNowNotAppliedError) Error() string {
+	return "tâche créée sans le droit de lancement pour tray.allow_run_now (" + e.Cause + ")"
+}
+
+// WithoutSecurityDescriptor retire l'élément SecurityDescriptor du XML.
+func WithoutSecurityDescriptor(def string) string {
+	start := strings.Index(def, "<SecurityDescriptor>")
+	end := strings.Index(def, "</SecurityDescriptor>")
+	if start < 0 || end < start {
+		return def
+	}
+	end += len("</SecurityDescriptor>")
+	// La ligne entière, indentation et fin de ligne comprises.
+	for start > 0 && (def[start-1] == ' ' || def[start-1] == '\t') {
+		start--
+	}
+	if end < len(def) && def[end] == '\n' {
+		end++
+	}
+	return def[:start] + def[end:]
+}
+
 // UTF16 encode le XML comme l'attend schtasks.exe : UTF-16 LE avec BOM.
 func UTF16(s string) []byte {
 	u := utf16.Encode([]rune(strings.ReplaceAll(s, "\n", "\r\n")))

@@ -13,6 +13,7 @@ import (
 
 	"github.com/E-C-G/kura-agent/internal/creds"
 	"github.com/E-C-G/kura-agent/internal/lock"
+	"github.com/E-C-G/kura-agent/internal/schedtask"
 	"github.com/E-C-G/kura-agent/pkg/config"
 )
 
@@ -261,5 +262,25 @@ func TestDescribeSchedule(t *testing.T) {
 		if got := describeSchedule(c.s); got != c.want {
 			t.Errorf("%+v : %q, attendu %q", c.s, got, c.want)
 		}
+	}
+}
+
+func TestInstallFallsBackWithoutRunNowRights(t *testing.T) {
+	dir := t.TempDir()
+	f := &fakeSys{t: t}
+	sys := f.system(dir)
+	sys.registerTask = func(x string) error {
+		return &schedtask.RunNowNotAppliedError{Cause: "Accès refusé"}
+	}
+	out := &strings.Builder{}
+	sys.out = out
+	if code := install(sys, writeConfig(t, dir, ""), "svc-kura", false); code != 0 {
+		t.Fatalf("code %d", code)
+	}
+	if !strings.Contains(out.String(), "que pour les administrateurs") {
+		t.Fatalf("avertissement absent :\n%s", out)
+	}
+	if b, err := os.ReadFile(filepath.Join(sys.dataDir, "task.xml")); err != nil || !strings.Contains(string(b), "<LogonType>S4U</LogonType>") {
+		t.Fatalf("task.xml : %v", err)
 	}
 }

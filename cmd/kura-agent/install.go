@@ -203,8 +203,17 @@ func install(sys system, cfgPath, account string, skipValidate bool) int {
 	if err != nil {
 		return fail(exitInstallConfig, "tâche planifiée : %v", err)
 	}
-	if err := sys.registerTask(def); err != nil {
-		return fail(exitInstallFailed, "tâche planifiée : %v", err)
+	// Copie de la définition, sans secret, pour diagnostiquer un refus de schtasks.
+	taskXML := filepath.Join(sys.dataDir, "task.xml")
+	if err := os.WriteFile(taskXML, []byte(def), 0o644); err != nil {
+		fmt.Fprintf(out, "Attention : %s non écrit (%v)\n", taskXML, err)
+	}
+	var partial *schedtask.RunNowNotAppliedError
+	switch err := sys.registerTask(def); {
+	case errors.As(err, &partial):
+		fmt.Fprintf(out, "Attention : %v.\nSauvegarder maintenant ne fonctionnera que pour les administrateurs.\n", err)
+	case err != nil:
+		return fail(exitInstallFailed, "tâche planifiée : %v\n(définition : %s)", err, taskXML)
 	}
 	step("tâche %s enregistrée : %s, compte %s sans mot de passe stocké (S4U), autorisations maximales", schedtask.Name, describeSchedule(cfg.Schedule), account)
 

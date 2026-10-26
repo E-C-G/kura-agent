@@ -126,3 +126,17 @@ func TestISODuration(t *testing.T) {
 		}
 	}
 }
+
+func TestWithoutSecurityDescriptor(t *testing.T) {
+	x := mustXML(t, config.Schedule{Type: "daily", Time: "22:30"})
+	bare := WithoutSecurityDescriptor(x)
+	if strings.Contains(bare, "SecurityDescriptor") || !strings.Contains(bare, "<URI>\\Kura\\Sync</URI>\n  </RegistrationInfo>") {
+		t.Fatalf("XML sans descripteur :\n%s", bare)
+	}
+	if err := xml.Unmarshal([]byte(strings.Replace(bare, `encoding="UTF-16"`, `encoding="UTF-8"`, 1)), new(task)); err != nil {
+		t.Fatal(err)
+	}
+	if WithoutSecurityDescriptor(bare) != bare {
+		t.Fatal("deuxième retrait")
+	}
+}
