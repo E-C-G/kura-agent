@@ -76,3 +76,30 @@ func TestResolve(t *testing.T) {
 		t.Errorf("référence absente : %v", err)
 	}
 }
+
+func TestAWSKeys(t *testing.T) {
+	v, err := JoinAWSKeys(" AKIDEXAMPLE ", "s3cr3t/Key+x\n")
+	if err != nil || v != "AKIDEXAMPLE:s3cr3t/Key+x" {
+		t.Fatalf("JoinAWSKeys = %q, %v", v, err)
+	}
+	k, err := ParseAWSKeys(v)
+	if err != nil || k.AccessKeyID != "AKIDEXAMPLE" || k.SecretAccessKey != "s3cr3t/Key+x" {
+		t.Fatalf("ParseAWSKeys = %+v, %v", k, err)
+	}
+	env := strings.Join(k.Env(), "\n")
+	for _, want := range []string{"AWS_ACCESS_KEY_ID=AKIDEXAMPLE", "AWS_SECRET_ACCESS_KEY=s3cr3t/Key+x", "AWS_SESSION_TOKEN="} {
+		if !strings.Contains(env, want) {
+			t.Errorf("Env sans %q : %s", want, env)
+		}
+	}
+	for _, bad := range [][2]string{{"", "x"}, {"id", ""}, {"a:b", "x"}, {"id", "a b"}} {
+		if _, err := JoinAWSKeys(bad[0], bad[1]); err == nil {
+			t.Errorf("JoinAWSKeys(%q, %q) accepté", bad[0], bad[1])
+		}
+	}
+	for _, bad := range []string{"", "seul", ":x", "x:"} {
+		if _, err := ParseAWSKeys(bad); err == nil {
+			t.Errorf("ParseAWSKeys(%q) accepté", bad)
+		}
+	}
+}

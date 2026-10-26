@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"go.yaml.in/yaml/v3"
@@ -33,9 +34,13 @@ type Config struct {
 
 // Profile décrit la destination Wasabi et l'outil de copie.
 type Profile struct {
-	Name              string `yaml:"name"`
-	AWSCLI            string `yaml:"aws_cli"`     // chemin de aws.exe ; vide = recherche dans le PATH
-	AWSProfile        string `yaml:"aws_profile"` // profil de ~/.aws/credentials ; jamais de clé ici
+	Name       string `yaml:"name"`
+	AWSCLI     string `yaml:"aws_cli"`     // chemin de aws.exe ; vide = recherche dans le PATH
+	AWSProfile string `yaml:"aws_profile"` // profil de ~/.aws/credentials ; jamais de clé ici
+	// AWSCredentials désigne les clés d'accès rangées dans le coffre de l'agent
+	// (credential:<nom>, saisies par `kura-agent credentials set-aws <nom>`). C'est la
+	// forme à utiliser avec le compte svc-kura, qui n'a pas de ~/.aws. Exclut aws_profile.
+	AWSCredentials    string `yaml:"aws_credentials"`
 	Endpoint          string `yaml:"endpoint"`
 	Region            string `yaml:"region"`
 	Bucket            string `yaml:"bucket"`
@@ -140,6 +145,33 @@ type Webhook struct {
 
 // CredentialPrefix préfixe une référence au coffre de secrets de l'agent.
 const CredentialPrefix = "credential:"
+
+// CredentialRef est une référence credential:<nom> trouvée dans la configuration.
+type CredentialRef struct {
+	Name  string // nom dans le coffre
+	Field string // champ qui la porte, ex. notify.report.token
+	AWS   bool   // paire de clés d'accès (credentials set-aws) plutôt qu'une simple valeur
+}
+
+// CredentialRefs liste les secrets dont la configuration a besoin, sans doublon.
+func (c *Config) CredentialRefs() []CredentialRef {
+	var refs []CredentialRef
+	seen := map[string]bool{}
+	add := func(field, value string, aws bool) {
+		name, ok := strings.CutPrefix(value, CredentialPrefix)
+		if !ok || name == "" || seen[name] {
+			return
+		}
+		seen[name] = true
+		refs = append(refs, CredentialRef{Name: name, Field: field, AWS: aws})
+	}
+	add("profile.aws_credentials", c.Profile.AWSCredentials, true)
+	if r := c.Notify.Report; r != nil {
+		add("notify.report.url", r.URL, false)
+		add("notify.report.token", r.Token, false)
+	}
+	return refs
+}
 
 // Logging règle la journalisation.
 type Logging struct {

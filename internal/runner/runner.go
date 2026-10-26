@@ -70,6 +70,8 @@ type Deps struct {
 	RunsDir     string
 	Console     io.Writer       // copie du journal à l'écran ; nil = aucune
 	Reporter    report.Reporter // destination du bilan ; nil = aucune
+	// AWSEnv complète l'environnement de aws (clés lues dans le coffre). Jamais journalisé.
+	AWSEnv []string
 
 	Now        func() time.Time                                 // défaut : time.Now
 	Sleep      func(ctx context.Context, d time.Duration) error // défaut : attente annulable
@@ -519,7 +521,8 @@ func (r *run) syncOnce(ctx context.Context, j config.Job, dryRun bool, out io.Wr
 	args := awscli.SyncArgs(r.cfg.Profile, j, dryRun)
 	fmt.Fprintf(out, "$ %s %s\n", r.d.AWSCLI, strings.Join(quoteArgs(args), " "))
 	c := awscli.NewCounter(out)
-	code, err := r.d.Exec.Run(ctx, r.d.AWSCLI, args, awscli.Env(r.cfg.Profile), c)
+	env := append(awscli.Env(r.cfg.Profile), r.d.AWSEnv...)
+	code, err := r.d.Exec.Run(ctx, r.d.AWSCLI, args, env, c)
 	fmt.Fprintf(out, "== code de sortie %d ==\n", code)
 	if err != nil {
 		return c.Counts(), code, fmt.Errorf("lancement de aws : %w", err)

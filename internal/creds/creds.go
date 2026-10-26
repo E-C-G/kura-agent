@@ -1,9 +1,10 @@
 // Package creds est le coffre de secrets de kura-agent : jetons et URL secrètes
 // référencés dans la configuration sous la forme credential:<nom>.
 //
-// Sous Windows, chaque secret est chiffré par DPAPI dans la portée du compte qui
-// l'enregistre : seul ce compte (svc-kura, ou celui qui exécute la tâche) peut le
-// relire. Il faut donc lancer `kura-agent credentials set` sous ce même compte.
+// Sous Windows, chaque secret est chiffré par DPAPI dans la portée de la machine, et
+// le dossier n'est lisible que par SYSTEM et les Administrateurs (ACL protégée, posée
+// à chaque écriture). `kura-agent credentials set` se lance donc depuis une console
+// d'administration, et la tâche (svc-kura, administrateur) relit les mêmes secrets.
 //
 // Hors Windows (développement uniquement), le secret est stocké en clair, lisible
 // par le seul propriétaire du fichier.
@@ -36,6 +37,14 @@ func (s Store) path(name string) (string, error) {
 	return filepath.Join(s.Dir, name+ext), nil
 }
 
+// Init crée le dossier du coffre et lui applique son ACL (aussi fait à chaque Set).
+func (s Store) Init() error {
+	if err := os.MkdirAll(s.Dir, 0o700); err != nil {
+		return err
+	}
+	return secureDir(s.Dir)
+}
+
 // Set enregistre (ou remplace) un secret.
 func (s Store) Set(name, value string) error {
 	p, err := s.path(name)
@@ -51,6 +60,10 @@ func (s Store) Set(name, value string) error {
 	}
 	if err := os.MkdirAll(s.Dir, 0o700); err != nil {
 		return err
+	}
+	// Jamais de secret dans un dossier dont on n'a pas pu restreindre l'accès.
+	if err := secureDir(s.Dir); err != nil {
+		return fmt.Errorf("protection du dossier %s : %w", s.Dir, err)
 	}
 	tmp := p + ".tmp"
 	if err := os.WriteFile(tmp, enc, 0o600); err != nil {
@@ -108,6 +121,42 @@ func (s Store) List() ([]string, error) {
 	}
 	sort.Strings(names)
 	return names, nil
+}
+
+// AWSKeys est une paire de clés d'accès S3 (Wasabi), rangée dans le coffre sous la
+// forme "ID:SECRET" (une clé secrète AWS ou Wasabi ne contient jamais ':').
+type AWSKeys struct {
+	AccessKeyID     string
+	SecretAccessKey string
+}
+
+// JoinAWSKeys forme la valeur rangée dans le coffre.
+func JoinAWSKeys(id, secret string) (string, error) {
+	id, secret = strings.TrimSpace(id), strings.TrimSpace(secret)
+	if id == "" || secret == "" {
+		return "", errors.New("identifiant et clé secrète obligatoires")
+	}
+	if strings.ContainsAny(id, ": \t") || strings.ContainsAny(secret, ": \t") {
+		return "", errors.New("identifiant ou clé secrète invalide (espace ou ':')")
+	}
+	return id + ":" + secret, nil
+}
+
+// ParseAWSKeys relit une valeur "ID:SECRET".
+func ParseAWSKeys(v string) (AWSKeys, error) {
+	id, secret, ok := strings.Cut(v, ":")
+	if !ok || id == "" || secret == "" {
+		return AWSKeys{}, errors.New("clés d'accès attendues sous la forme ID:SECRET (kura-agent credentials set-aws NOM)")
+	}
+	return AWSKeys{AccessKeyID: id, SecretAccessKey: secret}, nil
+}
+
+// Env renvoie les variables d'environnement qui donnent ces clés à la CLI AWS ; elles
+// priment sur les fichiers ~/.aws. AWS_SESSION_TOKEN est vidé pour ne pas hériter du
+// jeton de session d'une console qui lance l'agent à la main.
+func (k AWSKeys) Env() []string {
+	return []string{"AWS_ACCESS_KEY_ID=" + k.AccessKeyID, "AWS_SECRET_ACCESS_KEY=" + k.SecretAccessKey,
+		"AWS_SESSION_TOKEN="}
 }
 
 // Resolve renvoie la valeur d'un champ de configuration : la valeur telle quelle,

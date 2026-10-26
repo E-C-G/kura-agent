@@ -15,11 +15,11 @@ Console d'administration associée : [E-C-G/kura-ctl](https://github.com/E-C-G/k
 | 1 | `pkg/config` : format YAML, `${PROFILE:compte}`, validation | **fait** |
 | 2 | `kura-agent run` sans interface : garde-fou, nouvelles tentatives, codes de sortie, `status.json`, journaux | **fait** |
 | 3 | Bilan vers healthchecks.io ou un webhook (Make, n8n…), coffre de secrets `credentials` | **fait** |
-| 4 | `install` / `uninstall` / `credentials` : compte `svc-kura`, tâche `\Kura\Sync`, DPAPI | à faire |
+| 4 | `install` / `uninstall` : compte `svc-kura`, tâche `\Kura\Sync` sans mot de passe, ACL, clés Wasabi dans le coffre | **fait** |
 | 5 | Icône par session, préavis et fermeture douce d'Outlook | à faire |
 | 6 | Restauration (V2) | à faire |
 
-Commandes disponibles : `run`, `validate`, `status`, `credentials`, `version`.
+Commandes disponibles : `run`, `validate`, `status`, `credentials`, `install`, `uninstall`, `version`.
 
 ## Compiler
 
@@ -87,33 +87,76 @@ Pour encoder le certificat sous Windows :
 **Dependabot** (`.github/dependabot.yml`) propose chaque semaine les mises à jour des modules Go et
 des actions GitHub.
 
-## Mettre en service à la place d'un script planifié existant (étape 2)
+## Installer sur un serveur (étape 4)
 
-En attendant `kura-agent install` (étape 4), la mise en place est manuelle, sur le serveur :
+Prérequis : AWS CLI v2 installée pour tous les utilisateurs (`C:\Program Files\Amazon\AWSCLIV2\aws.exe`),
+une invite de commandes **« Exécuter en tant qu'administrateur »**, le zip de la release décompressé.
 
-1. Copier `kura-agent.exe` dans `C:\Program Files\Kura\`.
-2. Copier `configs/example.yaml` vers `C:\ProgramData\Kura\config.yaml`, puis remplacer les valeurs
-   fictives (`acme-srv01`, `alice`, région, chemins) par les vôtres et adapter :
-   - `profile.aws_profile` : le profil AWS que le script utilise aujourd'hui. Le script ne passe pas
-     `--profile`, il utilise donc le profil `default` du compte qui exécute la tâche : mettre `default`,
-     ou laisser vide.
-   - `notice_seconds` : 120 s de préavis avant d'arrêter Outlook. Mettre `0` pour garder exactement le
-     comportement actuel (`taskkill /F` immédiat). La fermeture douce viendra avec l'icône (étape 5).
-3. Vérifier, dans une invite de commandes administrateur :
-   ```bat
-   "C:\Program Files\Kura\kura-agent.exe" validate
-   "C:\Program Files\Kura\kura-agent.exe" run --dry-run
+1. Préparer la configuration à partir de `configs/example.yaml` : remplacer les valeurs fictives
+   (`acme-srv01`, `alice`, région, chemins) et garder les secrets hors du fichier :
+   ```yaml
+   profile:
+     aws_cli: "C:/Program Files/Amazon/AWSCLIV2/aws.exe"
+     aws_credentials: credential:wasabi     # clés d'accès Wasabi, saisies pendant l'installation
+   notify:
+     report:
+       type: healthchecks
+       url: credential:hc-url               # URL de ping, saisie pendant l'installation
    ```
-   La simulation ne ferme pas Outlook et ne modifie rien dans le bucket ; elle affiche les envois et
-   suppressions prévus. Les fichiers étant déjà dans le bucket, les deux jobs doivent annoncer peu de chose.
-4. Dans le Planificateur de tâches, remplacer l'action de la tâche existante par :
-   `"C:\Program Files\Kura\kura-agent.exe" run --quiet`
-   et cocher « Exécuter avec les autorisations maximales » (nécessaire pour arrêter Outlook dans la
-   session de `alice` et lire son profil).
-5. Le lendemain, `kura-agent status` affiche le bilan ; le code de sortie apparaît aussi dans
-   l'historique du Planificateur.
+   `notice_seconds: 0` garde le comportement d'un script `taskkill /F` (pas de préavis tant que
+   l'icône de l'étape 5 n'existe pas).
+2. Installer :
+   ```bat
+   kura-agent.exe install --config C:\chemin\vers\config.yaml
+   ```
+   `install` est rejouable : relancé avec un nouvel exécutable ou une configuration modifiée, il met à
+   jour l'installation (l'ancienne configuration est gardée en `config.yaml.<date>.bak`). Il :
+   - protège `C:\ProgramData\Kura` (Utilisateurs en lecture seule, coffre réservé aux administrateurs) ;
+   - copie la configuration dans `C:\ProgramData\Kura\config.yaml` et l'exécutable dans
+     `C:\Program Files\Kura\` ;
+   - crée le compte local **`svc-kura`** : membre des Administrateurs (il doit lire le profil des
+     utilisateurs et arrêter Outlook dans leur session), droit « Ouvrir une session en tant que tâche »,
+     ouverture de session locale et Bureau à distance refusées, masqué de l'écran d'accueil. Son mot de
+     passe est aléatoire et n'est ni affiché ni gardé : personne n'en a besoin ;
+   - demande les secrets référencés par `credential:` qui manquent au coffre (saisie masquée) ;
+   - lance `validate` (configuration, aws.exe, accès au bucket, bilan) et **s'arrête là** en cas
+     d'échec, sans toucher à la tâche ;
+   - crée ou remplace la tâche **`\Kura\Sync`** : compte `svc-kura` en mode « exécuter même si
+     l'utilisateur n'est pas connecté » **sans mot de passe stocké** (S4U), autorisations maximales,
+     déclencheur tiré de `schedule`, rattrapage si `run_if_missed`, pas de seconde instance, arrêt
+     par Windows à `max_duration` + 15 min (l'agent s'arrête lui-même à `max_duration`), lancement
+     autorisé aux comptes de `tray.allow_run_now`.
+3. Vérifier :
+   ```bat
+   "C:\Program Files\Kura\kura-agent.exe" run --dry-run
+   schtasks /Run /TN \Kura\Sync
+   "C:\Program Files\Kura\kura-agent.exe" status
+   ```
+   La simulation ne ferme pas Outlook et ne modifie rien dans le bucket. `schtasks /Run` lance une
+   vraie exécution sous `svc-kura`, comme la nuit.
 
-Le passage au compte dédié `svc-kura` viendra avec `kura-agent install`.
+### Migrer depuis un script planifié
+
+Installer avec un horaire décalé de l'ancienne tâche, vérifier la simulation (les fichiers étant déjà
+dans le bucket, peu d'envois et aucune suppression massive), laisser tourner une nuit les deux
+mécanismes et comparer, puis désactiver et supprimer l'ancienne tâche et son script.
+
+### Désinstaller
+
+```bat
+kura-agent uninstall              :: tâche, compte svc-kura et son profil, C:\Program Files\Kura
+kura-agent uninstall --purge      :: efface aussi C:\ProgramData\Kura (configuration, secrets, journaux)
+```
+
+`--keep-account` garde le compte. `uninstall` refuse de s'exécuter pendant une sauvegarde.
+
+### Si la tâche ne démarre pas
+
+Le mode sans mot de passe (S4U) suffit pour lire les disques locaux, arrêter Outlook et joindre
+Wasabi en HTTPS, mais il ne donne accès à aucun partage réseau (`\\serveur\partage`) : une source sur
+un partage n'est pas prise en charge. Si une stratégie de sécurité interdit ce mode, en repli :
+définir un mot de passe à `svc-kura` (`net user svc-kura *`), puis dans le Planificateur décocher « Ne
+pas stocker le mot de passe » sur `\Kura\Sync` et le saisir.
 
 ## Bilan de chaque exécution (étape 3)
 
@@ -194,20 +237,24 @@ L'agent envoie en `POST` un bilan JSON à la fin de chaque exécution réelle :
 
 ### Secrets : `kura-agent credentials`
 
-`url` et `token` acceptent une référence `credential:<nom>` vers le coffre de l'agent, pour ne laisser
-dans `config.yaml` ni jeton ni URL de ping (qui suffit à envoyer un faux signal au check).
+`profile.aws_credentials`, `notify.report.url` et `notify.report.token` acceptent une référence
+`credential:<nom>` vers le coffre de l'agent, pour ne laisser dans `config.yaml` ni clé d'accès, ni
+jeton, ni URL de ping (qui suffit à envoyer un faux signal au check). `install` demande ceux qui
+manquent ; pour en changer un ensuite, depuis une console d'administration :
 
 ```bat
-kura-agent credentials set webhook
-kura-agent credentials set hc-url --from-env HC_URL
+kura-agent credentials set-aws wasabi            :: identifiant puis clé secrète Wasabi
+kura-agent credentials set hc-url
+kura-agent credentials set webhook --from-env WEBHOOK_TOKEN
 kura-agent credentials list
 kura-agent credentials delete webhook
 ```
 
-Sous Windows, chaque secret est chiffré par DPAPI pour le **compte qui l'enregistre** : lancer ces
-commandes sous le compte qui exécute la tâche planifiée, sinon `run` ne pourra pas le relire.
-`kura-agent install` (étape 4) s'en chargera pour le compte `svc-kura`. Les fichiers sont rangés
-dans `C:\ProgramData\Kura\credentials\`.
+Sous Windows, chaque secret est chiffré par DPAPI dans la portée de la machine (illisible copié
+ailleurs) et rangé dans `C:\ProgramData\Kura\credentials\`, dont l'ACL n'autorise que SYSTEM et les
+Administrateurs : la tâche (`svc-kura`) et une console d'administration lisent les mêmes secrets, un
+utilisateur ordinaire aucun. Les clés Wasabi passent à `aws.exe` par ses variables d'environnement,
+jamais par la ligne de commande ni les journaux.
 
 ## Ce que fait une exécution
 
@@ -255,7 +302,7 @@ C:\ProgramData\Kura\
 ├── config.yaml
 ├── status.json              état courant, réécrit atomiquement
 ├── history.jsonl            une ligne par exécution
-├── credentials\             secrets chiffrés (kura-agent credentials)
+├── credentials\             secrets chiffrés (administrateurs seulement)
 ├── pending\                 bilans webhook en attente de renvoi
 └── logs\runs\2026-10-24_2230\
     ├── run.log              déroulé de l'exécution
@@ -279,6 +326,8 @@ internal/lock/      verrou machine
 internal/state/     status.json, history.jsonl
 internal/report/    bilan vers healthchecks ou webhook
 internal/creds/     coffre de secrets (DPAPI sous Windows)
+internal/setup/     compte svc-kura, droits, ACL, copie des fichiers (install)
+internal/schedtask/ tâche \Kura\Sync : XML du Planificateur, schtasks
 internal/paths/     emplacements sur disque
 ```
 

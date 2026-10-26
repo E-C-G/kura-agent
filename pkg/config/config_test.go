@@ -276,3 +276,37 @@ func TestLegacyWebhookKey(t *testing.T) {
 		t.Fatalf("deux destinations contradictoires doivent être refusées, reçu %v", err)
 	}
 }
+
+func TestAWSCredentials(t *testing.T) {
+	base := strings.Replace(minimal, "%s", "E:/", 1)
+	withKeys := strings.Replace(base, "profile:\n", "profile:\n  aws_credentials: credential:wasabi\n", 1)
+	if err := parseWith(t, withKeys, LoadOptions{}); err != nil {
+		t.Fatalf("aws_credentials valide refusé : %v", err)
+	}
+	for y, field := range map[string]string{
+		strings.Replace(base, "profile:\n", "profile:\n  aws_credentials: AKIAEXEMPLE:secret\n", 1):                       "profile.aws_credentials",
+		strings.Replace(base, "profile:\n", "profile:\n  aws_credentials: credential:wasabi\n  aws_profile: wasabi\n", 1): "profile.aws_profile",
+	} {
+		err := parseWith(t, y, LoadOptions{})
+		if err == nil || !strings.Contains(err.Error(), field) {
+			t.Errorf("erreur sur %s attendue, reçu : %v", field, err)
+		}
+	}
+}
+
+func TestCredentialRefs(t *testing.T) {
+	c := &Config{
+		Profile: Profile{AWSCredentials: "credential:wasabi"},
+		Notify: Notify{Report: &Report{Type: ReportWebhook, URL: "credential:hook-url",
+			Token: "credential:hook-url"}},
+	}
+	got := c.CredentialRefs()
+	want := []CredentialRef{{Name: "wasabi", Field: "profile.aws_credentials", AWS: true},
+		{Name: "hook-url", Field: "notify.report.url"}}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("CredentialRefs = %+v, attendu %+v", got, want)
+	}
+	if refs := (&Config{Notify: Notify{Report: &Report{URL: "https://x.example.com"}}}).CredentialRefs(); len(refs) != 0 {
+		t.Fatalf("aucune référence attendue, reçu %+v", refs)
+	}
+}

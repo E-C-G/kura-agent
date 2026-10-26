@@ -73,6 +73,14 @@ func (c *Config) Validate(opt ValidateOptions) error {
 	} else if u, err := url.Parse(p.Endpoint); err != nil || u.Scheme != "https" || u.Host == "" {
 		add("profile.endpoint", "URL HTTPS attendue, reçu %q", p.Endpoint)
 	}
+	if p.AWSCredentials != "" {
+		if name, ok := strings.CutPrefix(p.AWSCredentials, CredentialPrefix); !ok || !idPattern.MatchString(name) {
+			add("profile.aws_credentials", "référence attendue sous la forme credential:<nom> ; ne mettez jamais de clé en clair ici")
+		}
+		if p.AWSProfile != "" {
+			add("profile.aws_profile", "à retirer : profile.aws_credentials fournit déjà les clés")
+		}
+	}
 	if !validChecksums[p.ChecksumAlgorithm] {
 		add("profile.checksum_algorithm", "valeur %q inconnue (CRC32, CRC32C, SHA1, SHA256, CRC64NVME)", p.ChecksumAlgorithm)
 	}

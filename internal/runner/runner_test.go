@@ -33,6 +33,7 @@ type fakeAWS struct {
 	calls  []call
 	behave map[string]behaviour
 	counts map[call]int
+	envs   [][]string
 }
 
 func newFakeAWS() *fakeAWS {
@@ -47,6 +48,7 @@ func (f *fakeAWS) Run(ctx context.Context, name string, args, env []string, out 
 	c := call{dest: dest, dry: slices.Contains(args, "--dryrun")}
 	f.mu.Lock()
 	f.calls = append(f.calls, c)
+	f.envs = append(f.envs, env)
 	n := f.counts[c]
 	f.counts[c]++
 	b := f.behave[dest]
@@ -676,5 +678,41 @@ func TestReporterFailureDoesNotChangeTheResult(t *testing.T) {
 	log, _ := os.ReadFile(filepath.Join(b.dir, "logs", "runs", st.RunID, "run.log"))
 	if !strings.Contains(string(log), "bilan non envoyé") {
 		t.Error("l'échec d'envoi doit être journalisé")
+	}
+}
+
+func TestAWSEnvReachesEveryCallButNotTheLogs(t *testing.T) {
+	b := newBench(t)
+	st, err := Run(context.Background(), b.cfg, Options{}, Deps{
+		Exec: b.aws, Procs: b.procs, AWSCLI: "aws",
+		AWSEnv:      []string{"AWS_ACCESS_KEY_ID=AKIDTEST", "AWS_SECRET_ACCESS_KEY=SECRET-NE-PAS-JOURNALISER"},
+		StatusFile:  filepath.Join(b.dir, "status.json"),
+		HistoryFile: filepath.Join(b.dir, "history.jsonl"),
+		RunsDir:     filepath.Join(b.dir, "logs", "runs"),
+		Sleep:       func(ctx context.Context, d time.Duration) error { return ctx.Err() },
+	})
+	if err != nil || st.ExitCode != ExitOK {
+		t.Fatalf("exécution : %v, code %d", err, st.ExitCode)
+	}
+	if len(b.aws.envs) == 0 {
+		t.Fatal("aucun appel à aws")
+	}
+	for i, env := range b.aws.envs {
+		if !slices.Contains(env, "AWS_SECRET_ACCESS_KEY=SECRET-NE-PAS-JOURNALISER") || !slices.Contains(env, "PYTHONUTF8=1") {
+			t.Errorf("appel %d : environnement incomplet %v", i, env)
+		}
+	}
+	err = filepath.WalkDir(b.dir, func(path string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		data, err := os.ReadFile(path)
+		if err == nil && strings.Contains(string(data), "SECRET-NE-PAS-JOURNALISER") {
+			t.Errorf("clé secrète écrite dans %s", path)
+		}
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
 }

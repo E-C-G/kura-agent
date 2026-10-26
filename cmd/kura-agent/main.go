@@ -1,11 +1,10 @@
 // Commande kura-agent : sauvegarde planifiée vers Wasabi (wrapper de `aws s3 sync`).
 //
-// Étapes livrées : run, validate, status, credentials, version ; bilan vers healthchecks ou webhook.
-// À venir : install / uninstall, tray, restore.
+// Étapes livrées : run, validate, status, credentials, install, uninstall, version ;
+// bilan vers healthchecks ou webhook. À venir : tray, restore.
 package main
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -18,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/E-C-G/kura-agent/internal/awscli"
 	"github.com/E-C-G/kura-agent/internal/creds"
 	"github.com/E-C-G/kura-agent/internal/execx"
 	"github.com/E-C-G/kura-agent/internal/lock"
@@ -43,16 +43,22 @@ Usage :
   kura-agent validate [--config FICHIER] [--offline]
   kura-agent status   [--json]
   kura-agent credentials set NOM [--from-env VARIABLE]
+  kura-agent credentials set-aws NOM
   kura-agent credentials delete NOM
   kura-agent credentials list
+  kura-agent install   [--config FICHIER] [--account svc-kura] [--skip-validate]
+  kura-agent uninstall [--account svc-kura] [--keep-account] [--purge]
   kura-agent version
 
 Commandes :
-  run       exécute la sauvegarde (normalement lancée par la tâche planifiée \Kura\Sync)
-  validate  vérifie la configuration, la présence d'aws.exe et l'accès au bucket
+  run          exécute la sauvegarde (normalement lancée par la tâche planifiée \Kura\Sync)
+  validate     vérifie la configuration, la présence d'aws.exe et l'accès au bucket
   status       affiche l'état de la dernière exécution
-  credentials  gère les secrets référencés par credential:NOM dans la configuration ;
-               à lancer sous le compte qui exécute la tâche (chiffrement DPAPI lié à ce compte)
+  credentials  gère les secrets référencés par credential:NOM dans la configuration
+               (set-aws : paire de clés d'accès Wasabi) ; console d'administration
+  install      installe ou met à jour : exécutable, configuration, compte svc-kura,
+               secrets manquants, validate, tâche \Kura\Sync ; console d'administration
+  uninstall    retire la tâche, le compte et l'exécutable ; --purge efface aussi les données
   version      affiche la version
 
 Codes de sortie de run : 0 OK · 1 avertissement · 2 erreur · 3 configuration invalide
@@ -74,6 +80,10 @@ func main() {
 		code = cmdStatus(os.Args[2:])
 	case "credentials":
 		code = cmdCredentials(os.Args[2:])
+	case "install":
+		code = cmdInstall(os.Args[2:])
+	case "uninstall":
+		code = cmdUninstall(os.Args[2:])
 	case "version", "--version", "-v":
 		fmt.Printf("kura-agent %s (commit %s, compilé le %s)\n", version, commit, date)
 	case "help", "--help", "-h":
@@ -138,6 +148,12 @@ func cmdRun(args []string) int {
 		recordConfigError(err)
 		return runner.ExitConfig
 	}
+	awsEnv, err := awsKeysEnv(cfg)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		recordConfigError(err)
+		return runner.ExitConfig
+	}
 
 	ignoreLogoff()
 	ctx, stop := signal.NotifyContext(context.Background(), shutdownSignals()...)
@@ -162,6 +178,7 @@ func cmdRun(args []string) int {
 		RunsDir:     paths.RunsDir(),
 		Console:     console,
 		Reporter:    rep,
+		AWSEnv:      awsEnv,
 	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -196,6 +213,26 @@ func resolveAWS(configured string) (string, error) {
 	return p, nil
 }
 
+// awsKeysEnv lit les clés d'accès désignées par profile.aws_credentials.
+func awsKeysEnv(cfg *config.Config) ([]string, error) {
+	if cfg.Profile.AWSCredentials == "" {
+		return nil, nil
+	}
+	v, err := vault().Resolve(cfg.Profile.AWSCredentials)
+	if err != nil {
+		return nil, fmt.Errorf("profile.aws_credentials : %w", err)
+	}
+	k, err := creds.ParseAWSKeys(v)
+	if err != nil {
+		return nil, fmt.Errorf("profile.aws_credentials : %w", err)
+	}
+	return k.Env(), nil
+}
+
+func vault() creds.Store { return creds.Store{Dir: paths.CredentialsDir()} }
+
+func joinAWSKeys(id, secret string) (string, error) { return creds.JoinAWSKeys(id, secret) }
+
 func cmdValidate(args []string) int {
 	fs := flag.NewFlagSet("validate", flag.ContinueOnError)
 	cfgPath := fs.String("config", paths.ConfigFile(), "fichier de configuration")
@@ -226,18 +263,23 @@ func cmdValidate(args []string) int {
 			fmt.Printf("       %s\n", strings.TrimSpace(string(out)))
 		}
 		check("AWS CLI exécutable", err)
-		if !*offline {
+		keys, err := awsKeysEnv(cfg)
+		if cfg.Profile.AWSCredentials != "" {
+			check("clés d'accès "+cfg.Profile.AWSCredentials, err)
+		}
+		if !*offline && err == nil {
 			cmd := exec.Command(aws, "s3api", "head-bucket", "--bucket", cfg.Profile.Bucket,
 				"--endpoint-url", cfg.Profile.Endpoint)
-			cmd.Env = append(os.Environ(), "AWS_PAGER=")
-			if cfg.Profile.AWSProfile != "" {
-				cmd.Env = append(cmd.Env, "AWS_PROFILE="+cfg.Profile.AWSProfile)
-			}
+			cmd.Env = append(append(os.Environ(), awscli.Env(cfg.Profile)...), keys...)
 			out, err := cmd.CombinedOutput()
 			if err != nil {
 				err = fmt.Errorf("%v : %s", err, strings.TrimSpace(string(out)))
 			}
-			check(fmt.Sprintf("accès au bucket %s (profil %q)", cfg.Profile.Bucket, cfg.Profile.AWSProfile), err)
+			via := cfg.Profile.AWSCredentials
+			if via == "" {
+				via = fmt.Sprintf("profil %q", cfg.Profile.AWSProfile)
+			}
+			check(fmt.Sprintf("accès au bucket %s (%s)", cfg.Profile.Bucket, via), err)
 		}
 	}
 	if r := cfg.Notify.Report; r != nil {
@@ -268,7 +310,7 @@ func reportOptions(cfg *config.Config) report.Options {
 }
 
 func cmdCredentials(args []string) int {
-	store := creds.Store{Dir: paths.CredentialsDir()}
+	store := vault()
 	if len(args) == 0 {
 		fmt.Fprint(os.Stderr, usage)
 		return 2
@@ -313,13 +355,12 @@ func cmdCredentials(args []string) int {
 		if *fromEnv != "" {
 			value = os.Getenv(*fromEnv)
 		} else {
-			fmt.Fprintf(os.Stderr, "valeur de %q (une ligne, affichée en clair à la saisie) : ", name)
-			line, err := bufio.NewReader(os.Stdin).ReadString('\n')
-			if err != nil && line == "" {
-				fmt.Fprintln(os.Stderr, "\nlecture impossible :", err)
+			v, err := askSecret(fmt.Sprintf("valeur de %q (non affichée) : ", name))
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "lecture impossible :", err)
 				return 2
 			}
-			value = strings.TrimRight(line, "\r\n")
+			value = v
 		}
 		if err := store.Set(name, value); err != nil {
 			fmt.Fprintln(os.Stderr, err)
@@ -327,8 +368,23 @@ func cmdCredentials(args []string) int {
 		}
 		fmt.Printf("secret %q enregistré ; référence dans la configuration : credential:%s\n", name, name)
 		return 0
+	case "set-aws":
+		if len(args) != 2 {
+			fmt.Fprintln(os.Stderr, "usage : kura-agent credentials set-aws NOM")
+			return 2
+		}
+		value, err := askAWSKeys(args[1])
+		if err == nil {
+			err = store.Set(args[1], value)
+		}
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 2
+		}
+		fmt.Printf("clés %q enregistrées ; référence dans la configuration : aws_credentials: credential:%s\n", args[1], args[1])
+		return 0
 	default:
-		fmt.Fprintf(os.Stderr, "sous-commande inconnue %q (set, delete, list)\n", args[0])
+		fmt.Fprintf(os.Stderr, "sous-commande inconnue %q (set, set-aws, delete, list)\n", args[0])
 		return 2
 	}
 }

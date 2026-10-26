@@ -10,7 +10,8 @@ version: 1
 profile:
   name: acme-srv01
   aws_cli: "C:/Program Files/Amazon/AWSCLIV2/aws.exe"   # vide = recherche dans le PATH
-  aws_profile: wasabi            # profil de ~/.aws/credentials du compte svc-kura
+  aws_credentials: credential:wasabi   # clés du coffre : kura-agent credentials set-aws wasabi
+  # aws_profile: wasabi          # ou un profil de ~/.aws/credentials (pas avec svc-kura)
   endpoint: https://s3.eu-central-1.wasabisys.com
   region: eu-central-1
   bucket: acme-srv01
