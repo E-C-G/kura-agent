@@ -94,8 +94,16 @@ jobs:
         shell: bash
         run: go mod tidy
 
+      # Les échecs remontent en annotations : lisibles sans télécharger le journal.
       - name: Tests
-        run: go test -count=1 ./...
+        shell: bash
+        run: |
+          set -o pipefail
+          go test -count=1 ./... 2>&1 | tee test.log || {
+            grep -E -- '--- FAIL|^FAIL|panic:|_test\.go:[0-9]+:' test.log | head -20 |
+              while IFS= read -r l; do echo "::error::$l"; done
+            exit 1
+          }
 
       - name: Lancement du binaire
         shell: bash

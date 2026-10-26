@@ -31,6 +31,10 @@ const (
 	pollEvery     = 50 * time.Millisecond
 )
 
+// serverNames : exécutables admis à servir le canal (en minuscules). Les tests y
+// ajoutent leur propre binaire.
+var serverNames = map[string]bool{"kura-agent.exe": true, "kura-agentw.exe": true}
+
 // PipeName est le canal de l'icône d'une session.
 func PipeName(session int) string { return `\\.\pipe\Kura-` + strconv.Itoa(session) }
 
@@ -210,7 +214,7 @@ func checkServer(h windows.Handle, session int) error {
 		return err
 	}
 	base := strings.ToLower(filepath.Base(server))
-	if !strings.EqualFold(filepath.Dir(server), filepath.Dir(self)) || (base != "kura-agent.exe" && base != "kura-agentw.exe") {
+	if !strings.EqualFold(filepath.Dir(server), filepath.Dir(self)) || !serverNames[base] {
 		return fmt.Errorf("canal servi par %s, pas par une icône Kura : ignoré", server)
 	}
 	return nil

@@ -4,6 +4,9 @@ package ipc
 
 import (
 	"context"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -16,6 +19,9 @@ func TestNamedPipeRoundTrip(t *testing.T) {
 	if err := windows.ProcessIdToSessionId(windows.GetCurrentProcessId(), &session); err != nil {
 		t.Fatal(err)
 	}
+	self, _ := os.Executable()
+	serverNames[strings.ToLower(filepath.Base(self))] = true
+	defer delete(serverNames, strings.ToLower(filepath.Base(self)))
 	l, err := Listen()
 	if err != nil {
 		t.Fatal(err)
