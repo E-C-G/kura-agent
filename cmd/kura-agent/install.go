@@ -24,7 +24,10 @@ import (
 type system struct {
 	checkAdmin       func() error
 	secureDataDir    func(dir string) error
-	installBinary    func(dir string) (string, error)
+	installBinary    func(dir string) (exe, gui string, err error)
+	setAutostart     func(gui string) error
+	removeAutostart  func() error
+	stopTrays        func() int
 	programDir       func() string
 	ensureAccount    func(name string) (sid string, created bool, err error)
 	removeAccount    func(name string) error
@@ -49,6 +52,9 @@ func realSystem() system {
 		checkAdmin:       setup.CheckAdmin,
 		secureDataDir:    setup.SecureDataDir,
 		installBinary:    setup.InstallBinary,
+		setAutostart:     setup.SetTrayAutostart,
+		removeAutostart:  setup.RemoveTrayAutostart,
+		stopTrays:        setup.StopTrays,
 		programDir:       setup.ProgramDir,
 		ensureAccount:    setup.EnsureAccount,
 		removeAccount:    setup.RemoveAccount,
@@ -123,11 +129,14 @@ func install(sys system, cfgPath, account string, skipValidate bool) int {
 		step("configuration : %s", sys.configFile)
 	}
 
-	exe, err := sys.installBinary(sys.programDir())
+	exe, gui, err := sys.installBinary(sys.programDir())
 	if err != nil {
 		return fail(exitInstallFailed, "copie de l'exécutable : %v", err)
 	}
 	step("exécutable : %s", exe)
+	if gui == "" {
+		fmt.Fprintf(out, "Attention : %s absent à côté de l'exécutable : pas d'icône (préavis par simple attente, pas de relance d'Outlook).\n", setup.GUIName)
+	}
 
 	sid, created, err := sys.ensureAccount(account)
 	if err != nil {
@@ -188,7 +197,7 @@ func install(sys system, cfgPath, account string, skipValidate bool) int {
 		runNow = append(runNow, s)
 	}
 	def, err := schedtask.XML(cfg.Schedule, schedtask.Params{
-		UserID: sid, Command: exe, Arguments: "run --quiet", WorkingDir: sys.dataDir,
+		UserID: sid, Command: exe, Arguments: "run --quiet --scheduled", WorkingDir: sys.dataDir,
 		RunNowSIDs: runNow, Now: sys.now(),
 	})
 	if err != nil {
@@ -199,13 +208,22 @@ func install(sys system, cfgPath, account string, skipValidate bool) int {
 	}
 	step("tâche %s enregistrée : %s, compte %s sans mot de passe stocké (S4U), autorisations maximales", schedtask.Name, describeSchedule(cfg.Schedule), account)
 
+	if gui != "" {
+		if err := sys.setAutostart(gui); err != nil {
+			return fail(exitInstallFailed, "lancement de l'icône à l'ouverture de session : %v", err)
+		}
+		step("icône lancée à chaque ouverture de session pour %s", strings.Join(cfg.Tray.Users, ", "))
+	}
+
 	fmt.Fprintf(out, `
 Installation terminée.
 Suite conseillée :
   1. kura-agent run --dry-run          simulation, rien n'est copié ni supprimé
   2. schtasks /Run /TN %s        une vraie exécution sous %s, puis kura-agent status
   3. après une nuit sans erreur, désactiver puis supprimer l'ancienne tâche et son script
-`, schedtask.Name, account)
+L'icône apparaît à la prochaine ouverture de session ; pour l'ouvrir tout de suite dans
+une session déjà ouverte, y lancer « %s tray » (sans élévation).
+`, schedtask.Name, account, filepath.Join(sys.programDir(), setup.GUIName))
 	return exitInstallOK
 }
 
@@ -306,6 +324,12 @@ func uninstall(sys system, account string, keepAccount, purge bool) int {
 	defer release()
 
 	var errs []error
+	if err := sys.removeAutostart(); err != nil {
+		errs = append(errs, fmt.Errorf("lancement de l'icône : %w", err))
+	}
+	if n := sys.stopTrays(); n > 0 {
+		step("%d icône(s) fermée(s)", n)
+	}
 	if err := sys.deleteTask(); err != nil {
 		errs = append(errs, err)
 	} else {

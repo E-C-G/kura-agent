@@ -14,12 +14,15 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/E-C-G/kura-agent/internal/awscli"
 	"github.com/E-C-G/kura-agent/internal/execx"
 	"github.com/E-C-G/kura-agent/internal/guard"
+	"github.com/E-C-G/kura-agent/internal/ipc"
 	"github.com/E-C-G/kura-agent/internal/procs"
 	"github.com/E-C-G/kura-agent/internal/report"
 	"github.com/E-C-G/kura-agent/internal/state"
@@ -72,12 +75,25 @@ type Deps struct {
 	Reporter    report.Reporter // destination du bilan ; nil = aucune
 	// AWSEnv complète l'environnement de aws (clés lues dans le coffre). Jamais journalisé.
 	AWSEnv []string
+	// Trays dialogue avec les icônes des sessions (ipc.Hub) ; nil = aucune icône :
+	// préavis par simple attente puis arrêt forcé, pas de relance.
+	Trays Trays
 
 	Now        func() time.Time                                 // défaut : time.Now
 	Sleep      func(ctx context.Context, d time.Duration) error // défaut : attente annulable
 	Retries    int                                              // nouvelles tentatives ; défaut 2
 	RetryDelay time.Duration                                    // défaut 5 min
 }
+
+// Trays est le côté run du dialogue avec les icônes (voir ipc.Hub).
+type Trays interface {
+	Broadcast(m ipc.Msg)
+	Has(session int) bool
+	Request(ctx context.Context, session int, m ipc.Msg) (ipc.Msg, error)
+}
+
+// replyMargin s'ajoute au délai laissé à l'icône pour répondre.
+const replyMargin = 30 * time.Second
 
 func (d *Deps) defaults() {
 	if d.Now == nil {
@@ -144,6 +160,7 @@ func Run(ctx context.Context, cfg *config.Config, opt Options, d Deps) (state.St
 		r.st.JobLastSuccess = prev.JobLastSuccess
 	}
 	r.save()
+	r.broadcast(ipc.Msg{Type: ipc.TypeStarted, RunID: runID, Total: len(jobs), DryRun: opt.DryRun})
 
 	runCtx := ctx
 	if max := cfg.Schedule.MaxDuration.Duration; max > 0 {
@@ -167,10 +184,14 @@ func Run(ctx context.Context, cfg *config.Config, opt Options, d Deps) (state.St
 		"bucket", cfg.Profile.Bucket, "jobs", jobIDs(jobs), "simulation", opt.DryRun, "force_deletes", opt.ForceDeletes)
 
 	preOK := r.preTasks(runCtx, jobs)
-	for _, j := range jobs {
+	for i, j := range jobs {
+		r.st.Current = &state.Progress{Job: j.Name, Index: i + 1, Total: len(jobs)}
+		r.save()
+		r.broadcast(ipc.Msg{Type: ipc.TypeJob, RunID: runID, Job: j.Name, Index: i + 1, Total: len(jobs)})
 		r.st.Jobs = append(r.st.Jobs, r.job(runCtx, j, preOK))
 		r.save()
 	}
+	r.st.Current = nil
 	r.postTasks()
 
 	// Bilan
@@ -191,7 +212,7 @@ func Run(ctx context.Context, cfg *config.Config, opt Options, d Deps) (state.St
 		r.st.Message = fmt.Sprintf("durée maximale de %s dépassée", cfg.Schedule.MaxDuration)
 	case ctx.Err() != nil:
 		overall = state.ResultCancelled
-		r.st.Message = "exécution annulée"
+		r.st.Message = r.interruptReason(ctx)
 	}
 	end := d.Now()
 	r.st.State = "idle"
@@ -236,9 +257,16 @@ func Run(ctx context.Context, cfg *config.Config, opt Options, d Deps) (state.St
 			cancel()
 		}
 	}
+	r.broadcast(ipc.Msg{Type: ipc.TypeFinished, RunID: runID, Result: overall, ExitCode: r.st.ExitCode, Message: r.st.Message})
 	log.Info("fin de l'exécution", "résultat", overall, "code", r.st.ExitCode,
 		"durée", end.Sub(start).Round(time.Second).String())
 	return r.st, nil
+}
+
+func (r *run) broadcast(m ipc.Msg) {
+	if r.d.Trays != nil {
+		r.d.Trays.Broadcast(m)
+	}
 }
 
 type run struct {
@@ -248,6 +276,10 @@ type run struct {
 	log    *slog.Logger
 	runDir string
 	st     state.Status
+
+	// closed : par processus (en minuscules), sessions où il a été fermé et chemin de
+	// son exécutable, pour la relance par l'icône.
+	closed map[string]map[int]string
 }
 
 func (r *run) save() {
@@ -312,51 +344,208 @@ func (r *run) closeProcess(ctx context.Context, p config.PreTask, ps *state.PreT
 		r.log.Info("pré-tâche : processus absent, rien à fermer", "processus", p.Process)
 		return true
 	}
+	bySession := map[int][]procs.Process{}
 	for _, f := range found {
 		ps.Sessions = appendUnique(ps.Sessions, f.Session)
+		bySession[f.Session] = append(bySession[f.Session], f)
 	}
-	// V1 sans icône : pas de préavis affiché ni de fermeture douce possibles depuis
-	// la session de svc-kura. On attend le préavis puis on force (comme taskkill /F).
-	r.log.Info("pré-tâche : processus ouvert, attente du préavis avant arrêt forcé",
-		"processus", p.Process, "instances", len(found), "sessions", ps.Sessions,
-		"préavis_s", p.NoticeSeconds, "note", "fermeture douce et report disponibles avec l'icône")
-	if err := r.d.Sleep(ctx, time.Duration(p.NoticeSeconds)*time.Second); err != nil {
-		ps.Result, ps.Message = r.interrupted(ctx), "interrompu pendant le préavis : "+r.interruptReason(ctx)
-		return false
+	// Une session à la fois serait plus simple, mais un report d'une heure accordé à
+	// un utilisateur retarderait le préavis de l'autre : les sessions avancent ensemble.
+	results := make([]sessionClose, len(ps.Sessions))
+	var wg sync.WaitGroup
+	for i, s := range ps.Sessions {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			results[i] = r.closeInSession(ctx, p, s, bySession[s])
+		}()
+	}
+	wg.Wait()
+
+	ok := true
+	var msgs []string
+	for i, res := range results {
+		ps.Closed += res.closed
+		ps.Graceful += res.graceful
+		ps.Postponed += res.postponed
+		if res.closed > 0 {
+			r.noteClosed(p.Process, ps.Sessions[i], bySession[ps.Sessions[i]])
+		}
+		if !res.ok {
+			ok = false
+			if res.result != "" && state.Worst(ps.Result, res.result) == res.result {
+				ps.Result = res.result
+			}
+			msgs = append(msgs, res.message)
+		}
+	}
+	if !ok {
+		if ps.Result == state.ResultOK {
+			ps.Result = state.ResultWarning
+		}
+		ps.Message = strings.Join(msgs, " ; ")
+	}
+	return ok
+}
+
+// sessionClose est le résultat de la fermeture d'un processus dans une session.
+type sessionClose struct {
+	ok        bool
+	closed    int // instances fermées (par l'icône ou arrêtées)
+	graceful  int // dont fermées par l'icône
+	postponed int
+	result    string // résultat de la pré-tâche si !ok
+	message   string
+}
+
+// closeInSession : préavis et fermeture douce par l'icône de la session si elle répond,
+// sinon simple attente du préavis ; puis arrêt forcé de ce qui reste (force: true).
+func (r *run) closeInSession(ctx context.Context, p config.PreTask, session int, list []procs.Process) sessionClose {
+	log := r.log.With("processus", p.Process, "session", session)
+	res := sessionClose{}
+	notice := time.Duration(p.NoticeSeconds) * time.Second
+	interrupted := func(when string) sessionClose {
+		res.result, res.message = r.interrupted(ctx), "interrompu pendant "+when+" : "+r.interruptReason(ctx)
+		return res
+	}
+	remaining := func() ([]procs.Process, error) {
+		all, err := r.d.Procs.Find(p.Process)
+		var in []procs.Process
+		for _, f := range all {
+			if f.Session == session {
+				in = append(in, f)
+			}
+		}
+		return in, err
+	}
+
+	waited := false   // le préavis s'est déjà écoulé (réponse de l'icône ou délai)
+	answered := false // l'icône a accepté la fermeture et l'a faite
+	if r.d.Trays != nil && r.d.Trays.Has(session) {
+		left, delay := 0, time.Duration(0)
+		if pp := p.AllowPostpone; pp != nil && pp.Max > 0 && pp.Delay.Duration > 0 {
+			left, delay = pp.Max, pp.Delay.Duration
+		}
+		for {
+			req := ipc.Msg{Type: ipc.TypePromptClose, Process: p.Process, NoticeS: p.NoticeSeconds}
+			if left > 0 {
+				req.PostponeS, req.PostponesLeft = int(delay/time.Second), left
+			}
+			log.Info("pré-tâche : préavis affiché par l'icône", "préavis_s", p.NoticeSeconds, "reports_restants", left)
+			rctx, cancel := context.WithTimeout(ctx, notice+replyMargin)
+			ans, err := r.d.Trays.Request(rctx, session, req)
+			cancel()
+			if ctx.Err() != nil {
+				return interrupted("le préavis")
+			}
+			if err != nil {
+				waited = errors.Is(err, context.DeadlineExceeded)
+				log.Warn("pré-tâche : pas de réponse de l'icône au préavis", "err", err)
+				break
+			}
+			if ans.Choice == ipc.ChoicePostpone && left > 0 {
+				left--
+				res.postponed++
+				log.Info("pré-tâche : report demandé par l'utilisateur", "délai", delay.String(), "reports_restants", left)
+				if err := r.d.Sleep(ctx, delay); err != nil {
+					return interrupted("le report")
+				}
+				if still, err := remaining(); err == nil && len(still) == 0 {
+					log.Info("pré-tâche : processus fermé par l'utilisateur pendant le report")
+					res.ok = true
+					return res
+				}
+				continue
+			}
+			log.Info("pré-tâche : fermeture acceptée", "choix", ans.Choice)
+			answered, waited = true, true
+			break
+		}
+		if answered {
+			graceful := p.GracefulTimeout.Duration
+			rctx, cancel := context.WithTimeout(ctx, graceful+replyMargin)
+			ans, err := r.d.Trays.Request(rctx, session, ipc.Msg{Type: ipc.TypeClose, Process: p.Process,
+				GracefulS: int(graceful / time.Second)})
+			cancel()
+			if ctx.Err() != nil {
+				return interrupted("la fermeture douce")
+			}
+			if err != nil {
+				log.Warn("pré-tâche : fermeture douce sans réponse de l'icône", "err", err)
+			} else {
+				log.Info("pré-tâche : fermeture douce faite par l'icône", "restants", ans.Remaining)
+			}
+		}
+	} else {
+		log.Info("pré-tâche : pas d'icône dans la session, attente du préavis avant arrêt forcé", "préavis_s", p.NoticeSeconds)
+	}
+	if !waited {
+		if err := r.d.Sleep(ctx, notice); err != nil {
+			return interrupted("le préavis")
+		}
+	}
+
+	// Rechercher de nouveau : l'utilisateur a pu fermer le processus, et Windows
+	// réattribuer son PID. On n'arrête que ce qui tourne encore sous ce nom
+	// (Terminate revérifie le nom sur le processus lui-même).
+	still, err := remaining()
+	if err != nil {
+		res.result, res.message = state.ResultWarning, "liste des processus impossible : "+err.Error()
+		return res
+	}
+	// Ce qui a disparu après la fermeture douce a été fermé par l'icône (et sera
+	// relancé) ; sans icône, c'est l'utilisateur qui l'a fermé : rien à relancer.
+	if n := len(list) - len(still); answered && n > 0 {
+		res.closed += n
+		res.graceful += n
+	}
+	if len(still) == 0 {
+		log.Info("pré-tâche : processus fermé")
+		res.ok = true
+		return res
 	}
 	if !p.Force {
-		ps.Result, ps.Message = state.ResultWarning, "processus toujours ouvert (force: false)"
-		r.log.Warn("pré-tâche : processus laissé ouvert (force: false)", "processus", p.Process)
-		return false
+		res.result, res.message = state.ResultWarning, fmt.Sprintf("session %d : processus toujours ouvert (force: false)", session)
+		log.Warn("pré-tâche : processus laissé ouvert (force: false)")
+		return res
 	}
-	// Rechercher de nouveau : pendant le préavis, l'utilisateur a pu fermer Outlook et
-	// Windows réattribuer son PID à un autre processus. On n'arrête que ce qui tourne
-	// encore sous ce nom (Terminate revérifie le nom sur le processus lui-même).
-	found, err = r.d.Procs.Find(p.Process)
-	if err != nil {
-		ps.Result, ps.Message = state.ResultWarning, "liste des processus impossible : "+err.Error()
-		return false
-	}
-	if len(found) == 0 {
-		r.log.Info("pré-tâche : processus fermé pendant le préavis", "processus", p.Process)
-		return true
-	}
-	for _, f := range found {
+	for _, f := range still {
 		if err := r.d.Procs.Terminate(f); err != nil {
-			r.log.Warn("pré-tâche : arrêt impossible", "pid", f.PID, "session", f.Session, "err", err)
+			log.Warn("pré-tâche : arrêt impossible", "pid", f.PID, "err", err)
 			continue
 		}
-		ps.Closed++
-		r.log.Info("pré-tâche : processus arrêté", "processus", p.Process, "pid", f.PID, "session", f.Session)
+		res.closed++
+		log.Info("pré-tâche : processus arrêté", "pid", f.PID)
 	}
-	still, err := r.d.Procs.Find(p.Process)
-	if err == nil && len(still) == 0 {
-		return true
+	if after, err := remaining(); err == nil && len(after) == 0 {
+		res.ok = true
+		return res
+	} else if err == nil {
+		res.message = fmt.Sprintf("session %d : %d instance(s) toujours ouverte(s)", session, len(after))
+	} else {
+		res.message = "liste des processus impossible : " + err.Error()
 	}
-	ps.Result = state.ResultWarning
-	ps.Message = fmt.Sprintf("%d instance(s) toujours ouverte(s)", len(still))
-	r.log.Warn("pré-tâche : processus toujours ouvert après arrêt forcé", "processus", p.Process, "instances", len(still))
-	return false
+	res.result = state.ResultWarning
+	log.Warn("pré-tâche : processus toujours ouvert après arrêt forcé")
+	return res
+}
+
+func (r *run) noteClosed(process string, session int, list []procs.Process) {
+	if r.closed == nil {
+		r.closed = map[string]map[int]string{}
+	}
+	key := strings.ToLower(process)
+	if r.closed[key] == nil {
+		r.closed[key] = map[int]string{}
+	}
+	path := ""
+	for _, f := range list {
+		if f.Path != "" {
+			path = f.Path
+			break
+		}
+	}
+	r.closed[key][session] = path
 }
 
 func (r *run) job(ctx context.Context, j config.Job, preOK map[string]bool) state.JobStatus {
@@ -542,6 +731,10 @@ func (r *run) interruptReason(ctx context.Context) string {
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		return fmt.Sprintf("durée maximale de %s dépassée", r.cfg.Schedule.MaxDuration)
 	}
+	// Annulation avec une cause (ex. « annulée depuis l'icône par alice »).
+	if c := context.Cause(ctx); c != nil && !errors.Is(c, context.Canceled) {
+		return c.Error()
+	}
 	return "exécution annulée"
 }
 
@@ -553,23 +746,45 @@ func (r *run) failureOf(ctx context.Context, err error) string {
 	return state.ResultError
 }
 
-// postTasks : relancer Outlook dans la session d'un utilisateur demande l'icône (étape 5).
+// postTasks relance les processus fermés par les pré-tâches, dans la session où ils
+// tournaient : seule l'icône de cette session peut le faire (un processus de svc-kura
+// ne peut pas ouvrir Outlook dans la session d'un utilisateur). Même après une
+// annulation : l'utilisateur doit retrouver son Outlook.
 func (r *run) postTasks() {
 	if r.opt.DryRun {
 		return
 	}
 	for _, p := range r.cfg.PostTasks {
-		wasRunning := false
-		for _, ps := range r.st.PreTasks {
-			if strings.EqualFold(ps.Process, p.Process) && ps.Closed > 0 {
-				wasRunning = true
+		sessions := r.closed[strings.ToLower(p.Process)]
+		if len(sessions) == 0 {
+			if !p.OnlyIfWasRunning {
+				r.log.Info("post-tâche : aucune session où relancer le processus (il n'a pas été fermé)", "processus", p.Process)
 			}
-		}
-		if p.OnlyIfWasRunning && !wasRunning {
 			continue
 		}
-		r.log.Info("post-tâche non exécutée : la relance dans la session de l'utilisateur passe par l'icône",
-			"processus", p.Process)
+		ids := make([]int, 0, len(sessions))
+		for s := range sessions {
+			ids = append(ids, s)
+		}
+		sort.Ints(ids)
+		for _, s := range ids {
+			log := r.log.With("processus", p.Process, "session", s)
+			if r.d.Trays == nil || !r.d.Trays.Has(s) {
+				log.Warn("post-tâche : pas d'icône dans la session, processus non relancé")
+				continue
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), replyMargin)
+			ans, err := r.d.Trays.Request(ctx, s, ipc.Msg{Type: ipc.TypeStart, Process: p.Process, Path: sessions[s]})
+			cancel()
+			switch {
+			case err != nil:
+				log.Warn("post-tâche : relance sans réponse de l'icône", "err", err)
+			case !ans.OK:
+				log.Warn("post-tâche : relance refusée ou impossible", "message", ans.Message)
+			default:
+				log.Info("post-tâche : processus relancé par l'icône")
+			}
+		}
 	}
 }
 

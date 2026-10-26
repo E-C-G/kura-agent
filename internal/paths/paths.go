@@ -40,3 +40,6 @@ func CredentialsDir() string { return filepath.Join(DataDir(), "credentials") }
 
 // PendingDir garde les bilans webhook non envoyés, renvoyés à l'exécution suivante.
 func PendingDir() string { return filepath.Join(DataDir(), "pending") }
+
+// SuspendFile est la suspension de la planification (kura-agent suspend).
+func SuspendFile() string { return filepath.Join(DataDir(), "suspend.json") }

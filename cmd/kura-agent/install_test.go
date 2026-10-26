@@ -31,11 +31,14 @@ func (f *fakeSys) system(dir string) system {
 	return system{
 		checkAdmin:    func() error { f.calls = append(f.calls, "admin"); return nil },
 		secureDataDir: func(d string) error { f.calls = append(f.calls, "acl"); return os.MkdirAll(d, 0o755) },
-		installBinary: func(d string) (string, error) {
+		installBinary: func(d string) (string, string, error) {
 			f.calls = append(f.calls, "binary")
-			return filepath.Join(d, "kura-agent.exe"), nil
+			return filepath.Join(d, "kura-agent.exe"), filepath.Join(d, "kura-agentw.exe"), nil
 		},
-		programDir: func() string { return filepath.Join(dir, "prog") },
+		setAutostart:    func(g string) error { f.calls = append(f.calls, "autostart"); return nil },
+		removeAutostart: func() error { f.calls = append(f.calls, "rmautostart"); return nil },
+		stopTrays:       func() int { f.calls = append(f.calls, "stoptrays"); return 1 },
+		programDir:      func() string { return filepath.Join(dir, "prog") },
 		ensureAccount: func(n string) (string, bool, error) {
 			f.calls = append(f.calls, "account:"+n)
 			return "S-1-5-21-9-9-9-1001", true, nil
@@ -124,7 +127,7 @@ func TestInstallFresh(t *testing.T) {
 	if code := install(sys, cfg, "svc-kura", false); code != 0 {
 		t.Fatalf("code %d ; appels %v", code, f.calls)
 	}
-	want := "admin acl binary account:svc-kura validate task"
+	want := "admin acl binary account:svc-kura validate task autostart"
 	if got := strings.Join(f.calls, " "); got != want {
 		t.Fatalf("ordre des étapes :\n reçu   %s\n attendu %s", got, want)
 	}
@@ -140,7 +143,7 @@ func TestInstallFresh(t *testing.T) {
 		t.Fatalf("configuration non copiée : %v", err)
 	}
 	for _, w := range []string{"<UserId>S-1-5-21-9-9-9-1001</UserId>", "(A;;FRFX;;;S-1-5-21-9-9-9-2000)",
-		"kura-agent.exe</Command>", "<Arguments>run --quiet</Arguments>", "<Monday></Monday>"} {
+		"kura-agent.exe</Command>", "<Arguments>run --quiet --scheduled</Arguments>", "<Monday></Monday>"} {
 		if !strings.Contains(f.xml, w) {
 			t.Errorf("%q absent de la tâche", w)
 		}
@@ -224,7 +227,7 @@ func TestUninstall(t *testing.T) {
 	if code := uninstall(sys, "svc-kura", false, false); code != 0 {
 		t.Fatalf("code %d", code)
 	}
-	if got := strings.Join(f.calls, " "); got != "admin lock rmtask rmaccount:svc-kura rmprog" {
+	if got := strings.Join(f.calls, " "); got != "admin lock rmautostart stoptrays rmtask rmaccount:svc-kura rmprog" {
 		t.Fatalf("étapes : %s", got)
 	}
 	if _, err := os.Stat(sys.dataDir); err != nil {

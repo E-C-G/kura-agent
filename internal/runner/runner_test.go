@@ -108,6 +108,8 @@ type bench struct {
 	dir     string
 	sleeps  []time.Duration
 	onSleep func() // appelé à chaque attente (préavis, délai entre tentatives)
+	trays   Trays
+	smu     sync.Mutex
 }
 
 func newBench(t *testing.T) *bench {
@@ -146,13 +148,16 @@ func (b *bench) run(ctx context.Context, opt Options) state.Status {
 		HistoryFile: filepath.Join(b.dir, "history.jsonl"),
 		RunsDir:     filepath.Join(b.dir, "logs", "runs"),
 		Sleep: func(ctx context.Context, d time.Duration) error {
+			b.smu.Lock()
 			b.sleeps = append(b.sleeps, d)
+			b.smu.Unlock()
 			if b.onSleep != nil {
 				b.onSleep()
 			}
 			return ctx.Err()
 		},
 		RetryDelay: time.Minute,
+		Trays:      b.trays,
 	})
 	if err != nil {
 		b.t.Fatal(err)

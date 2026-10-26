@@ -52,16 +52,27 @@ type Status struct {
 	Message        string               `json:"message,omitempty"`
 	PreTasks       []PreTaskStatus      `json:"pre_tasks,omitempty"`
 	Jobs           []JobStatus          `json:"jobs"`
+	// Current est le job en cours pendant une exécution (info-bulle de l'icône).
+	Current *Progress `json:"current,omitempty"`
+}
+
+// Progress situe le job en cours.
+type Progress struct {
+	Job   string `json:"job"`   // nom du job
+	Index int    `json:"index"` // 1..Total
+	Total int    `json:"total"`
 }
 
 // PreTaskStatus résume une pré-tâche.
 type PreTaskStatus struct {
-	Process  string `json:"process"`
-	Found    int    `json:"found"`  // instances trouvées
-	Closed   int    `json:"closed"` // instances arrêtées
-	Result   string `json:"result"`
-	Sessions []int  `json:"sessions,omitempty"`
-	Message  string `json:"message,omitempty"`
+	Process   string `json:"process"`
+	Found     int    `json:"found"`  // instances trouvées
+	Closed    int    `json:"closed"` // instances arrêtées
+	Result    string `json:"result"`
+	Sessions  []int  `json:"sessions,omitempty"`
+	Graceful  int    `json:"graceful,omitempty"`  // instances fermées par l'icône (fermeture douce)
+	Postponed int    `json:"postponed,omitempty"` // reports accordés à l'utilisateur
+	Message   string `json:"message,omitempty"`
 }
 
 // JobStatus résume un job.

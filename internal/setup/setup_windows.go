@@ -14,6 +14,8 @@ import (
 
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
+
+	"github.com/E-C-G/kura-agent/internal/procs"
 )
 
 var (
@@ -294,40 +296,101 @@ func ProgramDir() string {
 	return filepath.Join(base, "Kura")
 }
 
-// InstallBinary copie l'exécutable courant dans dir et renvoie son chemin. Un binaire
-// en cours d'exécution ne peut pas être écrasé mais peut être renommé : l'ancien
-// devient kura-agent.exe.old, supprimé à l'installation suivante.
-func InstallBinary(dir string) (string, error) {
+// GUIName est la version sans console de l'exécutable (icône, commandes élevées).
+const GUIName = "kura-agentw.exe"
+
+// InstallBinary copie l'exécutable courant dans dir, avec kura-agentw.exe s'il est à
+// côté, et renvoie leurs chemins (gui vide s'il manque). Un binaire en cours
+// d'exécution (icônes ouvertes) ne peut pas être écrasé mais peut être renommé :
+// l'ancien devient .old, supprimé à l'installation suivante.
+func InstallBinary(dir string) (exe, gui string, err error) {
 	src, err := os.Executable()
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
-	dst := filepath.Join(dir, "kura-agent.exe")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return "", err
+		return "", "", err
 	}
 	if err := applySDDL(dir, ProgramDirSDDL); err != nil {
-		return "", fmt.Errorf("droits de %s : %w", dir, err)
+		return "", "", fmt.Errorf("droits de %s : %w", dir, err)
 	}
+	exe = filepath.Join(dir, "kura-agent.exe")
+	if err := replaceFile(src, exe); err != nil {
+		return "", "", err
+	}
+	srcGUI := filepath.Join(filepath.Dir(src), GUIName)
+	if strings.EqualFold(filepath.Base(src), GUIName) {
+		srcGUI = src
+	}
+	if _, err := os.Stat(srcGUI); err != nil {
+		return exe, "", nil
+	}
+	gui = filepath.Join(dir, GUIName)
+	if err := replaceFile(srcGUI, gui); err != nil {
+		return exe, "", err
+	}
+	return exe, gui, nil
+}
+
+func replaceFile(src, dst string) error {
 	if samePath(src, dst) {
-		return dst, nil
+		return nil
 	}
 	tmp := dst + ".new"
 	if err := copyFile(src, tmp); err != nil {
-		return "", err
+		return err
 	}
 	old := dst + ".old"
 	_ = os.Remove(old)
 	if _, err := os.Stat(dst); err == nil {
 		if err := os.Rename(dst, old); err != nil {
 			os.Remove(tmp)
-			return "", fmt.Errorf("remplacement de %s : %w", dst, err)
+			return fmt.Errorf("remplacement de %s : %w", dst, err)
 		}
 	}
-	if err := os.Rename(tmp, dst); err != nil {
-		return "", err
+	return os.Rename(tmp, dst)
+}
+
+const runKey = `SOFTWARE\Microsoft\Windows\CurrentVersion\Run`
+
+// SetTrayAutostart lance l'icône à chaque ouverture de session (tous les comptes ;
+// elle se ferme aussitôt pour ceux qui ne sont pas dans tray.users).
+func SetTrayAutostart(gui string) error {
+	k, _, err := registry.CreateKey(registry.LOCAL_MACHINE, runKey, registry.SET_VALUE)
+	if err != nil {
+		return err
 	}
-	return dst, nil
+	defer k.Close()
+	return k.SetStringValue("Kura", `"`+gui+`" tray`)
+}
+
+// RemoveTrayAutostart retire le lancement de l'icône ; absent n'est pas une erreur.
+func RemoveTrayAutostart() error {
+	k, err := registry.OpenKey(registry.LOCAL_MACHINE, runKey, registry.SET_VALUE)
+	if err != nil {
+		return nil
+	}
+	defer k.Close()
+	if err := k.DeleteValue("Kura"); err != nil && !errors.Is(err, registry.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
+// StopTrays ferme les icônes ouvertes dans toutes les sessions et renvoie leur nombre.
+func StopTrays() int {
+	m := procs.System()
+	found, err := m.Find(GUIName)
+	if err != nil {
+		return 0
+	}
+	n := 0
+	for _, p := range found {
+		if m.Terminate(p) == nil {
+			n++
+		}
+	}
+	return n
 }
 
 // RemoveProgramDir supprime C:\Program Files\Kura. L'exécutable en cours (uninstall
@@ -344,7 +407,10 @@ func RemoveProgramDir(dir string) (pendingReboot bool, err error) {
 	for _, e := range entries {
 		p := filepath.Join(dir, e.Name())
 		if err := os.RemoveAll(p); err != nil {
-			if !samePath(p, self) && !strings.HasSuffix(strings.ToLower(p), ".old") {
+			// Exécutable en cours (uninstall lui-même, une icône restée ouverte) :
+			// effacé au redémarrage.
+			lower := strings.ToLower(p)
+			if !samePath(p, self) && !strings.HasSuffix(lower, ".old") && !strings.HasSuffix(lower, ".exe") {
 				return pendingReboot, err
 			}
 			if err := deleteAtReboot(p); err != nil {

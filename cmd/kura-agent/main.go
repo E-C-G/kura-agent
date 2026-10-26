@@ -20,6 +20,7 @@ import (
 	"github.com/E-C-G/kura-agent/internal/awscli"
 	"github.com/E-C-G/kura-agent/internal/creds"
 	"github.com/E-C-G/kura-agent/internal/execx"
+	"github.com/E-C-G/kura-agent/internal/ipc"
 	"github.com/E-C-G/kura-agent/internal/lock"
 	"github.com/E-C-G/kura-agent/internal/paths"
 	"github.com/E-C-G/kura-agent/internal/procs"
@@ -39,7 +40,7 @@ var (
 const usage = `kura-agent — sauvegarde planifiée vers Wasabi
 
 Usage :
-  kura-agent run      [--config FICHIER] [--job ID]... [--dry-run] [--force-deletes --job ID] [--quiet]
+  kura-agent run      [--config FICHIER] [--job ID]... [--dry-run] [--force-deletes --job ID] [--quiet] [--scheduled]
   kura-agent validate [--config FICHIER] [--offline]
   kura-agent status   [--json]
   kura-agent credentials set NOM [--from-env VARIABLE]
@@ -48,6 +49,8 @@ Usage :
   kura-agent credentials list
   kura-agent install   [--config FICHIER] [--account svc-kura] [--skip-validate]
   kura-agent uninstall [--account svc-kura] [--keep-account] [--purge]
+  kura-agent suspend  DURÉE | tomorrow | off
+  kura-agent tray     [--config FICHIER]
   kura-agent version
 
 Commandes :
@@ -59,6 +62,8 @@ Commandes :
   install      installe ou met à jour : exécutable, configuration, compte svc-kura,
                secrets manquants, validate, tâche \Kura\Sync ; console d'administration
   uninstall    retire la tâche, le compte et l'exécutable ; --purge efface aussi les données
+  suspend      suspend la planification (ex. 1h, tomorrow = demain 08:00) ; off pour reprendre
+  tray         icône de la barre de notification (kura-agentw.exe, lancée à l'ouverture de session)
   version      affiche la version
 
 Codes de sortie de run : 0 OK · 1 avertissement · 2 erreur · 3 configuration invalide
@@ -82,6 +87,10 @@ func main() {
 		code = cmdCredentials(os.Args[2:])
 	case "install":
 		code = cmdInstall(os.Args[2:])
+	case "suspend":
+		code = cmdSuspend(os.Args[2:])
+	case "tray":
+		code = cmdTray(os.Args[2:])
 	case "uninstall":
 		code = cmdUninstall(os.Args[2:])
 	case "version", "--version", "-v":
@@ -115,8 +124,15 @@ func cmdRun(args []string) int {
 	dryRun := fs.Bool("dry-run", false, "simulation : rien n'est copié ni supprimé, Outlook n'est pas fermé")
 	force := fs.Bool("force-deletes", false, "lever les plafonds de suppressions du garde-fou (avec --job)")
 	quiet := fs.Bool("quiet", false, "ne pas recopier le journal à l'écran")
+	scheduled := fs.Bool("scheduled", false, "lancement par la tâche planifiée : respecte la suspension (kura-agent suspend)")
 	if err := fs.Parse(args); err != nil {
 		return runner.ExitConfig
+	}
+	if *scheduled {
+		if sp, err := state.ReadSuspension(paths.SuspendFile()); err == nil && sp.Active(time.Now()) {
+			fmt.Printf("planification suspendue jusqu'au %s : rien à faire\n", sp.Until.Local().Format("02/01/2006 15:04"))
+			return runner.ExitOK
+		}
 	}
 
 	if *force && len(jobs) == 0 {
@@ -156,8 +172,25 @@ func cmdRun(args []string) int {
 	}
 
 	ignoreLogoff()
-	ctx, stop := signal.NotifyContext(context.Background(), shutdownSignals()...)
+	sigCtx, stop := signal.NotifyContext(context.Background(), shutdownSignals()...)
 	defer stop()
+	ctx, cancel := context.WithCancelCause(sigCtx)
+	defer cancel(nil)
+
+	// Icônes des sessions : préavis, fermeture douce et relance d'Outlook, annulation.
+	// Seuls les comptes de tray.allow_run_now peuvent annuler.
+	hub := ipc.NewHub(ipc.Dial, ipc.Msg{Version: version}, func(session int) {
+		user, err := ipc.SessionUser(session)
+		if err != nil || !config.Listed(cfg.Tray.AllowRunNow, user) {
+			fmt.Fprintf(os.Stderr, "annulation demandée depuis la session %d (%s) : refusée, compte hors de tray.allow_run_now\n", session, user)
+			return
+		}
+		cancel(fmt.Errorf("annulée depuis l'icône par %s", user))
+	})
+	defer hub.Close()
+	if sessions, err := ipc.Sessions(); err == nil {
+		hub.Connect(sessions)
+	}
 
 	var console io.Writer = os.Stdout
 	if *quiet {
@@ -179,6 +212,7 @@ func cmdRun(args []string) int {
 		Console:     console,
 		Reporter:    rep,
 		AWSEnv:      awsEnv,
+		Trays:       hub,
 	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)

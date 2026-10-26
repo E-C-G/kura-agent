@@ -74,6 +74,10 @@ jobs:
           go build -trimpath \
             -ldflags "-s -w -X main.version=${{ steps.v.outputs.version }} -X main.commit=${{ steps.v.outputs.commit }} -X main.date=${{ steps.v.outputs.date }}" \
             -o dist/kura-agent.exe ./cmd/kura-agent
+          # Même programme sans console : icône (tray) et commandes élevées depuis l'icône.
+          go build -trimpath \
+            -ldflags "-s -w -H=windowsgui -X main.version=${{ steps.v.outputs.version }} -X main.commit=${{ steps.v.outputs.commit }} -X main.date=${{ steps.v.outputs.date }}" \
+            -o dist/kura-agentw.exe ./cmd/kura-agent
 
       # Signature facultative : renseigner les secrets du dépôt
       #   WINDOWS_SIGNING_CERT      certificat de signature de code .pfx, encodé en base64
@@ -93,9 +97,9 @@ jobs:
               Where-Object FullName -like '*\x64\*' | Sort-Object FullName -Descending | Select-Object -First 1
             if (-not $signtool) { throw 'signtool.exe introuvable sur le runner' }
             & $signtool.FullName sign /f $pfx /p $env:CERT_PASSWORD /fd SHA256 `
-              /tr http://timestamp.digicert.com /td SHA256 /d 'Kura Agent' dist\kura-agent.exe
+              /tr http://timestamp.digicert.com /td SHA256 /d 'Kura Agent' dist\kura-agent.exe dist\kura-agentw.exe
             if ($LASTEXITCODE -ne 0) { throw "signtool a échoué ($LASTEXITCODE)" }
-            & $signtool.FullName verify /pa dist\kura-agent.exe
+            & $signtool.FullName verify /pa dist\kura-agent.exe dist\kura-agentw.exe
             if ($LASTEXITCODE -ne 0) { throw "vérification de la signature en échec ($LASTEXITCODE)" }
           } finally {
             Remove-Item $pfx -Force -ErrorAction SilentlyContinue
@@ -113,7 +117,7 @@ jobs:
         run: |
           name="kura-agent_${{ steps.v.outputs.version }}_windows_amd64"
           mkdir -p "pkg/$name"
-          cp dist/kura-agent.exe README.md "pkg/$name/"
+          cp dist/kura-agent.exe dist/kura-agentw.exe README.md "pkg/$name/"
           cp configs/example.yaml "pkg/$name/config.example.yaml"
           (cd pkg && 7z a -tzip -bso0 "../dist/$name.zip" "$name")
           cp dist/kura-agent.exe "dist/kura-agent_${{ steps.v.outputs.version }}_windows_amd64.exe"

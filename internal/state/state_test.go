@@ -54,3 +54,25 @@ func TestHistoryIsBounded(t *testing.T) {
 		t.Errorf("%d lignes attendues, reçu %d", HistoryLimit, n)
 	}
 }
+
+func TestSuspension(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "suspend.json")
+	if s, err := ReadSuspension(p); s != nil || err != nil {
+		t.Fatalf("absente : %+v, %v", s, err)
+	}
+	now := time.Date(2026, 10, 26, 9, 0, 0, 0, time.UTC)
+	if err := WriteSuspension(p, Suspension{Until: now.Add(time.Hour), By: "alice", At: now}); err != nil {
+		t.Fatal(err)
+	}
+	s, err := ReadSuspension(p)
+	if err != nil || !s.Active(now) || s.Active(now.Add(time.Hour)) || s.By != "alice" {
+		t.Fatalf("relue : %+v, %v", s, err)
+	}
+	if err := ClearSuspension(p); err != nil || ClearSuspension(p) != nil {
+		t.Fatal("reprise :", err)
+	}
+	var none *Suspension
+	if none.Active(now) {
+		t.Fatal("suspension nil active")
+	}
+}

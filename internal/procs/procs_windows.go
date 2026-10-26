@@ -71,9 +71,24 @@ func (system) Find(name string) ([]Process, error) {
 		}
 		var sid uint32
 		_ = windows.ProcessIdToSessionId(e.ProcessID, &sid)
-		out = append(out, Process{PID: int(e.ProcessID), Name: exe, Session: int(sid)})
+		out = append(out, Process{PID: int(e.ProcessID), Name: exe, Session: int(sid), Path: imagePath(e.ProcessID)})
 	}
 	return out, nil
+}
+
+// imagePath renvoie le chemin complet de l'exécutable d'un processus, ou "".
+func imagePath(pid uint32) string {
+	h, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
+	if err != nil {
+		return ""
+	}
+	defer windows.CloseHandle(h)
+	buf := make([]uint16, windows.MAX_LONG_PATH)
+	size := uint32(len(buf))
+	if windows.QueryFullProcessImageName(h, 0, &buf[0], &size) != nil {
+		return ""
+	}
+	return windows.UTF16ToString(buf[:size])
 }
 
 // Terminate arrête p après avoir vérifié, sur le processus ouvert lui-même, qu'il porte

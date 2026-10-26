@@ -102,6 +102,31 @@ type Guard struct {
 type Tray struct {
 	Users       []string `yaml:"users"`
 	AllowRunNow []string `yaml:"allow_run_now"`
+	// LateAfter : sans sauvegarde réussie depuis cette durée, l'icône passe en
+	// « Retard » et prévient une fois par jour. Défaut 48h.
+	LateAfter Duration `yaml:"late_after"`
+}
+
+// MatchAccount indique si le compte de configuration name (« alice » ou
+// « DOMAINE\alice ») désigne l'utilisateur user (« MACHINE\alice », « alice »).
+func MatchAccount(name, user string) bool {
+	if strings.Contains(name, `\`) {
+		return strings.EqualFold(name, user)
+	}
+	if i := strings.LastIndex(user, `\`); i >= 0 {
+		user = user[i+1:]
+	}
+	return strings.EqualFold(name, user)
+}
+
+// Listed indique si user figure dans la liste de comptes names.
+func Listed(names []string, user string) bool {
+	for _, n := range names {
+		if MatchAccount(n, user) {
+			return true
+		}
+	}
+	return false
 }
 
 // Notify règle les notifications locales et l'envoi du bilan de chaque exécution.
@@ -274,6 +299,9 @@ func (c *Config) ApplyDefaults() {
 	if w := c.Notify.Webhook; w != nil && w.URL != "" && c.Notify.Report == nil {
 		c.Notify.Report = &Report{Type: ReportWebhook, URL: w.URL, Token: w.Token, HMAC: w.HMAC}
 	}
+	if c.Tray.LateAfter.Duration == 0 {
+		c.Tray.LateAfter.Duration = 48 * time.Hour
+	}
 	if len(c.Notify.ToastOn) == 0 {
 		c.Notify.ToastOn = []string{"failure", "warning"}
 	}
@@ -303,4 +331,20 @@ func (c *Config) PreTaskFor(process string) (PreTask, bool) {
 		}
 	}
 	return PreTask{}, false
+}
+
+// ReadTray lit la seule section tray, même si le reste du fichier ne passe pas la
+// validation : l'icône doit savoir à qui s'afficher pour signaler l'erreur.
+func ReadTray(path string) (Tray, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return Tray{}, err
+	}
+	var doc struct {
+		Tray Tray `yaml:"tray"`
+	}
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		return Tray{}, err
+	}
+	return doc.Tray, nil
 }

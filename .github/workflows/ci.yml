@@ -65,11 +65,16 @@ jobs:
           GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath \
             -ldflags "-s -w -X main.version=${VERSION} -X main.commit=${GITHUB_SHA::7} -X main.date=$(date -u +%Y-%m-%d)" \
             -o dist/kura-agent.exe ./cmd/kura-agent
+          GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath \
+            -ldflags "-s -w -H=windowsgui -X main.version=${VERSION} -X main.commit=${GITHUB_SHA::7} -X main.date=$(date -u +%Y-%m-%d)" \
+            -o dist/kura-agentw.exe ./cmd/kura-agent
 
       - uses: actions/upload-artifact@v7
         with:
           name: kura-agent-windows-amd64-${{ github.sha }}
-          path: dist/kura-agent.exe
+          path: |
+            dist/kura-agent.exe
+            dist/kura-agentw.exe
           retention-days: 14
 
   # Les tests qui touchent au système (verrou, chemins, renommage de fichiers)

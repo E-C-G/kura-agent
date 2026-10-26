@@ -310,3 +310,32 @@ func TestCredentialRefs(t *testing.T) {
 		t.Fatalf("aucune référence attendue, reçu %+v", refs)
 	}
 }
+
+func TestMatchAccount(t *testing.T) {
+	for _, c := range []struct {
+		name, user string
+		want       bool
+	}{
+		{"alice", `SRV01\alice`, true},
+		{"Alice", "alice", true},
+		{`SRV01\alice`, `srv01\ALICE`, true},
+		{`ACME\alice`, `SRV01\alice`, false},
+		{"alice", `SRV01\bob`, false},
+	} {
+		if got := MatchAccount(c.name, c.user); got != c.want {
+			t.Errorf("MatchAccount(%q, %q) = %v", c.name, c.user, got)
+		}
+	}
+	if !Listed([]string{"bob", "alice"}, `X\alice`) || Listed(nil, "alice") {
+		t.Error("Listed")
+	}
+}
+
+func TestReadTray(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "c.yaml")
+	os.WriteFile(p, []byte("version: 99\njobs: []\ntray:\n  users: [alice]\n  inconnu: 1\n"), 0o644)
+	tr, err := ReadTray(p)
+	if err != nil || len(tr.Users) != 1 || tr.Users[0] != "alice" {
+		t.Fatalf("ReadTray = %+v, %v", tr, err)
+	}
+}
