@@ -3,7 +3,6 @@
 package tray
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -73,8 +72,9 @@ type app struct {
 	queue []func()
 	peer  *ipc.Peer // exécution connectée, s'il y en a une
 
-	promptMu sync.Mutex // un préavis à la fois
-	listener *ipc.Listener
+	promptMu  sync.Mutex // un préavis à la fois
+	promptSeq int        // numéro du préavis affiché (sous mu)
+	listener  *ipc.Listener
 }
 
 // Main lance l'icône dans la session courante. Elle se ferme aussitôt pour un compte
@@ -566,7 +566,10 @@ func (a *app) onRunMsg(p *ipc.Peer, m ipc.Msg) {
 		a.invoke(a.reload)
 	case ipc.TypePromptClose:
 		go func() {
-			choice := a.prompt(m)
+			choice := a.prompt(p, m)
+			if choice == "" {
+				return // exécution partie entre-temps : rien à répondre
+			}
 			a.log.Info("préavis", "processus", m.Process, "choix", choice)
 			_ = p.Reply(m, ipc.Msg{Type: ipc.TypeAnswer, Choice: choice})
 		}()
@@ -593,18 +596,37 @@ func (a *app) onRunMsg(p *ipc.Peer, m ipc.Msg) {
 
 // prompt affiche le préavis sur le thread de l'interface et attend le choix. Si la
 // fenêtre ne peut pas s'ouvrir, une notification prévient et le délai s'écoule.
-func (a *app) prompt(m ipc.Msg) string {
-	// Un seul préavis à la fois : une exécution interrompue en plein préavis peut être
-	// suivie d'une autre qui en demande un nouveau ; il attend la fin du premier.
+func (a *app) prompt(p *ipc.Peer, m ipc.Msg) string {
+	// Un seul préavis à la fois. Le préavis d'une exécution qui s'arrête (connexion
+	// perdue) est fermé aussitôt : il ne retient pas celui de l'exécution suivante.
 	a.promptMu.Lock()
 	defer a.promptMu.Unlock()
+	select {
+	case <-p.Done():
+		return "" // demande d'une exécution déjà terminée
+	default:
+	}
+	a.mu.Lock()
+	a.promptSeq++
+	seq := a.promptSeq
+	a.mu.Unlock()
+	watch := make(chan struct{})
+	defer close(watch)
+	go func() {
+		select {
+		case <-p.Done():
+			a.invoke(func() { abandonDialog(seq) })
+		case <-watch:
+		}
+	}()
+
 	type result struct {
 		choice string
 		err    error
 	}
 	ch := make(chan result, 1)
 	a.invoke(func() {
-		c, err := closeDialog(0, m) // sans propriétaire : centrée sur l'écran, pas sur la fenêtre cachée
+		c, err := closeDialog(0, m, seq) // sans propriétaire : centrée sur l'écran, pas sur la fenêtre cachée
 		ch <- result{c, err}
 	})
 	r := <-ch
@@ -617,8 +639,10 @@ func (a *app) prompt(m ipc.Msg) string {
 			Text:  fmt.Sprintf("Fermeture dans %d min pour la sauvegarde : enregistrez votre travail.", (m.NoticeS+59)/60),
 			Level: LevelWarning}, "")
 	})
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(m.NoticeS)*time.Second)
-	defer cancel()
-	<-ctx.Done()
+	select {
+	case <-time.After(time.Duration(m.NoticeS) * time.Second):
+	case <-p.Done():
+		return ""
+	}
 	return ipc.ChoiceTimeout
 }

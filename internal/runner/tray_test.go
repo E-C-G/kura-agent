@@ -276,3 +276,35 @@ func TestUnavailableJobFailsAlone(t *testing.T) {
 		t.Fatalf("code %d, appels outlook %d", st.ExitCode, b.aws.real("C/alice/Outlook"))
 	}
 }
+
+func TestPostponeDoesNotDelayIndependentJobs(t *testing.T) {
+	b, ft := trayBench(t)
+	b.cfg.PreTasks[0].AllowPostpone = &config.Postpone{Delay: config.Duration{Duration: time.Hour}, Max: 1}
+	ft.choice = func(ipc.Msg) string { return ipc.ChoicePostpone }
+	dataSynced := make(chan struct{})
+	var once sync.Once
+	b.aws.behave["DATA"] = func(dry bool, n int) (string, int) {
+		if !dry {
+			once.Do(func() { close(dataSynced) })
+		}
+		return "", 0
+	}
+	waitedForData := false
+	b.onSleep = func() { // le report d'une heure
+		select {
+		case <-dataSynced:
+			waitedForData = true
+		case <-time.After(5 * time.Second):
+		}
+	}
+	st := b.run(context.Background(), Options{})
+	if !waitedForData {
+		t.Fatal("le job data (indépendant d'Outlook) a attendu la fin du report")
+	}
+	if st.ExitCode != ExitOK || st.PreTasks[0].Postponed != 1 {
+		t.Fatalf("code %d, pré-tâche %+v", st.ExitCode, st.PreTasks[0])
+	}
+	if st.Jobs[0].ID != "data" || st.Jobs[1].ID != "outlook" {
+		t.Fatalf("ordre des jobs : %+v", st.Jobs)
+	}
+}

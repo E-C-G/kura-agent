@@ -106,10 +106,21 @@ const (
 // État du dialogue en cours (un seul à la fois : les préavis sont mis en file par
 // app.prompt, et l'affichage se fait sur le thread de l'interface).
 var dlg struct {
-	deadline time.Time
-	shown    int
-	timedOut bool
-	process  string
+	deadline  time.Time
+	shown     int
+	timedOut  bool
+	process   string
+	seq       int     // numéro du préavis affiché
+	hwnd      uintptr // fenêtre du dialogue ouvert, 0 sinon
+	abandoned bool    // fermé parce que l'exécution qui l'a demandé est partie
+}
+
+// abandonDialog ferme le préavis seq s'il est encore affiché (thread de l'interface).
+func abandonDialog(seq int) {
+	if dlg.hwnd != 0 && dlg.seq == seq {
+		dlg.abandoned = true
+		procSendMessageW.Call(dlg.hwnd, tdmClickButton, btnCloseNow, 0)
+	}
 }
 
 // dlgMem garde sur le tas tout ce que comctl32 lit ou écrit pendant le dialogue :
@@ -125,6 +136,7 @@ var dlgMem struct {
 var dialogCallback = windows.NewCallback(func(hwnd, msg, wParam, lParam, data uintptr) uintptr {
 	switch msg {
 	case tdnCreated:
+		dlg.hwnd = hwnd
 		procSetWindowPos.Call(hwnd, hwndTop, 0, 0, 0, 0, swpNoMove|swpNoSize)
 		procSetForegroundWindow.Call(hwnd)
 	case tdnTimer:
@@ -165,13 +177,15 @@ func human1(d time.Duration) string {
 
 // closeDialog affiche le préavis et renvoie le choix. À appeler sur le thread de
 // l'interface (verrouillé par runtime.LockOSThread).
-func closeDialog(owner uintptr, m ipc.Msg) (string, error) {
+func closeDialog(owner uintptr, m ipc.Msg, seq int) (string, error) {
 	proc, err := loadTaskDialog()
 	if err != nil {
 		return "", err
 	}
 	notice := time.Duration(m.NoticeS) * time.Second
 	dlg.deadline, dlg.shown, dlg.timedOut, dlg.process = time.Now().Add(notice), m.NoticeS, false, m.Process
+	dlg.seq, dlg.hwnd, dlg.abandoned = seq, 0, false
+	defer func() { dlg.hwnd = 0 }()
 
 	title := utf16("Kura – sauvegarde")
 	instr := utf16(displayName(m.Process) + " va être fermé")
@@ -229,6 +243,8 @@ func closeDialog(owner uintptr, m ipc.Msg) (string, error) {
 		return "", fmt.Errorf("TaskDialogIndirect : 0x%x", uint32(hr))
 	}
 	switch {
+	case dlg.abandoned:
+		return "", nil
 	case pressed == btnPostpone:
 		return ipc.ChoicePostpone, nil
 	case dlg.timedOut:

@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -200,6 +201,12 @@ func cmdRun(args []string) int {
 	})
 	defer hub.Close()
 	hub.Discover(ipc.Sessions)
+	if dir := setup.ProgramDir(); dir != "" {
+		if self, err := os.Executable(); err == nil && !strings.EqualFold(filepath.Dir(self), dir) {
+			fmt.Fprintf(os.Stderr, "note : lancé hors de %s, run ne dialogue qu'avec les icônes lancées depuis son propre dossier ;\n"+
+				"les icônes installées ne seront pas jointes (préavis par simple attente, pas de relance d'Outlook)\n", dir)
+		}
+	}
 
 	var console io.Writer = os.Stdout
 	if *quiet {

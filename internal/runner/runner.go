@@ -183,15 +183,35 @@ func Run(ctx context.Context, cfg *config.Config, opt Options, d Deps) (state.St
 	log.Info("début de l'exécution", "run_id", runID, "profil", cfg.Profile.Name,
 		"bucket", cfg.Profile.Bucket, "jobs", jobIDs(jobs), "simulation", opt.DryRun, "force_deletes", opt.ForceDeletes)
 
-	preOK := r.preTasks(runCtx, jobs)
-	for i, j := range jobs {
-		r.st.Current = &state.Progress{Job: j.Name, Index: i + 1, Total: len(jobs)}
-		r.save()
-		r.broadcast(ipc.Msg{Type: ipc.TypeJob, RunID: runID, Job: j.Name, Index: i + 1, Total: len(jobs)})
-		r.st.Jobs = append(r.st.Jobs, r.job(runCtx, j, preOK))
-		r.save()
+	// Les pré-tâches (préavis et fermeture d'Outlook, reports compris) avancent en même
+	// temps que les jobs qui n'en dépendent pas : un report d'une heure ne retarde que
+	// les jobs marqués depends_on_pre_task, lancés en dernier.
+	var preOK map[string]bool
+	preDone := make(chan struct{})
+	go func() {
+		defer close(preDone)
+		preOK = r.preTasks(runCtx, jobs)
+	}()
+	ordered := independentFirst(jobs)
+	for i, j := range ordered {
+		if j.DependsOnPreTask != "" {
+			<-preDone
+		}
+		r.update(func(st *state.Status) {
+			st.Current = &state.Progress{Job: j.Name, Index: i + 1, Total: len(ordered)}
+		})
+		r.broadcast(ipc.Msg{Type: ipc.TypeJob, RunID: runID, Job: j.Name, Index: i + 1, Total: len(ordered)})
+		var ok map[string]bool
+		select {
+		case <-preDone:
+			ok = preOK
+		default: // job indépendant : n'a pas besoin du résultat des pré-tâches
+		}
+		js := r.job(runCtx, j, ok)
+		r.update(func(st *state.Status) { st.Jobs = append(st.Jobs, js) })
 	}
-	r.st.Current = nil
+	<-preDone
+	r.update(func(st *state.Status) { st.Current = nil })
 	r.postTasks()
 
 	// Bilan
@@ -275,6 +295,7 @@ type run struct {
 	d      Deps
 	log    *slog.Logger
 	runDir string
+	mu     sync.Mutex // st : pré-tâches et jobs s'exécutent en parallèle
 	st     state.Status
 
 	// closed : par processus (en minuscules), sessions où il a été fermé et chemin de
@@ -283,9 +304,36 @@ type run struct {
 }
 
 func (r *run) save() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if err := state.WriteAtomic(r.d.StatusFile, r.st); err != nil {
 		r.log.Warn("status.json non écrit", "err", err)
 	}
+}
+
+// update modifie l'état puis l'écrit ; pré-tâches et jobs tournent en parallèle.
+func (r *run) update(f func(*state.Status)) {
+	r.mu.Lock()
+	f(&r.st)
+	r.mu.Unlock()
+	r.save()
+}
+
+// independentFirst place les jobs sans depends_on_pre_task en tête, en gardant l'ordre
+// du fichier dans chaque groupe.
+func independentFirst(jobs []config.Job) []config.Job {
+	out := make([]config.Job, 0, len(jobs))
+	for _, j := range jobs {
+		if j.DependsOnPreTask == "" {
+			out = append(out, j)
+		}
+	}
+	for _, j := range jobs {
+		if j.DependsOnPreTask != "" {
+			out = append(out, j)
+		}
+	}
+	return out
 }
 
 // preTasks ferme les processus déclarés et renvoie, par processus, s'il est bien fermé.
@@ -301,13 +349,12 @@ func (r *run) preTasks(ctx context.Context, jobs []config.Job) map[string]bool {
 		if r.opt.DryRun {
 			ps.Message = "simulation : le processus n'est pas fermé"
 			r.log.Info("pré-tâche ignorée en simulation", "processus", p.Process)
-			r.st.PreTasks = append(r.st.PreTasks, ps)
+			r.update(func(st *state.Status) { st.PreTasks = append(st.PreTasks, ps) })
 			ok[key] = true
 			continue
 		}
 		ok[key] = r.closeProcess(ctx, p, &ps)
-		r.st.PreTasks = append(r.st.PreTasks, ps)
-		r.save()
+		r.update(func(st *state.Status) { st.PreTasks = append(st.PreTasks, ps) })
 	}
 	return ok
 }

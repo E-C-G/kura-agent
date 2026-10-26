@@ -208,6 +208,14 @@ kura-agent suspend off         :: reprise
 Pendant une suspension, la tâche (`run --scheduled`) se termine aussitôt sans rien faire ; un
 `kura-agent run` lancé à la main n'est pas concerné. healthchecks signalera l'absence de signal.
 
+Pendant les essais : `run` ne dialogue qu'avec les icônes lancées depuis **son propre dossier**.
+Lancé depuis le dossier du zip, il ne joint pas les icônes installées dans `C:\Program Files\Kura`
+(préavis par simple attente, pas de relance d'Outlook) et le signale au démarrage. Pour essayer le
+préavis, lancer `"C:\Program Files\Kura\kura-agent.exe" run` ou `schtasks /Run /TN \Kura\Sync`.
+
+Les préavis s'affichent un par un ; celui d'une exécution arrêtée en cours de route se ferme dès
+que la connexion avec elle est perdue.
+
 Journal de l'icône : `%LOCALAPPDATA%\Kura\tray.log`.
 
 ## Bilan de chaque exécution (étape 3)
@@ -311,7 +319,9 @@ jamais par la ligne de commande ni les journaux.
 ## Ce que fait une exécution
 
 1. Prend le verrou `Global\Kura-Run` (une seule exécution à la fois, code 4 sinon).
-2. Si un job qui en dépend est lancé : cherche `outlook.exe` dans toutes les sessions et, pour chaque
+2. Les jobs sans `depends_on_pre_task` démarrent tout de suite, en même temps que la pré-tâche ; ceux
+   qui en dépendent passent après elle (un report d'Outlook ne retarde donc qu'eux).
+   Si un job qui en dépend est lancé : cherche `outlook.exe` dans toutes les sessions et, pour chaque
    session, fait afficher le préavis par l'icône puis fermer Outlook proprement (sinon attend le
    préavis) ; cherche de nouveau et arrête de force ce qui tourne encore (`force: true`), après avoir
    revérifié le nom de chaque processus. S'il reste ouvert, les jobs marqués `depends_on_pre_task`
