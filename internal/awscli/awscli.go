@@ -24,9 +24,10 @@ func SyncArgs(p config.Profile, j config.Job, dryRun bool) []string {
 	if p.Region != "" {
 		args = append(args, "--region", p.Region)
 	}
-	if p.ChecksumAlgorithm != "" {
-		args = append(args, "--checksum-algorithm", p.ChecksumAlgorithm)
-	}
+	// profile.checksum_algorithm n'est plus transmis : avec --checksum-algorithm, la CLI
+	// v2 envoie la somme de contrôle en fin de requête (trailer), que Wasabi ne lit pas ;
+	// les envois en plusieurs parties (fichiers de plus de 8 Mo) échouaient en
+	// « Checksum Type mismatch … expected crc32, actual null ».
 	for _, e := range j.Exclude {
 		args = append(args, "--exclude", e)
 	}
@@ -48,6 +49,11 @@ func Env(p config.Profile) []string {
 		// fausserait le nombre de suppressions vu par le garde-fou.
 		"PYTHONUTF8=1",
 		"PYTHONIOENCODING=utf-8",
+		// Depuis la CLI 2.23 (janvier 2025), sommes de contrôle CRC par défaut, envoyées en
+		// fin de requête : Wasabi ne les prend pas en charge. Seulement quand l'opération
+		// l'exige, comme avant ; l'intégrité du transfert reste assurée par TLS.
+		"AWS_REQUEST_CHECKSUM_CALCULATION=WHEN_REQUIRED",
+		"AWS_RESPONSE_CHECKSUM_VALIDATION=WHEN_REQUIRED",
 	}
 	if p.AWSProfile != "" {
 		env = append(env, "AWS_PROFILE="+p.AWSProfile)

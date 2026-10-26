@@ -21,7 +21,7 @@ func TestSyncArgsMatchCurrentScript(t *testing.T) {
 	}
 	got := strings.Join(SyncArgs(profile, data, false), " ")
 	want := "s3 sync E:/ s3://acme-srv01/DATA --endpoint-url https://s3.eu-central-1.wasabisys.com --no-progress " +
-		"--checksum-algorithm CRC32 --exclude *$RECYCLE.BIN* --exclude *System Volume Information* --delete"
+		"--exclude *$RECYCLE.BIN* --exclude *System Volume Information* --delete"
 	if got != want {
 		t.Errorf("commande :\n reçu   %s\n attendu %s", got, want)
 	}
@@ -35,7 +35,8 @@ func TestSyncArgsMatchCurrentScript(t *testing.T) {
 
 func TestEnvNeverPagesAndSetsProfile(t *testing.T) {
 	env := Env(config.Profile{AWSProfile: "wasabi"})
-	if strings.Join(env, " ") != "AWS_PAGER= PYTHONUTF8=1 PYTHONIOENCODING=utf-8 AWS_PROFILE=wasabi" {
+	if strings.Join(env, " ") != "AWS_PAGER= PYTHONUTF8=1 PYTHONIOENCODING=utf-8 "+
+		"AWS_REQUEST_CHECKSUM_CALCULATION=WHEN_REQUIRED AWS_RESPONSE_CHECKSUM_VALIDATION=WHEN_REQUIRED AWS_PROFILE=wasabi" {
 		t.Errorf("environnement inattendu : %v", env)
 	}
 }

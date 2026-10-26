@@ -239,7 +239,7 @@ func TestNominalNight(t *testing.T) {
 		}
 	}
 	jl, _ := os.ReadFile(filepath.Join(b.dir, "logs", "runs", st.RunID, "data.log"))
-	if !strings.Contains(string(jl), "--checksum-algorithm CRC32") || !strings.Contains(string(jl), "upload: a to") {
+	if !strings.Contains(string(jl), "s3 sync") || !strings.Contains(string(jl), "upload: a to") {
 		t.Errorf("le journal du job doit contenir la commande et la sortie d'aws :\n%s", jl)
 	}
 }

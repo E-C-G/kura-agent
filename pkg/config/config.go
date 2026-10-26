@@ -40,10 +40,12 @@ type Profile struct {
 	// AWSCredentials désigne les clés d'accès rangées dans le coffre de l'agent
 	// (credential:<nom>, saisies par `kura-agent credentials set-aws <nom>`). C'est la
 	// forme à utiliser : la tâche tourne sous SYSTEM, qui n'a pas de ~/.aws utile. Exclut aws_profile.
-	AWSCredentials    string `yaml:"aws_credentials"`
-	Endpoint          string `yaml:"endpoint"`
-	Region            string `yaml:"region"`
-	Bucket            string `yaml:"bucket"`
+	AWSCredentials string `yaml:"aws_credentials"`
+	Endpoint       string `yaml:"endpoint"`
+	Region         string `yaml:"region"`
+	Bucket         string `yaml:"bucket"`
+	// ChecksumAlgorithm est accepté mais ignoré : Wasabi ne lit pas les sommes de
+	// contrôle que la CLI AWS v2 envoie en fin de requête (voir internal/awscli).
 	ChecksumAlgorithm string `yaml:"checksum_algorithm"`
 }
 

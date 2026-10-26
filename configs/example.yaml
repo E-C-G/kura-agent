@@ -15,7 +15,6 @@ profile:
   endpoint: https://s3.eu-central-1.wasabisys.com
   region: eu-central-1
   bucket: acme-srv01
-  checksum_algorithm: CRC32
 
 schedule:
   type: daily                    # daily | weekly | hourly

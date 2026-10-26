@@ -375,6 +375,16 @@ durée d'une nuit dans `run.log` et ajuster `max_duration`.
 La déconnexion d'un utilisateur du serveur n'interrompt pas la sauvegarde ; Ctrl+C l'annule (code 6).
 Dépasser `max_duration` termine l'exécution en erreur (code 2).
 
+### Sommes de contrôle et Wasabi
+
+Depuis la version 2.23 (janvier 2025), la CLI AWS calcule par défaut une somme de contrôle
+CRC et l'envoie **en fin de requête** (trailer). Wasabi ne la lit pas : les fichiers envoyés en
+plusieurs parties (plus de 8 Mo) échouent en `Checksum Type mismatch … expected checksum Type:
+crc32, actual checksum Type: null`. L'agent lance donc toujours `aws.exe` avec
+`AWS_REQUEST_CHECKSUM_CALCULATION=WHEN_REQUIRED` et `AWS_RESPONSE_CHECKSUM_VALIDATION=WHEN_REQUIRED`
+(somme de contrôle seulement quand l'opération l'exige, comme avant 2.23), et ne transmet plus
+`profile.checksum_algorithm`, accepté mais ignoré. L'intégrité du transfert reste assurée par TLS.
+
 ## Codes de sortie de `run`
 
 | Code | Signification |
