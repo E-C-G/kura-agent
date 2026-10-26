@@ -42,9 +42,13 @@ type fake struct {
 	installed  bool
 	downloaded string
 	ran        string
+	ranContent string
+	signed     string // fichier dont la signature a été lue
 	status     string
 	subject    string
 	dlErr      error
+	version    string
+	versionErr error
 }
 
 func (f *fake) installer(dir string) Installer {
@@ -55,7 +59,7 @@ func (f *fake) installer(dir string) Installer {
 			}
 			return "", errors.New("absent")
 		},
-		Signature: func(msi string) (string, string, error) { return f.status, f.subject, nil },
+		Signature: func(msi string) (string, string, error) { f.signed = msi; return f.status, f.subject, nil },
 		Download: func(url, dst string) error {
 			f.downloaded = url
 			if f.dlErr != nil {
@@ -65,10 +69,17 @@ func (f *fake) installer(dir string) Installer {
 		},
 		RunMSI: func(msi, log string) (bool, error) {
 			f.ran = msi
+			b, _ := os.ReadFile(msi)
+			f.ranContent = string(b)
 			f.installed = true
 			return false, nil
 		},
-		Version: func(string) (string, error) { return "aws-cli/2.31.0 Python/3.13 Windows/11", nil },
+		Version: func(string) (string, error) {
+			if f.version != "" || f.versionErr != nil {
+				return f.version, f.versionErr
+			}
+			return "aws-cli/2.31.0 Python/3.13 Windows/11", nil
+		},
 		TempDir: filepath.Join(dir, "tmp"),
 		Out:     &strings.Builder{},
 	}
@@ -78,7 +89,7 @@ const amazon = "CN=Amazon.com Services LLC, O=Amazon.com Services LLC, L=Seattle
 
 func TestEnsureAlreadyInstalled(t *testing.T) {
 	f := &fake{installed: true}
-	res, err := f.installer(t.TempDir()).Ensure(nil)
+	res, err := f.installer(t.TempDir()).Ensure("", nil)
 	if err != nil || res.Installed || f.ran != "" || f.downloaded != "" || !strings.HasPrefix(res.Version, "aws-cli/2") {
 		t.Fatalf("%+v %v %+v", res, err, f)
 	}
@@ -91,9 +102,18 @@ func TestEnsureUsesProvidedMSI(t *testing.T) {
 		t.Fatal(err)
 	}
 	f := &fake{status: "Valid", subject: amazon}
-	res, err := f.installer(dir).Ensure([]string{"", filepath.Join(dir, "absent.msi"), msi})
-	if err != nil || !res.Installed || f.ran != msi || f.downloaded != "" || res.Source != msi || res.Signer != "Amazon.com Services LLC" {
+	in := f.installer(dir)
+	res, err := in.Ensure("", []string{"", filepath.Join(dir, "absent.msi"), msi})
+	if err != nil || !res.Installed || f.downloaded != "" || res.Source != msi || res.Signer != "Amazon.com Services LLC" {
 		t.Fatalf("%+v %v %+v", res, err, f)
+	}
+	// Copie privée : la signature vérifiée est celle du fichier installé, dans le
+	// dossier de travail protégé, jamais l'original.
+	if f.signed != f.ran || filepath.Dir(f.ran) != in.TempDir || f.ranContent != "msi" {
+		t.Fatalf("signé %s, installé %s (%q)", f.signed, f.ran, f.ranContent)
+	}
+	if _, err := os.Stat(f.ran); !os.IsNotExist(err) {
+		t.Fatal("copie du MSI laissée")
 	}
 	if _, err := os.Stat(msi); err != nil {
 		t.Fatal("le MSI fourni ne doit pas être supprimé")
@@ -103,7 +123,7 @@ func TestEnsureUsesProvidedMSI(t *testing.T) {
 func TestEnsureDownloadsWhenNoMSI(t *testing.T) {
 	dir := t.TempDir()
 	f := &fake{status: "Valid", subject: amazon}
-	res, err := f.installer(dir).Ensure([]string{filepath.Join(dir, "absent.msi")})
+	res, err := f.installer(dir).Ensure("", []string{filepath.Join(dir, "absent.msi")})
 	if err != nil || f.downloaded != DownloadURL || res.Source != DownloadURL || f.ran == "" {
 		t.Fatalf("%+v %v %+v", res, err, f)
 	}
@@ -116,7 +136,7 @@ func TestEnsureRefusesBadSignature(t *testing.T) {
 	for _, c := range []struct{ status, subject string }{{"HashMismatch", amazon}, {"Valid", "CN=x, O=Mallory Ltd"}, {"NotSigned", ""}} {
 		dir := t.TempDir()
 		f := &fake{status: c.status, subject: c.subject}
-		_, err := f.installer(dir).Ensure(nil)
+		_, err := f.installer(dir).Ensure("", nil)
 		if err == nil || f.ran != "" {
 			t.Fatalf("%s %q : msiexec lancé (%v)", c.status, c.subject, err)
 		}
@@ -125,7 +145,7 @@ func TestEnsureRefusesBadSignature(t *testing.T) {
 
 func TestEnsureDownloadFailure(t *testing.T) {
 	f := &fake{dlErr: errors.New("HTTP 403")}
-	_, err := f.installer(t.TempDir()).Ensure(nil)
+	_, err := f.installer(t.TempDir()).Ensure("", nil)
 	if err == nil || !strings.Contains(err.Error(), MSIName) || f.ran != "" {
 		t.Fatalf("%v %+v", err, f)
 	}
@@ -134,5 +154,49 @@ func TestEnsureDownloadFailure(t *testing.T) {
 func TestHTTPDownloadRefusesHTTP(t *testing.T) {
 	if err := HTTPDownload("http://example.invalid/x.msi", filepath.Join(t.TempDir(), "x")); err == nil {
 		t.Fatal("http accepté")
+	}
+}
+
+func TestEnsureWantedPath(t *testing.T) {
+	dir := t.TempDir()
+	want := filepath.Join(dir, "AWSCLIV2", "aws.exe")
+	// Une autre CLI dans le PATH ne compte pas : le chemin configuré manque.
+	f := &fake{installed: true, status: "Valid", subject: amazon}
+	in := f.installer(dir)
+	in.RunMSI = func(msi, log string) (bool, error) {
+		f.ran = msi
+		os.MkdirAll(filepath.Dir(want), 0o755)
+		return false, os.WriteFile(want, nil, 0o755)
+	}
+	res, err := in.Ensure(want, nil)
+	if err != nil || !res.Installed || res.Path != want {
+		t.Fatalf("%+v %v", res, err)
+	}
+	// Présent : rien à faire.
+	f.ran = ""
+	if res, err := in.Ensure(want, nil); err != nil || res.Installed || f.ran != "" {
+		t.Fatalf("%+v %v", res, err)
+	}
+}
+
+func TestEnsureExistingCLI(t *testing.T) {
+	f := &fake{installed: true, version: "aws-cli/1.33.0 Python/3.11 Windows/10"}
+	if _, err := f.installer(t.TempDir()).Ensure("", nil); err == nil || !strings.Contains(err.Error(), "v2") {
+		t.Fatalf("CLI v1 acceptée : %v", err)
+	}
+	f = &fake{installed: true, versionErr: errors.New("délai dépassé")}
+	res, err := f.installer(t.TempDir()).Ensure("", nil)
+	if err != nil || res.Warning == "" || f.ran != "" {
+		t.Fatalf("CLI qui ne répond pas : %+v %v", res, err)
+	}
+}
+
+func TestParseSignatureOutput(t *testing.T) {
+	st, sub, err := parseSignatureOutput("\ufeffValid\r\nCN=Amazon.com Services LLC, O=Amazon.com Services LLC\r\n")
+	if err != nil || st != "Valid" || !strings.HasPrefix(sub, "CN=Amazon") {
+		t.Fatalf("%q %q %v", st, sub, err)
+	}
+	if _, _, err := parseSignatureOutput("  \r\n"); err == nil {
+		t.Fatal("réponse vide acceptée")
 	}
 }

@@ -19,14 +19,23 @@ func systemExe(parts ...string) string {
 
 // signature lit la signature Authenticode du MSI avec Get-AuthenticodeSignature
 // (WinVerifyTrust : chaîne de certificats, révocation, horodatage). Le chemin passe
-// par l'environnement, jamais dans le texte de la commande.
+// par l'environnement, jamais dans le texte de la commande. Le module est cherché
+// dans le seul dossier système (PSModulePath restreint, cmdlet qualifiée) : un
+// module homonyme dans le profil de l'utilisateur ne peut pas s'y substituer.
 func signature(msi string) (status, subject string, err error) {
-	ps := systemExe("System32", "WindowsPowerShell", "v1.0", "powershell.exe")
-	script := `$ErrorActionPreference='Stop'; [Console]::OutputEncoding=[Text.Encoding]::UTF8; ` +
-		`$s=Get-AuthenticodeSignature -LiteralPath $env:KURA_MSI; ` +
+	psHome := systemExe("System32", "WindowsPowerShell", "v1.0")
+	script := `$ErrorActionPreference='Stop'; ` +
+		`$s=Microsoft.PowerShell.Security\Get-AuthenticodeSignature -LiteralPath $env:KURA_MSI; ` +
 		`Write-Output $s.Status.ToString(); if ($s.SignerCertificate) { Write-Output $s.SignerCertificate.Subject }`
-	cmd := exec.Command(ps, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script)
-	cmd.Env = append(os.Environ(), "KURA_MSI="+msi)
+	cmd := exec.Command(filepath.Join(psHome, "powershell.exe"), "-NoProfile", "-NonInteractive", "-Command", script)
+	env := []string{"KURA_MSI=" + msi, "PSModulePath=" + filepath.Join(psHome, "Modules")}
+	for _, e := range os.Environ() {
+		k, _, _ := strings.Cut(e, "=")
+		if !strings.EqualFold(k, "PSModulePath") && !strings.EqualFold(k, "KURA_MSI") {
+			env = append(env, e)
+		}
+	}
+	cmd.Env = env
 	out, err := cmd.Output()
 	if err != nil {
 		var ee *exec.ExitError
@@ -35,12 +44,7 @@ func signature(msi string) (status, subject string, err error) {
 		}
 		return "", "", fmt.Errorf("powershell : %w", err)
 	}
-	lines := strings.Split(strings.ReplaceAll(strings.TrimSpace(string(out)), "\r\n", "\n"), "\n")
-	status = strings.TrimSpace(lines[0])
-	if len(lines) > 1 {
-		subject = strings.TrimSpace(lines[1])
-	}
-	return status, subject, nil
+	return parseSignatureOutput(string(out))
 }
 
 // runMSI : installation silencieuse pour toute la machine, sans redémarrage.

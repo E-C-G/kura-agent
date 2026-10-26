@@ -271,6 +271,11 @@ func Parse(data []byte, opt LoadOptions) (*Config, error) {
 		}
 		return nil, fmt.Errorf("configuration illisible : %w", err)
 	}
+	// Un second document (après « --- ») ne serait ni lu ni vérifié : refusé.
+	var extra yaml.Node
+	if err := dec.Decode(&extra); !errors.Is(err, errEOF) && (err != nil || !emptyDocument(&extra)) {
+		return nil, errors.New("configuration illisible : un seul document YAML attendu (rien après « --- »)")
+	}
 	c.ApplyDefaults()
 	env := opt.Env
 	if env == nil {
@@ -283,6 +288,16 @@ func Parse(data []byte, opt LoadOptions) (*Config, error) {
 		return nil, err
 	}
 	return &c, nil
+}
+
+// emptyDocument : document YAML sans contenu (« --- » final, commentaires seuls).
+func emptyDocument(n *yaml.Node) bool {
+	for _, c := range n.Content {
+		if c.Kind != yaml.ScalarNode || c.Tag != "!!null" || c.Value != "" {
+			return false
+		}
+	}
+	return true
 }
 
 // ApplyDefaults complète les valeurs absentes.

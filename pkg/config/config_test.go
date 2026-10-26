@@ -371,3 +371,20 @@ jobs:
 		t.Fatal("une variable mal écrite reste une erreur de configuration")
 	}
 }
+
+func TestSecondDocumentRefused(t *testing.T) {
+	base := strings.Replace(minimal, "%s", "E:/", 1)
+	if err := parseWith(t, base+"---\n", LoadOptions{}); err != nil {
+		t.Fatalf("« --- » final vide refusé : %v", err)
+	}
+	if err := parseWith(t, base+"---\nnotify:\n  report: {type: webhook, url: https://hook.example/x}\n", LoadOptions{}); err == nil {
+		t.Fatal("second document accepté")
+	}
+}
+
+func TestTrailingCommentDocumentAccepted(t *testing.T) {
+	base := strings.Replace(minimal, "%s", "E:/", 1)
+	if err := parseWith(t, base+"---\n# fin\n", LoadOptions{}); err != nil {
+		t.Fatal(err)
+	}
+}

@@ -51,3 +51,17 @@ func Version(aws string) (string, error) {
 	}
 	return strings.TrimSpace(line), nil
 }
+
+// parseSignatureOutput lit la sortie de PowerShell : état, puis sujet du signataire.
+func parseSignatureOutput(out string) (status, subject string, err error) {
+	out = strings.ReplaceAll(strings.TrimPrefix(out, "\ufeff"), "\r\n", "\n")
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	status = strings.TrimSpace(strings.TrimPrefix(lines[0], "\ufeff"))
+	if len(lines) > 1 {
+		subject = strings.TrimSpace(lines[1])
+	}
+	if status == "" {
+		return "", "", errors.New("powershell : réponse vide")
+	}
+	return status, subject, nil
+}

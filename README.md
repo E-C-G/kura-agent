@@ -145,17 +145,24 @@ remet un kit (exécutables, MSI de la CLI AWS, paquet `.kura` avec configuration
 ### CLI AWS absente
 
 Si `aws` n'est ni dans le PATH ni dans `C:\Program Files\Amazon\AWSCLIV2` (et que
-`profile.aws_cli` est vide ou désigne ce dossier), `install` installe la CLI AWS v2 avant toute
-autre étape :
+`profile.aws_cli` est vide ou désigne ce dossier), `install` installe la CLI AWS v2 juste après
+avoir protégé `C:\ProgramData\Kura` :
 
 1. MSI fourni : `--aws-cli-msi FICHIER`, sinon `AWSCLIV2.msi` posé à côté du paquet `.kura` ou de
    `kura-agent.exe` ;
-2. sinon, téléchargé depuis `https://awscli.amazonaws.com/AWSCLIV2.msi` (HTTPS) ;
-3. dans les deux cas, **signature Authenticode vérifiée** (`Get-AuthenticodeSignature` : chaîne de
-   certificats, horodatage) : état `Valid` et organisation du signataire parmi `Amazon.com Services
+2. sinon, téléchargé depuis `https://awscli.amazonaws.com/AWSCLIV2.msi` (HTTPS, redirections
+   HTTPS seulement) ;
+   dans les deux cas, le MSI est d'abord copié dans `C:\ProgramData\Kura\awscli`, que seuls
+   SYSTEM et les administrateurs peuvent modifier : un programme non élevé ne peut pas le
+   remplacer entre la vérification de la signature et l'installation ;
+3. **signature Authenticode vérifiée** (`Get-AuthenticodeSignature` du module système, profil et
+   modules de l'utilisateur ignorés : chaîne de certificats, horodatage) : état `Valid` et organisation du signataire parmi `Amazon.com Services
    LLC`, `Amazon Web Services, Inc.`, `Amazon.com, Inc.` ; sinon rien n'est installé ;
-4. `msiexec /i … /qn /norestart`, journal dans `%TEMP%\kura-awscli\awscli-install.log`, puis
-   `aws --version`.
+4. `msiexec /i … /qn /norestart`, journal dans `C:\ProgramData\Kura\awscli\awscli-install.log`,
+   puis `aws --version`.
+
+Une CLI AWS v1 trouvée dans le PATH est refusée (la désinstaller, ou renseigner `profile.aws_cli`) ;
+une CLI présente qui ne répond pas est signalée, et `validate` tranche.
 
 Un autre chemin dans `profile.aws_cli` n'est jamais installé automatiquement. L'agent cherche
 aussi `aws.exe` dans `C:\Program Files\Amazon\AWSCLIV2` quand il n'est pas dans le PATH (cas d'une
@@ -174,9 +181,11 @@ kura-agent.exe install --package acme-srv01.kura
 
 `install` demande le mot de passe affiché par la console (trois essais), refuse un paquet expiré,
 un paquet de clé seule (à passer par `import`) et une configuration dont le bucket ou
-`profile.aws_credentials` ne correspond pas au paquet. Il installe ensuite la CLI AWS si besoin (le
+`profile.aws_credentials` ne correspond pas au paquet ; `--package` et `--config` s'excluent. Il installe ensuite la CLI AWS si besoin (le
 MSI du kit est pris en premier), range les secrets du paquet dans le coffre (ils remplacent ceux de
-même nom), puis suit les étapes ci-dessus. Le paquet est supprimé une fois l'installation réussie
+même nom ; les anciennes valeurs sont remises si l'installation échoue ensuite), puis suit les
+étapes ci-dessus. La configuration du paquet est installée telle qu'elle a été vérifiée, sans
+passer par un fichier temporaire. Le paquet est supprimé une fois l'installation réussie
 (`--keep` pour le garder). Une fois la première sauvegarde réussie, confirmer l'installation de la
 clé dans la console.
 

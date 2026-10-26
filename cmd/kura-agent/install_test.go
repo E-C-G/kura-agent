@@ -30,6 +30,7 @@ type fakeSys struct {
 	lockErr  error
 	legacy   bool // un compte svc-kura d'une version précédente existe
 	awsErr   error
+	awsTemp  string
 	msis     []string
 	removed  []string
 	password string
@@ -72,9 +73,10 @@ func (f *fakeSys) system(dir string) system {
 			}
 			return "https://hc-ping.com/secret-uuid", f.askErr
 		},
-		ensureAWS: func(c []string) (awsinstall.Result, error) {
+		ensureAWS: func(tmp, want string, c []string) (awsinstall.Result, error) {
 			f.calls = append(f.calls, "awscli")
 			f.msis = c
+			f.awsTemp = tmp
 			return awsinstall.Result{Path: `C:\Program Files\Amazon\AWSCLIV2\aws.exe`, Version: "aws-cli/2.31.0", Installed: true, Signer: "Amazon.com Services LLC"}, f.awsErr
 		},
 		remove: func(p string) error { f.removed = append(f.removed, p); return os.Remove(p) },
@@ -142,7 +144,7 @@ func TestInstallFresh(t *testing.T) {
 	if code := install(sys, installOptions{cfgPath: cfg, skipValidate: false}); code != 0 {
 		t.Fatalf("code %d ; appels %v", code, f.calls)
 	}
-	want := "admin awscli acl binary validate task autostart"
+	want := "admin acl awscli binary validate task autostart"
 	if got := strings.Join(f.calls, " "); got != want {
 		t.Fatalf("ordre des étapes :\n reçu   %s\n attendu %s", got, want)
 	}
@@ -306,7 +308,7 @@ func TestInstallRemovesLegacyAccount(t *testing.T) {
 	if code := install(f.system(dir), installOptions{cfgPath: writeConfig(t, dir, ""), skipValidate: false}); code != 0 {
 		t.Fatalf("code %d", code)
 	}
-	if got := strings.Join(f.calls, " "); got != "admin awscli acl binary validate task rmaccount:svc-kura autostart" {
+	if got := strings.Join(f.calls, " "); got != "admin acl awscli binary validate task rmaccount:svc-kura autostart" {
 		t.Fatalf("étapes : %s", got)
 	}
 }
@@ -360,11 +362,11 @@ func TestInstallFromPackage(t *testing.T) {
 	if code := install(sys, installOptions{pkgPath: file, msiCandidates: []string{msi}}); code != 0 {
 		t.Fatalf("code %d ; appels %v", code, f.calls)
 	}
-	if got := strings.Join(f.calls, " "); got != "admin awscli acl binary validate task autostart" {
+	if got := strings.Join(f.calls, " "); got != "admin acl awscli binary validate task autostart" {
 		t.Fatalf("étapes : %s", got)
 	}
-	if len(f.asked) != 1 || len(f.msis) != 1 || f.msis[0] != msi {
-		t.Fatalf("saisies %v, MSI %v", f.asked, f.msis)
+	if len(f.asked) != 1 || len(f.msis) != 1 || f.msis[0] != msi || f.awsTemp != filepath.Join(sys.dataDir, "awscli") {
+		t.Fatalf("saisies %v, MSI %v, dossier %s", f.asked, f.msis, f.awsTemp)
 	}
 	for name, want := range map[string]string{"wasabi": "AKIDPAQUET:secretpaquet", "hc-url": "https://hc-ping.example/paquet"} {
 		if v, err := sys.vault.Get(name); err != nil || v != want {
@@ -432,5 +434,28 @@ func TestInstallStopsWhenAWSCLIFails(t *testing.T) {
 	os.WriteFile(cfg, []byte(strings.Replace(string(b), "profile:\n", "profile:\n  aws_cli: "+filepath.ToSlash(aws)+"\n", 1)), 0o644)
 	if code := install(f.system(dir), installOptions{cfgPath: cfg}); code != 0 || strings.Contains(strings.Join(f.calls, " "), "awscli") {
 		t.Fatalf("code %d, appels %v", code, f.calls)
+	}
+}
+
+func TestInstallPackageRestoresSecretsWhenValidateFails(t *testing.T) {
+	dir := t.TempDir()
+	file, pw := writePackage(t, dir, nil)
+	f := &fakeSys{t: t, password: pw, validate: 3}
+	sys := f.system(dir)
+	if err := sys.vault.Init(); err != nil {
+		t.Fatal(err)
+	}
+	sys.vault.Set("wasabi", "AKIDANCIENNE:ancien")
+	if code := install(sys, installOptions{pkgPath: file}); code == 0 {
+		t.Fatal("installé malgré validate")
+	}
+	if v, err := sys.vault.Get("wasabi"); err != nil || v != "AKIDANCIENNE:ancien" {
+		t.Fatalf("ancienne clé non remise : %q %v", v, err)
+	}
+	if _, err := sys.vault.Get("hc-url"); err == nil {
+		t.Fatal("secret ajouté par le paquet resté dans le coffre")
+	}
+	if _, err := os.Stat(file); err != nil {
+		t.Fatal("paquet supprimé malgré l'échec")
 	}
 }

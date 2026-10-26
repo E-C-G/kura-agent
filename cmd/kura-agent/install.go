@@ -41,8 +41,9 @@ type system struct {
 	acquireLock      func() (lock.Release, error)
 	askSecret        func(prompt string) (string, error)
 	askAWSKeys       func(name string) (string, error)
-	// ensureAWS installe la CLI AWS si elle manque (MSI fourni, sinon téléchargé).
-	ensureAWS func(candidates []string) (awsinstall.Result, error)
+	// ensureAWS installe la CLI AWS si elle manque (MSI fourni, sinon téléchargé) ;
+	// tempDir : dossier de travail réservé aux administrateurs.
+	ensureAWS func(tempDir, want string, candidates []string) (awsinstall.Result, error)
 	remove    func(path string) error
 	now       func() time.Time
 
@@ -71,8 +72,8 @@ func realSystem() system {
 		acquireLock:      lock.Acquire,
 		askSecret:        askSecret,
 		askAWSKeys:       askAWSKeys,
-		ensureAWS: func(c []string) (awsinstall.Result, error) {
-			return awsinstall.System(os.Stdout, filepath.Join(os.TempDir(), "kura-awscli")).Ensure(c)
+		ensureAWS: func(dir, want string, c []string) (awsinstall.Result, error) {
+			return awsinstall.System(os.Stdout, dir).Ensure(want, c)
 		},
 		remove:     os.Remove,
 		now:        time.Now,
@@ -111,9 +112,17 @@ func cmdInstall(args []string) int {
 	if err := fs.Parse(args); err != nil {
 		return exitInstallConfig
 	}
-	if fs.NArg() != 0 {
+	explicit := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { explicit[f.Name] = true })
+	if fs.NArg() != 0 || (explicit["config"] && explicit["package"]) {
 		fmt.Fprintln(os.Stderr, "usage : kura-agent install [--config FICHIER | --package FICHIER.kura] [--aws-cli-msi FICHIER] [--keep] [--skip-validate]")
 		return exitInstallConfig
+	}
+	if *msi != "" {
+		if st, err := os.Stat(*msi); err != nil || !st.Mode().IsRegular() {
+			fmt.Fprintf(os.Stderr, "ÉCHEC : --aws-cli-msi : %s introuvable\n", *msi)
+			return exitInstallConfig
+		}
 	}
 	opt := installOptions{cfgPath: *cfgPath, skipValidate: *skipValidate, pkgPath: *pkg, keep: *keep}
 	opt.msiCandidates = []string{*msi}
@@ -166,6 +175,8 @@ func openInstallPackage(sys system, file string) (pack.Contents, error) {
 func install(sys system, opt installOptions) int {
 	out := sys.out
 	cfgPath, skipValidate := opt.cfgPath, opt.skipValidate
+	installed := false // vrai une fois tout réussi (sinon les secrets du paquet sont retirés)
+	var err error
 	step := func(format string, a ...any) { fmt.Fprintf(out, "• "+format+"\n", a...) }
 	fail := func(code int, format string, a ...any) int {
 		fmt.Fprintf(os.Stderr, "ÉCHEC : "+format+"\n", a...)
@@ -184,19 +195,16 @@ func install(sys system, opt installOptions) int {
 		pkg = &c
 		fmt.Fprintf(out, "Paquet d'installation du %s pour %s / %s, bucket %s\n",
 			c.CreatedAt.Local().Format("02/01/2006 15:04"), c.Client, c.Host, c.Bucket)
-		// La configuration du paquet passe par un fichier, copié ensuite comme une
-		// configuration --config (avec copie de l'ancienne).
-		tmp, err := os.MkdirTemp("", "kura-install-")
-		if err != nil {
-			return fail(exitInstallFailed, "%v", err)
-		}
-		defer os.RemoveAll(tmp)
-		cfgPath = filepath.Join(tmp, "config.yaml")
-		if err := os.WriteFile(cfgPath, []byte(c.Config), 0o600); err != nil {
-			return fail(exitInstallFailed, "%v", err)
-		}
 	}
-	cfg, err := config.Load(cfgPath, config.LoadOptions{CheckSystem: true})
+	// La configuration est lue une seule fois : le texte vérifié est celui qui est
+	// installé, même si le fichier source change pendant l'installation.
+	var cfgData []byte
+	if pkg != nil {
+		cfgData, cfgPath = []byte(pkg.Config), ""
+	} else if cfgData, err = os.ReadFile(cfgPath); err != nil {
+		return fail(exitInstallConfig, "lecture de la configuration : %v", err)
+	}
+	cfg, err := config.Parse(cfgData, config.LoadOptions{CheckSystem: true})
 	if err != nil {
 		if pkg != nil {
 			return fail(exitInstallConfig, "configuration du paquet : %v", err)
@@ -216,23 +224,6 @@ func install(sys system, opt installOptions) int {
 		}
 	}
 
-	// La CLI AWS avant tout le reste : sans elle, ni validate ni la sauvegarde ne
-	// fonctionnent. Installée si profile.aws_cli est vide ou désigne l'emplacement du
-	// MSI ; un autre chemin explicite n'est jamais installé.
-	if def := awsinstall.DefaultPath(); cfg.Profile.AWSCLI == "" || (def != "" && samePath(cfg.Profile.AWSCLI, def)) {
-		res, err := sys.ensureAWS(opt.msiCandidates)
-		if err != nil {
-			return fail(exitInstallFailed, "%v", err)
-		}
-		if res.Installed {
-			step("CLI AWS installée : %s (%s, MSI signé par %s)", res.Version, res.Path, res.Signer)
-			if res.RebootRequired {
-				fmt.Fprintln(out, "Attention : Windows demande un redémarrage pour terminer l'installation de la CLI AWS.")
-			}
-		} else {
-			step("CLI AWS : %s", res.Version)
-		}
-	}
 	if cfg.Profile.AWSCredentials == "" {
 		fmt.Fprintf(out, "Attention : sans profile.aws_credentials, la CLI AWS cherchera ses clés dans le dossier .aws de SYSTEM\n"+
 			"(C:\\Windows\\System32\\config\\systemprofile). Conseillé : aws_credentials: credential:wasabi.\n")
@@ -246,9 +237,55 @@ func install(sys system, opt installOptions) int {
 	}
 	step("dossier %s protégé (Utilisateurs en lecture, coffre réservé aux administrateurs)", sys.dataDir)
 
+	// La CLI AWS avant la suite : sans elle, ni validate ni la sauvegarde ne
+	// fonctionnent. Installée si profile.aws_cli est vide ou désigne l'emplacement du
+	// MSI ; un autre chemin explicite n'est jamais installé. Le MSI est copié dans le
+	// dossier de données, déjà protégé : seuls les administrateurs peuvent le modifier
+	// entre la vérification de sa signature et msiexec.
+	if def := awsinstall.DefaultPath(); cfg.Profile.AWSCLI == "" || (def != "" && samePath(cfg.Profile.AWSCLI, def)) {
+		res, err := sys.ensureAWS(filepath.Join(sys.dataDir, "awscli"), cfg.Profile.AWSCLI, opt.msiCandidates)
+		switch {
+		case err != nil:
+			return fail(exitInstallFailed, "%v", err)
+		case res.Warning != "":
+			fmt.Fprintf(out, "Attention : CLI AWS : %s\n", res.Warning)
+		case res.Installed:
+			step("CLI AWS installée : %s (%s, MSI signé par %s)", res.Version, res.Path, res.Signer)
+			if res.RebootRequired {
+				fmt.Fprintln(out, "Attention : Windows demande un redémarrage pour terminer l'installation de la CLI AWS.")
+			}
+		default:
+			step("CLI AWS : %s", res.Version)
+		}
+	}
+
 	if pkg != nil {
 		// Les secrets du paquet remplacent ceux du coffre : c'est la configuration
-		// préparée pour ce poste.
+		// préparée pour ce poste. Les anciennes valeurs sont remises si l'installation
+		// échoue ensuite (clé pas encore active, validate en échec…).
+		previous := map[string]*string{}
+		for _, cr := range pkg.Credentials {
+			if v, err := sys.vault.Get(cr.Name); err == nil {
+				previous[cr.Name] = &v
+			} else if errors.Is(err, creds.ErrNotFound) {
+				previous[cr.Name] = nil
+			} else {
+				return fail(exitInstallFailed, "secret %q : %v", cr.Name, err)
+			}
+		}
+		defer func() {
+			if installed {
+				return
+			}
+			for name, v := range previous {
+				if v != nil {
+					_ = sys.vault.Set(name, *v)
+				} else {
+					_ = sys.vault.Delete(name)
+				}
+			}
+			fmt.Fprintln(out, "Secrets du coffre remis comme avant l'installation.")
+		}()
 		for _, cr := range pkg.Credentials {
 			value := cr.Value
 			if cr.Kind == "aws" {
@@ -263,7 +300,7 @@ func install(sys system, opt installOptions) int {
 		step("%d secret(s) du paquet enregistré(s) dans le coffre", len(pkg.Credentials))
 	}
 
-	backup, err := installConfig(cfgPath, sys.configFile, sys.now())
+	backup, err := installConfigData(cfgData, cfgPath, sys.configFile, sys.now())
 	if err != nil {
 		return fail(exitInstallFailed, "copie de la configuration : %v", err)
 	}
@@ -379,6 +416,7 @@ func install(sys system, opt installOptions) int {
 		fmt.Fprintln(out, "\nUne fois la première sauvegarde réussie, confirmer l'installation de la clé dans la console.")
 	}
 
+	installed = true
 	fmt.Fprintf(out, `
 Installation terminée.
 Suite conseillée :
@@ -394,12 +432,17 @@ une session déjà ouverte, y lancer « %s tray » (sans élévation).
 // installConfig copie la configuration à son emplacement de production. Une version
 // différente déjà en place est gardée à côté (config.yaml.AAAAMMJJ-HHMMSS.bak).
 func installConfig(src, dst string, now time.Time) (backup string, err error) {
-	if samePath(src, dst) {
-		return "", nil
-	}
 	data, err := os.ReadFile(src)
 	if err != nil {
 		return "", err
+	}
+	return installConfigData(data, src, dst, now)
+}
+
+// installConfigData installe le contenu data (lu dans src, vide s'il vient d'un paquet).
+func installConfigData(data []byte, src, dst string, now time.Time) (backup string, err error) {
+	if src != "" && samePath(src, dst) {
+		return "", nil
 	}
 	old, err := os.ReadFile(dst)
 	switch {

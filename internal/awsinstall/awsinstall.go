@@ -51,67 +51,92 @@ type Result struct {
 	Source         string // MSI utilisé (chemin local, ou URL de téléchargement)
 	Signer         string
 	RebootRequired bool
+	// Warning : CLI présente mais qui ne répond pas ; l'installation continue,
+	// validate dira si elle fonctionne.
+	Warning string
 }
 
-// Ensure vérifie que la CLI AWS est présente et l'installe sinon. candidates :
-// emplacements possibles d'un MSI fourni, dans l'ordre de préférence ; le premier
-// qui existe est utilisé, sinon le MSI est téléchargé.
-func (in Installer) Ensure(candidates []string) (Result, error) {
-	if p, err := in.Find(); err == nil {
+// Ensure vérifie que la CLI AWS v2 est présente et l'installe sinon.
+//
+// want : chemin exigé de aws.exe (profile.aws_cli), vide pour le PATH ou
+// l'emplacement par défaut. candidates : emplacements possibles d'un MSI fourni,
+// dans l'ordre de préférence ; le premier qui existe est utilisé, sinon le MSI est
+// téléchargé.
+//
+// Le MSI est toujours copié (ou téléchargé) dans TempDir, qui doit être un dossier
+// que seuls SYSTEM et les administrateurs peuvent modifier : la signature vérifiée
+// est bien celle du fichier que msiexec installe, sans qu'un processus non élevé
+// puisse le remplacer entre les deux.
+func (in Installer) Ensure(want string, candidates []string) (Result, error) {
+	find := func() (string, error) {
+		if want == "" {
+			return in.Find()
+		}
+		if st, err := os.Stat(want); err != nil || !st.Mode().IsRegular() {
+			return "", fmt.Errorf("%s introuvable", want)
+		}
+		return want, nil
+	}
+	if p, err := find(); err == nil {
 		v, err := in.Version(p)
 		if err != nil {
-			return Result{}, fmt.Errorf("%s ne répond pas (%v) : réparer ou réinstaller la CLI AWS", p, err)
+			return Result{Path: p, Warning: fmt.Sprintf("%s ne répond pas (%v)", p, err)}, nil
+		}
+		if !strings.HasPrefix(v, "aws-cli/2.") {
+			return Result{}, fmt.Errorf("%s est la CLI AWS %s : la v2 est nécessaire (désinstaller l'ancienne, ou renseigner profile.aws_cli)", p, v)
 		}
 		return Result{Path: p, Version: v}, nil
 	}
 	res := Result{Installed: true}
-	msi := ""
+	if err := os.RemoveAll(in.TempDir); err != nil {
+		return Result{}, err
+	}
+	if err := os.MkdirAll(in.TempDir, 0o700); err != nil {
+		return Result{}, err
+	}
+	msi := filepath.Join(in.TempDir, MSIName)
+	defer os.Remove(msi)
+	src := ""
 	for _, c := range candidates {
 		if c == "" {
 			continue
 		}
 		if st, err := os.Stat(c); err == nil && st.Mode().IsRegular() {
-			msi = c
+			src = c
 			break
 		}
 	}
-	if msi == "" {
-		if err := os.MkdirAll(in.TempDir, 0o700); err != nil {
-			return Result{}, err
-		}
-		msi = filepath.Join(in.TempDir, MSIName)
+	if src == "" {
 		fmt.Fprintf(in.Out, "  CLI AWS absente : téléchargement de %s…\n", DownloadURL)
 		if err := in.Download(DownloadURL, msi); err != nil {
-			_ = os.Remove(msi)
 			return Result{}, fmt.Errorf("téléchargement de la CLI AWS : %w (poser %s à côté du paquet et relancer)", err, MSIName)
 		}
-		defer os.Remove(msi)
 		res.Source = DownloadURL
 	} else {
-		fmt.Fprintf(in.Out, "  CLI AWS absente : installation depuis %s\n", msi)
-		res.Source = msi
+		fmt.Fprintf(in.Out, "  CLI AWS absente : installation depuis %s\n", src)
+		if err := copyFile(src, msi); err != nil {
+			return Result{}, fmt.Errorf("copie de %s : %w", src, err)
+		}
+		res.Source = src
 	}
 
 	status, subject, err := in.Signature(msi)
 	if err != nil {
-		return Result{}, fmt.Errorf("vérification de la signature de %s : %w", msi, err)
+		return Result{}, fmt.Errorf("vérification de la signature de %s : %w", res.Source, err)
 	}
 	signer, err := CheckSigner(status, subject)
 	if err != nil {
-		return Result{}, fmt.Errorf("%s refusé, rien n'a été installé : %w", msi, err)
+		return Result{}, fmt.Errorf("%s refusé, rien n'a été installé : %w", res.Source, err)
 	}
 	res.Signer = signer
 
 	logFile := filepath.Join(in.TempDir, "awscli-install.log")
-	if err := os.MkdirAll(in.TempDir, 0o700); err != nil {
-		return Result{}, err
-	}
 	reboot, err := in.RunMSI(msi, logFile)
 	if err != nil {
 		return Result{}, fmt.Errorf("installation de la CLI AWS : %w (journal : %s)", err, logFile)
 	}
 	res.RebootRequired = reboot
-	p, err := in.Find()
+	p, err := find()
 	if err != nil {
 		return Result{}, fmt.Errorf("CLI AWS installée mais introuvable (%v) ; journal : %s", err, logFile)
 	}
@@ -121,6 +146,23 @@ func (in Installer) Ensure(candidates []string) (Result, error) {
 	}
 	res.Path, res.Version = p, v
 	return res, nil
+}
+
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	_, err = io.Copy(out, io.LimitReader(in, maxDownload+1))
+	if cerr := out.Close(); err == nil {
+		err = cerr
+	}
+	return err
 }
 
 // CheckSigner accepte une signature valide d'une organisation de Signers et renvoie
@@ -182,7 +224,15 @@ func HTTPDownload(url, dst string) error {
 	if !strings.HasPrefix(url, "https://") {
 		return fmt.Errorf("adresse non HTTPS refusée : %s", url)
 	}
-	client := &http.Client{Timeout: 20 * time.Minute}
+	client := &http.Client{Timeout: 20 * time.Minute, CheckRedirect: func(r *http.Request, via []*http.Request) error {
+		if r.URL.Scheme != "https" {
+			return fmt.Errorf("redirection non HTTPS refusée : %s", r.URL)
+		}
+		if len(via) >= 10 {
+			return errors.New("trop de redirections")
+		}
+		return nil
+	}}
 	resp, err := client.Get(url)
 	if err != nil {
 		return err
@@ -191,7 +241,7 @@ func HTTPDownload(url, dst string) error {
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("HTTP %s", resp.Status)
 	}
-	f, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	f, err := os.OpenFile(dst, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
 	}
