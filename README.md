@@ -24,6 +24,37 @@ Console d'administration associée : [E-C-G/kura-ctl](https://github.com/E-C-G/k
 Commandes disponibles : `run`, `validate`, `status`, `credentials`, `import`, `install`, `uninstall`,
 `suspend`, `tray`, `version`.
 
+## Systèmes pris en charge
+
+Windows (10, 11, Server) seulement pour l'instant ; Linux (Ubuntu 24.04 d'abord, Fedora ensuite)
+puis macOS sont prévus. Le cœur de l'agent (configuration, garde-fou, synchronisation, bilan,
+paquet `.kura`, état) est commun et testé partout ; les fonctions qui dépendent du système sont
+séparées, un fichier par système, et recensées dans `internal/platform` :
+
+| Fonction | Paquets | Windows | Linux, macOS |
+| --- | --- | --- | --- |
+| planification | `schedtask` | oui | non pris en charge |
+| coffre des secrets | `creds` | oui | non pris en charge |
+| installation | `setup`, `install` | oui | non pris en charge |
+| CLI AWS automatique | `awsinstall` | oui | non pris en charge |
+| icône et canal vers l'icône | `tray`, `ipc` | oui | non pris en charge |
+| fermeture d'applications | `procs` (pré-tâches) | oui | non pris en charge |
+
+Hors Windows, une commande qui a besoin d'une fonction absente s'arrête tout de suite et dit ce
+qui manque ; seules `status` et `version` fonctionnent :
+
+```text
+$ kura-agent install
+kura-agent install : non pris en charge sous Linux dans cette version (manque : installation,
+planification, coffre des secrets, installation de la CLI AWS, icône).
+```
+
+`KURA_DEV=1` autorise, pour le développement uniquement, des remplaçants non sûrs (secrets non
+chiffrés, processus lus dans `/proc`). Emplacements prévus : `/var/lib/kura`, `/etc/kura` et
+`/var/log/kura` sous Linux ; `/Library/Application Support/Kura` et `/Library/Logs/Kura` sous
+macOS (`internal/paths`). Les exclusions (`--exclude`) suivent les règles du système : sans casse
+ni sens des barres sous Windows, chemins Unix tels quels ailleurs.
+
 ## Compiler
 
 Go 1.26 ou plus récent. Première fois, avec accès à Internet :
@@ -490,6 +521,7 @@ internal/report/    bilan vers healthchecks ou webhook
 internal/ipc/       dialogue run ↔ icône : messages JSON, canal nommé par session
 internal/tray/      icône : modèle d'affichage (portable), interface Win32
 internal/creds/     coffre de secrets (DPAPI sous Windows)
+internal/platform/  fonctions dépendantes du système : ce qui est écrit pour chacun, « non pris en charge »
 internal/setup/     ACL, copie des fichiers, icône au démarrage, ancien compte svc-kura (install)
 internal/awsinstall/ CLI AWS absente : MSI fourni ou téléchargé, signature Amazon vérifiée, msiexec
 internal/schedtask/ tâche \Kura\Sync : XML du Planificateur, schtasks

@@ -11,7 +11,7 @@ import (
 )
 
 // System renvoie l'installateur réel (Windows) ; ailleurs, Signature et RunMSI
-// renvoient ErrUnsupported.
+// renvoient une platform.NotImplementedError.
 func System(out io.Writer, tempDir string) Installer {
 	return Installer{
 		Find:      Find,

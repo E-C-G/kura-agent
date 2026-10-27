@@ -2,6 +2,12 @@
 
 package awsinstall
 
-func signature(string) (string, string, error) { return "", "", ErrUnsupported }
+import "github.com/E-C-G/kura-agent/internal/platform"
 
-func runMSI(string, string) (bool, error) { return false, ErrUnsupported }
+func signature(string) (string, string, error) {
+	return "", "", platform.NotImplemented(platform.AWSCLISetup)
+}
+
+func runMSI(string, string) (bool, error) {
+	return false, platform.NotImplemented(platform.AWSCLISetup)
+}

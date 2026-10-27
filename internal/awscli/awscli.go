@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"io"
 	"regexp"
+	"runtime"
 	"strings"
 	"sync"
 
@@ -177,13 +178,22 @@ func skippedPath(l string) string {
 // ExcludeMatcher reproduit le filtrage --exclude de la CLI AWS pour une source locale :
 // chaque motif est joint au dossier source, puis comparé au chemin complet du fichier
 // à la manière de fnmatch (« * » traverse les dossiers, « ? » un caractère, [...]
-// une classe), sans tenir compte de la casse ni du sens des barres (Windows).
+// une classe). Sous Windows, sans tenir compte de la casse ni du sens des barres ;
+// ailleurs, chemins Unix tels quels.
 func ExcludeMatcher(source string, patterns []string) func(string) bool {
-	norm := func(s string) string { return strings.ToLower(strings.ReplaceAll(s, "/", `\`)) }
-	root := strings.TrimRight(norm(source), `\`)
+	return excludeMatcher(source, patterns, runtime.GOOS == "windows")
+}
+
+func excludeMatcher(source string, patterns []string, windows bool) func(string) bool {
+	sep, norm := "/", func(s string) string { return s }
+	if windows {
+		sep = `\`
+		norm = func(s string) string { return strings.ToLower(strings.ReplaceAll(s, "/", `\`)) }
+	}
+	root := strings.TrimRight(norm(source), sep)
 	var res []*regexp.Regexp
 	for _, p := range patterns {
-		if re, err := regexp.Compile("^" + fnmatchToRegexp(root+`\`+norm(p)) + "$"); err == nil {
+		if re, err := regexp.Compile("^" + fnmatchToRegexp(root+sep+norm(p)) + "$"); err == nil {
 			res = append(res, re)
 		}
 	}

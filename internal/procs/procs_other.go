@@ -10,7 +10,9 @@ import (
 	"syscall"
 )
 
-// Hors Windows (développement) : lecture de /proc.
+// Hors Windows : remplaçant de développement, lecture de /proc (Linux seulement).
+// Les commandes refusent les pré-tâches sur ces systèmes sauf KURA_DEV=1
+// (platform.AppControl).
 func (system) Find(name string) ([]Process, error) {
 	entries, err := os.ReadDir("/proc")
 	if err != nil {
