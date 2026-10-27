@@ -1,6 +1,6 @@
 // Package launchd décrit la planification de kura-agent sous macOS : un démon
 // launchd (LaunchDaemon) qui lance « kura-agent run --scheduled » aux heures de la
-// section schedule de la configuration, sous le compte dédié, puis l'installe ou le
+// section schedule de la configuration, sous root, puis l'installe ou le
 // retire (launchctl).
 //
 // Même règle que la tâche Windows \Kura\Sync (schedtask.Next), traduite en
@@ -48,7 +48,7 @@ func PlistName(label string) string { return label + ".plist" }
 // Params complète la planification de la configuration.
 type Params struct {
 	Command string // chemin de kura-agent, ex. /usr/local/bin/kura-agent
-	User    string // compte d'exécution, ex. _kura
+	User    string // compte d'exécution ; vide : root (choix retenu sous macOS)
 	DataDir string // dossier de données (HOME du démon, dossier de travail)
 	LogsDir string // sortie et erreurs de launchd
 }
@@ -171,7 +171,7 @@ func Generate(s config.Schedule, p Params) (Plists, error) {
 			return Plists{}, fmt.Errorf("%s invalide : %q", name, v)
 		}
 	}
-	if p.User == "" || strings.ContainsAny(p.User, " \t\n\"'\\$%:/<>&") {
+	if strings.ContainsAny(p.User, " \t\n\"'\\$%:/<>&") {
 		return Plists{}, fmt.Errorf("compte d'exécution invalide : %q", p.User)
 	}
 	ivs, err := Intervals(s)
@@ -214,8 +214,10 @@ func plist(label string, p Params, args []string, logName, trigger string) []byt
 		fmt.Fprintf(&b, "\t\t<string>%s</string>\n", esc(a))
 	}
 	b.WriteString("\t</array>\n")
-	kv("UserName", p.User)
-	kv("GroupName", p.User)
+	if p.User != "" {
+		kv("UserName", p.User)
+		kv("GroupName", p.User)
+	}
 	kv("WorkingDirectory", p.DataDir)
 	b.WriteString("\t<key>EnvironmentVariables</key>\n\t<dict>\n")
 	fmt.Fprintf(&b, "\t\t<key>HOME</key>\n\t\t<string>%s</string>\n", esc(p.DataDir))

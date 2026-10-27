@@ -14,6 +14,7 @@ import (
 
 	"github.com/E-C-G/kura-agent/internal/awsinstall"
 	"github.com/E-C-G/kura-agent/internal/creds"
+	"github.com/E-C-G/kura-agent/internal/launchd"
 	"github.com/E-C-G/kura-agent/internal/lock"
 	"github.com/E-C-G/kura-agent/internal/schedtask"
 	"github.com/E-C-G/kura-agent/internal/systemd"
@@ -33,6 +34,7 @@ type fakeSys struct {
 	awsErr   error
 	awsTemp  string
 	units    systemd.Units
+	plists   launchd.Plists
 	msis     []string
 	removed  []string
 	password string
@@ -550,6 +552,99 @@ func TestUninstallLinux(t *testing.T) {
 	}
 	if names, _ := sys.vault.List(); len(names) != 0 {
 		t.Fatalf("secrets restés : %v", names)
+	}
+	for _, d := range append([]string{sys.dataDir}, sys.purgeDirs...) {
+		if _, err := os.Stat(d); !os.IsNotExist(err) {
+			t.Errorf("%s resté", d)
+		}
+	}
+}
+
+// macSystem : même faux système, version macOS (démons launchd sous root).
+func (f *fakeSys) macSystem(dir string) system {
+	sys := f.system(dir)
+	sys.darwin = true
+	sys.installDaemons = func(p launchd.Plists) error { f.calls = append(f.calls, "daemons"); f.plists = p; return nil }
+	sys.registerTask = func(string) error { f.t.Fatal("tâche Windows sous macOS"); return nil }
+	sys.installBinary = func(string) (string, string, error) {
+		f.calls = append(f.calls, "binary")
+		return "/usr/local/bin/kura-agent", "", nil
+	}
+	sys.removeBinary = func() (string, error) { f.calls = append(f.calls, "rmbinary"); return "/usr/local/bin/kura-agent", nil }
+	sys.removeVaultKey = func() error { f.calls = append(f.calls, "rmkey"); return nil }
+	sys.programDir = func() string { return "" }
+	sys.legacyAccount = func(string) bool { return false }
+	sys.logsDir = filepath.Join(dir, "Logs", "Kura")
+	sys.purgeDirs = []string{sys.logsDir}
+	return sys
+}
+
+func TestInstallMac(t *testing.T) {
+	dir := t.TempDir()
+	f := &fakeSys{t: t}
+	sys := f.macSystem(dir)
+	out := sys.out.(*strings.Builder)
+	cfg := writeConfig(t, dir, "")
+	if code := install(sys, installOptions{cfgPath: cfg}); code != 0 {
+		t.Fatalf("code %d ; appels %v", code, f.calls)
+	}
+	if got := strings.Join(f.calls, " "); got != "admin acl awscli binary validate daemons" {
+		t.Fatalf("étapes : %s", got)
+	}
+	sync := string(f.plists.Sync)
+	for _, w := range []string{"<string>/usr/local/bin/kura-agent</string>", "<string>--scheduled</string>", "<key>Weekday</key>", sys.logsDir} {
+		if !strings.Contains(sync, w) {
+			t.Errorf("démon sans %q :\n%s", w, sync)
+		}
+	}
+	if strings.Contains(sync, "UserName") {
+		t.Error("démon sous un autre compte que root")
+	}
+	if !strings.Contains(string(f.plists.CatchUp), "--catch-up") {
+		t.Errorf("rattrapage absent (run_if_missed) :\n%s", f.plists.CatchUp)
+	}
+	text := out.String()
+	for _, w := range []string{"démon " + launchd.Label + " actif", "compte root", "Accès\ncomplet au disque", "launchctl kickstart system/" + launchd.Label,
+		"tray.allow_run_now ignoré sous macOS", "trousseau Système"} {
+		if !strings.Contains(text, w) {
+			t.Errorf("sortie sans %q :\n%s", w, text)
+		}
+	}
+	for _, w := range []string{"schtasks", "kura-agentw.exe", "systemctl", "SYSTEM"} {
+		if strings.Contains(text, w) {
+			t.Errorf("sortie d'un autre système sous macOS (%q) :\n%s", w, text)
+		}
+	}
+}
+
+func TestInstallMacValidateFails(t *testing.T) {
+	dir := t.TempDir()
+	f := &fakeSys{t: t, validate: 3}
+	if code := install(f.macSystem(dir), installOptions{cfgPath: writeConfig(t, dir, "")}); code == 0 || strings.Contains(strings.Join(f.calls, " "), "daemons") {
+		t.Fatalf("code %d, appels %v", code, f.calls)
+	}
+}
+
+func TestUninstallMac(t *testing.T) {
+	dir := t.TempDir()
+	f := &fakeSys{t: t}
+	sys := f.macSystem(dir)
+	sys.deleteTask = func() error { f.calls = append(f.calls, "rmdaemons"); return nil }
+	if err := sys.vault.Init(); err != nil {
+		t.Fatal(err)
+	}
+	sys.vault.Set("wasabi", "AKID:secret")
+	for _, d := range append([]string{sys.dataDir}, sys.purgeDirs...) {
+		os.MkdirAll(d, 0o755)
+	}
+	if code := uninstall(sys, true); code != 0 {
+		t.Fatalf("code %d, appels %v", code, f.calls)
+	}
+	if got := strings.Join(f.calls, " "); got != "admin lock rmautostart stoptrays rmdaemons rmbinary rmkey" {
+		t.Fatalf("étapes : %s", got)
+	}
+	if !strings.Contains(sys.out.(*strings.Builder).String(), "démons "+launchd.Label) {
+		t.Fatal(sys.out)
 	}
 	for _, d := range append([]string{sys.dataDir}, sys.purgeDirs...) {
 		if _, err := os.Stat(d); !os.IsNotExist(err) {

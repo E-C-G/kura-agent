@@ -33,9 +33,9 @@ séparées, un fichier par système, et recensées dans `internal/platform` :
 
 | Fonction | Paquets | Windows | Linux, macOS |
 | --- | --- | --- | --- |
-| planification | `schedtask`, `systemd`, `launchd` | oui | Linux : oui (timer systemd) ; macOS : démons launchd écrits et testés, branchés à l'installation avec le compte `_kura` (en cours) |
-| coffre des secrets | `creds` | oui | Linux : oui (systemd-creds) ; macOS : non pris en charge |
-| installation | `setup`, `install` | oui | Linux : oui ; macOS : non pris en charge |
+| planification | `schedtask`, `systemd`, `launchd` | oui | Linux : oui (timer systemd) ; macOS : oui (démons launchd sous root, rattrapage au démarrage) |
+| coffre des secrets | `creds` | oui | Linux : oui (systemd-creds) ; macOS : oui (AES-256-GCM, clé dans le trousseau Système) |
+| installation | `setup`, `install` | oui | Linux : oui ; macOS : écrite, mais `install` attend la CLI AWS automatique |
 | CLI AWS automatique | `awsinstall` | oui | Linux : oui (zip signé PGP) ; macOS : non pris en charge |
 | icône et canal vers l'icône | `tray`, `ipc` | oui | non pris en charge |
 | fermeture d'applications | `procs` (pré-tâches) | oui | non pris en charge |
@@ -47,8 +47,8 @@ d'applications et icône à venir). Sous macOS :
 
 ```text
 $ sudo kura-agent install
-kura-agent install : non pris en charge sous macOS dans cette version (manque : installation,
-planification, coffre des secrets, installation de la CLI AWS).
+kura-agent install : non pris en charge sous macOS dans cette version (manque : installation
+de la CLI AWS).
 ```
 
 ### Installer sous Linux (Ubuntu 24.04)
