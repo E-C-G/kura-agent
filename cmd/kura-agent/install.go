@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 	"github.com/E-C-G/kura-agent/internal/paths"
 	"github.com/E-C-G/kura-agent/internal/schedtask"
 	"github.com/E-C-G/kura-agent/internal/setup"
+	"github.com/E-C-G/kura-agent/internal/systemd"
 	"github.com/E-C-G/kura-agent/pkg/config"
 	"github.com/E-C-G/kura-agent/pkg/pack"
 )
@@ -47,14 +49,23 @@ type system struct {
 	remove    func(path string) error
 	now       func() time.Time
 
+	// Linux : compte de service, timer systemd à la place de la tâche Windows,
+	// exécutable copié dans /usr/local/bin.
+	linux         bool
+	ensureAccount func() (created bool, err error)
+	installTimer  func(systemd.Units) error
+	removeBinary  func() (string, error)
+
 	vault      creds.Store
 	dataDir    string
 	configFile string
+	awsWorkDir string   // dossier de travail de la CLI AWS, réservé aux administrateurs
+	purgeDirs  []string // dossiers retirés par uninstall --purge, en plus de dataDir
 	out        io.Writer
 }
 
 func realSystem() system {
-	return system{
+	sys := system{
 		checkAdmin:       setup.CheckAdmin,
 		secureDataDir:    setup.SecureDataDir,
 		installBinary:    setup.InstallBinary,
@@ -80,8 +91,22 @@ func realSystem() system {
 		vault:      vault(),
 		dataDir:    paths.DataDir(),
 		configFile: paths.ConfigFile(),
+		awsWorkDir: filepath.Join(paths.DataDir(), "awscli"),
 		out:        os.Stdout,
 	}
+	if runtime.GOOS == "linux" {
+		timers := systemd.System()
+		sys.linux = true
+		sys.ensureAccount = setup.EnsureServiceAccount
+		sys.installTimer = timers.Install
+		sys.deleteTask = timers.Remove
+		sys.removeBinary = setup.RemoveBinary
+		// /var/lib/kura appartient au compte du service : le travail de la CLI AWS se
+		// fait dans un dossier de root.
+		sys.awsWorkDir = "/var/cache/kura-install"
+		sys.purgeDirs = []string{paths.LogsDir(), paths.ConfigDir(), sys.awsWorkDir}
+	}
+	return sys
 }
 
 const (
@@ -228,17 +253,35 @@ func install(sys system, opt installOptions) int {
 	}
 
 	if cfg.Profile.AWSCredentials == "" {
-		fmt.Fprintf(out, "Attention : sans profile.aws_credentials, la CLI AWS cherchera ses clés dans le dossier .aws de SYSTEM\n"+
-			"(C:\\Windows\\System32\\config\\systemprofile). Conseillé : aws_credentials: credential:wasabi.\n")
+		home := "le dossier .aws de SYSTEM\n(C:\\Windows\\System32\\config\\systemprofile)"
+		if sys.linux {
+			home = "/var/lib/kura/.aws"
+		}
+		fmt.Fprintf(out, "Attention : sans profile.aws_credentials, la CLI AWS cherchera ses clés dans %s. Conseillé : aws_credentials: credential:wasabi.\n", home)
 	}
 
+	if sys.linux {
+		created, err := sys.ensureAccount()
+		if err != nil {
+			return fail(exitInstallFailed, "compte %s : %v", setup.ServiceAccount, err)
+		}
+		if created {
+			step("compte de service %s créé (système, sans mot de passe ni shell)", setup.ServiceAccount)
+		} else {
+			step("compte de service %s présent", setup.ServiceAccount)
+		}
+	}
 	if err := sys.secureDataDir(sys.dataDir); err != nil {
 		return fail(exitInstallFailed, "dossier %s : %v", sys.dataDir, err)
 	}
 	if err := sys.vault.Init(); err != nil {
 		return fail(exitInstallFailed, "coffre %s : %v", sys.vault.Dir, err)
 	}
-	step("dossier %s protégé (Utilisateurs en lecture, coffre réservé aux administrateurs)", sys.dataDir)
+	if sys.linux {
+		step("dossiers %s et %s prêts ; coffre %s réservé à root", sys.dataDir, filepath.Dir(sys.configFile), sys.vault.Dir)
+	} else {
+		step("dossier %s protégé (Utilisateurs en lecture, coffre réservé aux administrateurs)", sys.dataDir)
+	}
 
 	// La CLI AWS avant la suite : sans elle, ni validate ni la sauvegarde ne
 	// fonctionnent. Installée si profile.aws_cli est vide ou désigne l'emplacement du
@@ -246,7 +289,7 @@ func install(sys system, opt installOptions) int {
 	// dossier de données, déjà protégé : seuls les administrateurs peuvent le modifier
 	// entre la vérification de sa signature et msiexec.
 	if def := awsinstall.DefaultPath(); cfg.Profile.AWSCLI == "" || (def != "" && samePath(cfg.Profile.AWSCLI, def)) {
-		res, err := sys.ensureAWS(filepath.Join(sys.dataDir, "awscli"), cfg.Profile.AWSCLI, opt.msiCandidates)
+		res, err := sys.ensureAWS(sys.awsWorkDir, cfg.Profile.AWSCLI, opt.msiCandidates)
 		switch {
 		case err != nil:
 			return fail(exitInstallFailed, "%v", err)
@@ -318,7 +361,7 @@ func install(sys system, opt installOptions) int {
 		return fail(exitInstallFailed, "copie de l'exécutable : %v", err)
 	}
 	step("exécutable : %s", exe)
-	if gui == "" {
+	if gui == "" && setup.GUIName != "" {
 		fmt.Fprintf(out, "Attention : %s absent à côté de l'exécutable : pas d'icône (préavis par simple attente, pas de relance d'Outlook).\n", setup.GUIName)
 	}
 
@@ -357,11 +400,68 @@ func install(sys system, opt installOptions) int {
 	if !skipValidate {
 		fmt.Fprintln(out, "\nVérification (validate) :")
 		if code := sys.validate(sys.configFile); code != 0 {
-			return fail(exitInstallFailed, "validate a échoué : tâche %s non créée ni modifiée. Corriger puis relancer install.", schedtask.Name)
+			name := schedtask.Name
+			if sys.linux {
+				name = systemd.TimerName
+			}
+			return fail(exitInstallFailed, "validate a échoué : planification %s non créée ni modifiée. Corriger puis relancer install.", name)
 		}
 		fmt.Fprintln(out)
 	}
 
+	if sys.linux {
+		if code := installLinuxTimer(sys, cfg, exe, step, fail); code != exitInstallOK {
+			return code
+		}
+	} else if code := installWindowsTask(sys, cfg, exe, step, fail); code != exitInstallOK {
+		return code
+	}
+
+	if gui != "" {
+		if err := sys.setAutostart(gui); err != nil {
+			return fail(exitInstallFailed, "lancement de l'icône à l'ouverture de session : %v", err)
+		}
+		step("icône lancée à chaque ouverture de session pour %s", strings.Join(cfg.Tray.Users, ", "))
+	}
+
+	if pkg != nil && !opt.keep {
+		if err := sys.remove(opt.pkgPath); err == nil {
+			step("paquet %s supprimé (il contenait la clé du poste)", opt.pkgPath)
+		} else {
+			fmt.Fprintf(out, "Attention : paquet %s non supprimé (%v) : le supprimer, il contient la clé du poste.\n", opt.pkgPath, err)
+		}
+	}
+	if pkg != nil {
+		fmt.Fprintln(out, "\nUne fois la première sauvegarde réussie, confirmer l'installation de la clé dans la console.")
+	}
+
+	installed = true
+	if sys.linux {
+		fmt.Fprintf(out, `
+Installation terminée.
+Suite conseillée :
+  1. sudo kura-agent run --dry-run           simulation, rien n'est copié ni supprimé
+  2. sudo systemctl start %s       une vraie exécution, comme planifiée, puis kura-agent status
+  3. systemctl list-timers %s      prochain passage ; journal : journalctl -u %s
+`, systemd.ServiceName, systemd.TimerName, systemd.ServiceName)
+		return exitInstallOK
+	}
+	fmt.Fprintf(out, `
+Installation terminée.
+Suite conseillée :
+  1. kura-agent run --dry-run          simulation, rien n'est copié ni supprimé
+  2. schtasks /Run /TN %s        une vraie exécution, comme planifiée, puis kura-agent status
+  3. après une nuit sans erreur, désactiver puis supprimer l'ancienne tâche et son script
+L'icône apparaît à la prochaine ouverture de session ; pour l'ouvrir tout de suite dans
+une session déjà ouverte, y lancer « %s tray » (sans élévation).
+`, schedtask.Name, filepath.Join(sys.programDir(), setup.GUIName))
+	return exitInstallOK
+}
+
+// installWindowsTask enregistre la tâche \Kura\Sync (SYSTEM) et retire l'ancien compte
+// svc-kura.
+func installWindowsTask(sys system, cfg *config.Config, exe string, step func(string, ...any), fail func(int, string, ...any) int) int {
+	out := sys.out
 	var runNow []string
 	for _, u := range cfg.Tray.AllowRunNow {
 		s, err := sys.accountSID(u)
@@ -401,34 +501,23 @@ func install(sys system, opt installOptions) int {
 		}
 	}
 
-	if gui != "" {
-		if err := sys.setAutostart(gui); err != nil {
-			return fail(exitInstallFailed, "lancement de l'icône à l'ouverture de session : %v", err)
-		}
-		step("icône lancée à chaque ouverture de session pour %s", strings.Join(cfg.Tray.Users, ", "))
-	}
+	return exitInstallOK
+}
 
-	if pkg != nil && !opt.keep {
-		if err := sys.remove(opt.pkgPath); err == nil {
-			step("paquet %s supprimé (il contenait la clé du poste)", opt.pkgPath)
-		} else {
-			fmt.Fprintf(out, "Attention : paquet %s non supprimé (%v) : le supprimer, il contient la clé du poste.\n", opt.pkgPath, err)
-		}
+// installLinuxTimer met en place kura-sync.service et kura-sync.timer (compte
+// kura-agent).
+func installLinuxTimer(sys system, cfg *config.Config, exe string, step func(string, ...any), fail func(int, string, ...any) int) int {
+	if len(cfg.Tray.AllowRunNow) > 0 {
+		fmt.Fprintln(sys.out, "Attention : tray.allow_run_now ignoré sous Linux pour l'instant (lancement : sudo systemctl start "+systemd.ServiceName+").")
 	}
-	if pkg != nil {
-		fmt.Fprintln(out, "\nUne fois la première sauvegarde réussie, confirmer l'installation de la clé dans la console.")
+	units, err := systemd.Generate(cfg.Schedule, systemd.Params{Command: exe, User: setup.ServiceAccount})
+	if err != nil {
+		return fail(exitInstallConfig, "planification : %v", err)
 	}
-
-	installed = true
-	fmt.Fprintf(out, `
-Installation terminée.
-Suite conseillée :
-  1. kura-agent run --dry-run          simulation, rien n'est copié ni supprimé
-  2. schtasks /Run /TN %s        une vraie exécution, comme planifiée, puis kura-agent status
-  3. après une nuit sans erreur, désactiver puis supprimer l'ancienne tâche et son script
-L'icône apparaît à la prochaine ouverture de session ; pour l'ouvrir tout de suite dans
-une session déjà ouverte, y lancer « %s tray » (sans élévation).
-`, schedtask.Name, filepath.Join(sys.programDir(), setup.GUIName))
+	if err := sys.installTimer(units); err != nil {
+		return fail(exitInstallFailed, "planification : %v", err)
+	}
+	step("timer %s actif : %s, compte %s", systemd.TimerName, describeSchedule(cfg.Schedule), setup.ServiceAccount)
 	return exitInstallOK
 }
 
@@ -460,6 +549,9 @@ func installConfigData(data []byte, src, dst string, now time.Time) (backup stri
 	case !errors.Is(err, os.ErrNotExist):
 		// Illisible mais présente : ne jamais l'écraser sans copie.
 		return "", fmt.Errorf("lecture de %s : %w", dst, err)
+	}
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return backup, err
 	}
 	tmp := dst + ".tmp"
 	if err := os.WriteFile(tmp, data, 0o644); err != nil {
@@ -540,6 +632,8 @@ func uninstall(sys system, purge bool) int {
 	}
 	if err := sys.deleteTask(); err != nil {
 		errs = append(errs, err)
+	} else if sys.linux {
+		step("timer %s et service %s retirés", systemd.TimerName, systemd.ServiceName)
 	} else {
 		step("tâche %s supprimée", schedtask.Name)
 	}
@@ -561,14 +655,39 @@ func uninstall(sys system, purge bool) int {
 			step("%s supprimé", dir)
 		}
 	}
-	if purge {
-		if err := os.RemoveAll(sys.dataDir); err != nil {
+	if sys.linux {
+		switch p, err := sys.removeBinary(); {
+		case err != nil:
 			errs = append(errs, err)
-		} else {
-			step("%s supprimé (configuration, secrets, journaux)", sys.dataDir)
+		case p != "":
+			step("%s supprimé", p)
 		}
+	}
+	if purge {
+		// Les secrets d'abord : sous Linux, ils ne sont pas dans dataDir.
+		names, err := sys.vault.List()
+		for _, n := range names {
+			if err == nil {
+				err = sys.vault.Delete(n)
+			}
+		}
+		if err != nil {
+			errs = append(errs, fmt.Errorf("coffre : %w", err))
+		}
+		removed := []string{}
+		for _, d := range append([]string{sys.dataDir}, sys.purgeDirs...) {
+			if err := os.RemoveAll(d); err != nil {
+				errs = append(errs, err)
+			} else {
+				removed = append(removed, d)
+			}
+		}
+		if len(names) > 0 && err == nil {
+			step("%d secret(s) supprimé(s) du coffre", len(names))
+		}
+		step("supprimé : %s (configuration, secrets, journaux)", strings.Join(removed, ", "))
 	} else {
-		step("%s conservé (configuration, secrets, journaux) ; --purge pour l'effacer", sys.dataDir)
+		step("%s conservé (configuration, secrets, journaux) ; --purge pour l'effacer", strings.Join(append([]string{sys.dataDir}, sys.purgeDirs...), ", "))
 	}
 	if len(errs) > 0 {
 		fmt.Fprintln(os.Stderr, "ÉCHEC :", errors.Join(errs...))

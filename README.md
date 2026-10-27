@@ -35,22 +35,48 @@ séparées, un fichier par système, et recensées dans `internal/platform` :
 | --- | --- | --- | --- |
 | planification | `schedtask`, `systemd` | oui | Linux : oui (timer systemd) ; macOS : non pris en charge |
 | coffre des secrets | `creds` | oui | Linux : oui (systemd-creds) ; macOS : non pris en charge |
-| installation | `setup`, `install` | oui | non pris en charge |
+| installation | `setup`, `install` | oui | Linux : oui ; macOS : non pris en charge |
 | CLI AWS automatique | `awsinstall` | oui | Linux : oui (zip signé PGP) ; macOS : non pris en charge |
 | icône et canal vers l'icône | `tray`, `ipc` | oui | non pris en charge |
 | fermeture d'applications | `procs` (pré-tâches) | oui | non pris en charge |
 
 Hors Windows, une commande qui a besoin d'une fonction absente s'arrête tout de suite et dit ce
-qui manque. Sous Linux, `status`, `version`, `suspend`, `credentials`, `import`, `validate` et
-`run` fonctionnent déjà (avec `sudo` pour le coffre) ; une configuration avec `pre_tasks` ou
-`post_tasks` y est refusée (fermeture d'applications et icône à venir) ; `install`, `uninstall`
-et `tray` répondent encore :
+qui manque. Sous Linux, toutes les commandes fonctionnent sauf `tray` (avec `sudo` pour le coffre
+et l'installation) ; une configuration avec `pre_tasks` ou `post_tasks` y est refusée (fermeture
+d'applications et icône à venir). Sous macOS :
 
 ```text
 $ sudo kura-agent install
-kura-agent install : non pris en charge sous Linux dans cette version (manque : installation,
-installation de la CLI AWS, icône).
+kura-agent install : non pris en charge sous macOS dans cette version (manque : installation,
+planification, coffre des secrets, installation de la CLI AWS).
 ```
+
+### Installer sous Linux (Ubuntu 24.04)
+
+```bash
+sudo kura-agent install --config config.yaml        # ou --package <fichier>.kura
+```
+
+`install` (rejouable, comme sous Windows) :
+
+1. crée le compte de service `kura-agent` s'il manque (`systemd-sysusers`) ;
+2. prépare `/var/lib/kura` et `/etc/kura`, et le coffre `/etc/credstore.encrypted` (root) ;
+3. installe la CLI AWS si elle manque (zip signé, voir plus bas), dans un dossier de travail de
+   root (`/var/cache/kura-install`) ;
+4. range les secrets du paquet, installe la configuration dans `/etc/kura/config.yaml` (ancienne
+   version gardée en `.bak`) ;
+5. garde l'exécutable s'il est déjà dans `/usr/bin` ou `/usr/local/bin`, sinon le copie dans
+   `/usr/local/bin/kura-agent` ;
+6. demande les secrets manquants, lance `validate` et s'arrête là en cas d'échec ;
+7. écrit `kura-sync.service` et `kura-sync.timer`, puis active le timer.
+
+Ensuite : `sudo systemctl start kura-sync.service` (une vraie exécution, comme planifiée),
+`kura-agent status`, `systemctl list-timers kura-sync.timer`, `journalctl -u kura-sync.service`.
+`tray.allow_run_now` est ignoré sous Linux pour l'instant.
+
+`sudo kura-agent uninstall` retire le timer, le service et l'exécutable copié dans
+`/usr/local/bin` ; `--purge` efface aussi les secrets `kura.*` du coffre, `/var/lib/kura`,
+`/var/log/kura`, `/etc/kura` et `/var/cache/kura-install`. Le compte `kura-agent` est gardé.
 
 Sous Linux, la planification est un timer systemd, `kura-sync.timer`, qui lance le service
 `kura-sync.service` (`kura-agent run --quiet --scheduled`). Les deux unités sont générées depuis

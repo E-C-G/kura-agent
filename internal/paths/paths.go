@@ -46,6 +46,12 @@ func layoutFor(goos, override, programData string) layout {
 // DataDir : état, coffre, bilans en attente.
 func DataDir() string { return current().data }
 
+// ConfigDir : dossier de la configuration.
+func ConfigDir() string { return current().config }
+
+// LogsDir : dossier des journaux.
+func LogsDir() string { return current().logs }
+
 // ConfigFile est le fichier de configuration par défaut.
 func ConfigFile() string { return filepath.Join(current().config, "config.yaml") }
 
