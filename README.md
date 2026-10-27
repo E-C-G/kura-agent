@@ -34,19 +34,22 @@ séparées, un fichier par système, et recensées dans `internal/platform` :
 | Fonction | Paquets | Windows | Linux, macOS |
 | --- | --- | --- | --- |
 | planification | `schedtask`, `systemd` | oui | Linux : oui (timer systemd) ; macOS : non pris en charge |
-| coffre des secrets | `creds` | oui | non pris en charge |
+| coffre des secrets | `creds` | oui | Linux : oui (systemd-creds) ; macOS : non pris en charge |
 | installation | `setup`, `install` | oui | non pris en charge |
 | CLI AWS automatique | `awsinstall` | oui | non pris en charge |
 | icône et canal vers l'icône | `tray`, `ipc` | oui | non pris en charge |
 | fermeture d'applications | `procs` (pré-tâches) | oui | non pris en charge |
 
 Hors Windows, une commande qui a besoin d'une fonction absente s'arrête tout de suite et dit ce
-qui manque ; seules `status` et `version` fonctionnent :
+qui manque. Sous Linux, `status`, `version`, `suspend`, `credentials`, `import`, `validate` et
+`run` fonctionnent déjà (avec `sudo` pour le coffre) ; une configuration avec `pre_tasks` ou
+`post_tasks` y est refusée (fermeture d'applications et icône à venir) ; `install`, `uninstall`
+et `tray` répondent encore :
 
 ```text
-$ kura-agent install
+$ sudo kura-agent install
 kura-agent install : non pris en charge sous Linux dans cette version (manque : installation,
-planification, coffre des secrets, installation de la CLI AWS, icône).
+installation de la CLI AWS, icône).
 ```
 
 Sous Linux, la planification est un timer systemd, `kura-sync.timer`, qui lance le service
@@ -58,6 +61,14 @@ par séries de 24 h qui démarrent à l'heure dite les jours choisis. `run_if_mi
 `kura-agent`, avec la seule capacité `CAP_DAC_READ_SEARCH` (lecture de tout le disque, transmise à
 aws), en écriture dans `/var/lib/kura` et `/var/log/kura` seulement. `install` les mettra en place
 quand l'installation Linux sera écrite.
+
+Sous Linux, chaque secret est chiffré par `systemd-creds` (clé de la machine, et puce TPM si elle
+existe) dans `/etc/credstore.encrypted/kura.<nom>`, réservé à root ; le nom est inscrit dans le
+chiffré, un fichier renommé est refusé. Le service ne lit jamais ces fichiers : systemd les lui
+déchiffre au démarrage (`ImportCredential=kura.*`) dans `$CREDENTIALS_DIRECTORY`, lisible par lui
+seul. Les commandes lancées avec `sudo` (`credentials`, `import`, `validate`) les déchiffrent
+elles-mêmes. Le compte de service `kura-agent` (système, sans mot de passe ni shell, dossier
+`/var/lib/kura`) est créé par `systemd-sysusers` s'il manque.
 
 `KURA_DEV=1` autorise, pour le développement uniquement, des remplaçants non sûrs (secrets non
 chiffrés, processus lus dans `/proc`). Emplacements prévus : `/var/lib/kura`, `/etc/kura` et

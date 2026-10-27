@@ -25,6 +25,7 @@ import (
 	"github.com/E-C-G/kura-agent/internal/ipc"
 	"github.com/E-C-G/kura-agent/internal/lock"
 	"github.com/E-C-G/kura-agent/internal/paths"
+	"github.com/E-C-G/kura-agent/internal/platform"
 	"github.com/E-C-G/kura-agent/internal/procs"
 	"github.com/E-C-G/kura-agent/internal/report"
 	"github.com/E-C-G/kura-agent/internal/runner"
@@ -165,6 +166,9 @@ func cmdRun(args []string) int {
 	defer release()
 
 	cfg, err := config.Load(*cfgPath, config.LoadOptions{})
+	if err == nil {
+		err = platformConfig(cfg)
+	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		recordConfigError(err)
@@ -224,7 +228,7 @@ func cmdRun(args []string) int {
 	}
 	// Une destination de bilan mal configurée (secret absent…) ne doit pas empêcher la
 	// sauvegarde : on le signale et on continue sans bilan.
-	rep, err := report.New(cfg.Notify.Report, creds.Store{Dir: paths.CredentialsDir()}, reportOptions(cfg))
+	rep, err := report.New(cfg.Notify.Report, vault(), reportOptions(cfg))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "bilan désactivé pour cette exécution :", err)
 	}
@@ -291,7 +295,7 @@ func awsKeysEnv(cfg *config.Config) ([]string, error) {
 	return k.Env(), nil
 }
 
-func vault() creds.Store { return creds.Store{Dir: paths.CredentialsDir()} }
+func vault() creds.Store { return creds.System(paths.CredentialsDir()) }
 
 func joinAWSKeys(id, secret string) (string, error) { return creds.JoinAWSKeys(id, secret) }
 
@@ -316,6 +320,9 @@ func cmdValidate(args []string) int {
 	check("configuration "+*cfgPath, err)
 	if cfg == nil {
 		return runner.ExitConfig
+	}
+	if err := platformConfig(cfg); err != nil {
+		check("fonctions demandées sous "+platform.OSName(), err)
 	}
 	aws, err := resolveAWS(cfg.Profile.AWSCLI)
 	check("AWS CLI", err)
@@ -347,11 +354,11 @@ func cmdValidate(args []string) int {
 	if r := cfg.Notify.Report; r != nil {
 		label := "bilan : " + r.Type
 		if *offline {
-			_, err := report.New(r, creds.Store{Dir: paths.CredentialsDir()}, reportOptions(cfg))
+			_, err := report.New(r, vault(), reportOptions(cfg))
 			check(label+" (secrets résolus, pas d'envoi)", err)
 		} else {
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			note, err := report.Check(ctx, r, creds.Store{Dir: paths.CredentialsDir()}, reportOptions(cfg))
+			note, err := report.Check(ctx, r, vault(), reportOptions(cfg))
 			cancel()
 			check(label, err)
 			if err == nil && note != "" {

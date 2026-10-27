@@ -9,7 +9,7 @@ import (
 func TestSupportTable(t *testing.T) {
 	want := map[string]map[Feature]bool{
 		"windows": {Scheduling: true, Vault: true, Install: true, AWSCLISetup: true, Tray: true, AppControl: true},
-		"linux":   {Scheduling: true},
+		"linux":   {Scheduling: true, Vault: true},
 	}[runtime.GOOS]
 	for _, f := range All {
 		if got := Supported(f); got != want[f] {

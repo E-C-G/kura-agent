@@ -55,7 +55,7 @@ func TestGenerate(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, w := range []string{"ExecStart=/usr/bin/kura-agent run --quiet --scheduled", "User=kura-agent", "TimeoutStartSec=8100",
-		"AmbientCapabilities=CAP_DAC_READ_SEARCH", "ProtectSystem=strict", "StateDirectory=kura", "SuccessExitStatus=1"} {
+		"AmbientCapabilities=CAP_DAC_READ_SEARCH", "ProtectSystem=strict", "StateDirectory=kura", "SuccessExitStatus=1", "ImportCredential=kura.*"} {
 		if !strings.Contains(u.Service, w) {
 			t.Errorf("service sans %q", w)
 		}

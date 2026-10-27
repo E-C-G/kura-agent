@@ -6,8 +6,14 @@
 // à chaque écriture). `kura-agent credentials set` se lance donc depuis une console
 // d'administration, et la tâche (SYSTEM) relit les mêmes secrets.
 //
-// Hors Windows (développement uniquement), le secret est stocké en clair, lisible
-// par le seul propriétaire du fichier.
+// Sous Linux (System), chaque secret est chiffré par systemd-creds (clé de la machine,
+// et puce TPM si elle existe) dans /etc/credstore.encrypted/kura.<nom>. Le service
+// kura-sync, qui tourne sous le compte kura-agent, ne lit jamais ces fichiers : systemd
+// les lui déchiffre au démarrage (ImportCredential=kura.*) dans $CREDENTIALS_DIRECTORY.
+// Les commandes lancées avec sudo les déchiffrent elles-mêmes.
+//
+// Ailleurs, et avec KURA_DEV=1 (développement uniquement), le secret est stocké en
+// clair, lisible par le seul propriétaire du fichier.
 package creds
 
 import (
@@ -27,14 +33,53 @@ var namePattern = regexp.MustCompile(`^[a-z0-9-]+$`)
 
 const ext = ".secret"
 
-// Store est un coffre rangé dans un dossier.
-type Store struct{ Dir string }
+// Store est un coffre rangé dans un dossier. Le zéro (Store{Dir: …}) chiffre comme
+// le système de compilation le fait par défaut (DPAPI sous Windows, en clair
+// ailleurs) ; System renvoie le coffre de production de chaque système.
+type Store struct {
+	Dir string
+	// cipher : chiffrement propre au système (nil : protect / unprotect).
+	cipher cipher
+	// prefix : nom de fichier prefix+nom (Linux : « kura. ») ; vide : nom+".secret".
+	prefix string
+	// serviceDir : secrets déjà déchiffrés par systemd pour le service
+	// ($CREDENTIALS_DIRECTORY), lus en priorité.
+	serviceDir string
+}
+
+// cipher chiffre un secret ; name est le nom complet du fichier (vérifié au
+// déchiffrement par systemd-creds).
+type cipher interface {
+	protect(name string, plain []byte) ([]byte, error)
+	unprotect(name string, enc []byte) ([]byte, error)
+}
+
+func (s Store) fileName(name string) string {
+	if s.prefix != "" {
+		return s.prefix + name
+	}
+	return name + ext
+}
 
 func (s Store) path(name string) (string, error) {
 	if !namePattern.MatchString(name) {
 		return "", fmt.Errorf("nom de secret %q invalide (minuscules, chiffres et '-')", name)
 	}
-	return filepath.Join(s.Dir, name+ext), nil
+	return filepath.Join(s.Dir, s.fileName(name)), nil
+}
+
+func (s Store) protect(name string, plain []byte) ([]byte, error) {
+	if s.cipher != nil {
+		return s.cipher.protect(s.fileName(name), plain)
+	}
+	return protect(plain)
+}
+
+func (s Store) unprotect(name string, enc []byte) ([]byte, error) {
+	if s.cipher != nil {
+		return s.cipher.unprotect(s.fileName(name), enc)
+	}
+	return unprotect(enc)
 }
 
 // Init crée le dossier du coffre et lui applique son ACL (aussi fait à chaque Set).
@@ -54,7 +99,7 @@ func (s Store) Set(name, value string) error {
 	if value == "" {
 		return errors.New("secret vide")
 	}
-	enc, err := protect([]byte(value))
+	enc, err := s.protect(name, []byte(value))
 	if err != nil {
 		return fmt.Errorf("chiffrement du secret : %w", err)
 	}
@@ -78,6 +123,12 @@ func (s Store) Get(name string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	if s.serviceDir != "" {
+		// Service systemd : secret déjà déchiffré, lisible par lui seul.
+		if v, err := os.ReadFile(filepath.Join(s.serviceDir, s.fileName(name))); err == nil {
+			return string(v), nil
+		}
+	}
 	enc, err := os.ReadFile(p)
 	if errors.Is(err, os.ErrNotExist) {
 		return "", fmt.Errorf("%q : %w (kura-agent credentials set %s)", name, ErrNotFound, name)
@@ -85,7 +136,7 @@ func (s Store) Get(name string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	v, err := unprotect(enc)
+	v, err := s.unprotect(name, enc)
 	if err != nil {
 		return "", fmt.Errorf("%q illisible : enregistré sous un autre compte ? (%w)", name, err)
 	}
@@ -115,7 +166,17 @@ func (s Store) List() ([]string, error) {
 	}
 	var names []string
 	for _, e := range entries {
-		if n, ok := strings.CutSuffix(e.Name(), ext); ok && !e.IsDir() {
+		if e.IsDir() {
+			continue
+		}
+		var n string
+		var ok bool
+		if s.prefix != "" {
+			n, ok = strings.CutPrefix(e.Name(), s.prefix)
+		} else {
+			n, ok = strings.CutSuffix(e.Name(), ext)
+		}
+		if ok && namePattern.MatchString(n) {
 			names = append(names, n)
 		}
 	}

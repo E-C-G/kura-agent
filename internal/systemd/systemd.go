@@ -165,15 +165,20 @@ TimeoutStartSec=%d
 User=%s
 Group=%s
 Environment=HOME=/var/lib/kura
+# Secrets : /etc/credstore.encrypted/kura.*, déchiffrés par systemd dans
+# $CREDENTIALS_DIRECTORY, lisibles par ce service seul.
+ImportCredential=kura.*
 # Lecture de tout le disque, sans écriture : capacité transmise à aws.
 AmbientCapabilities=CAP_DAC_READ_SEARCH
 CapabilityBoundingSet=CAP_DAC_READ_SEARCH
 NoNewPrivileges=yes
-# Écriture limitée à /var/lib/kura et /var/log/kura ; /etc/kura en lecture.
+# Écriture limitée à /var/lib/kura et /var/log/kura ; /etc/kura en lecture. État et
+# journaux lisibles par tous (icône, kura-agent status), comme sous Windows : aucun
+# secret n'y est rangé.
 StateDirectory=kura
-StateDirectoryMode=0750
+StateDirectoryMode=0755
 LogsDirectory=kura
-LogsDirectoryMode=0750
+LogsDirectoryMode=0755
 ConfigurationDirectory=kura
 ProtectSystem=strict
 ProtectHome=read-only
