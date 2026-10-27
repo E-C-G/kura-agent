@@ -6,7 +6,7 @@
 // séparées par paquet, un fichier par système (`*_windows.go`, `*_other.go`) :
 //
 //	Fonction                      Paquets                         Windows   Linux, macOS
-//	planification                 schedtask                       oui       non (à venir)
+//	planification                 schedtask, systemd              oui       Linux (systemd) ; macOS à venir
 //	coffre des secrets            creds                           oui       non (à venir)
 //	installation                  setup, cmd/kura-agent install   oui       non (à venir)
 //	CLI AWS automatique           awsinstall                      oui       non (à venir)

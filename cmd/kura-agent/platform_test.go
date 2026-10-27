@@ -26,12 +26,14 @@ func TestCheckMissing(t *testing.T) {
 	}
 }
 
-// Sous Windows, toutes les commandes passent ; ailleurs, seules status et version.
+// Une commande passe si et seulement si toutes ses fonctions existent sur ce système ;
+// sous Windows, toutes passent.
 func TestCommandsOnThisSystem(t *testing.T) {
 	t.Setenv("KURA_DEV", "")
-	for cmd := range commandNeeds {
+	for cmd, needs := range commandNeeds {
 		var out strings.Builder
-		if got, want := checkPlatform(cmd, &out), runtime.GOOS == "windows"; got != want {
+		want := len(platform.Missing(needs...)) == 0
+		if got := checkPlatform(cmd, &out); got != want || (runtime.GOOS == "windows" && !got) {
 			t.Errorf("%s accepté = %v sous %s (%s)", cmd, got, runtime.GOOS, out.String())
 		}
 	}

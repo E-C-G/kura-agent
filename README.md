@@ -33,7 +33,7 @@ séparées, un fichier par système, et recensées dans `internal/platform` :
 
 | Fonction | Paquets | Windows | Linux, macOS |
 | --- | --- | --- | --- |
-| planification | `schedtask` | oui | non pris en charge |
+| planification | `schedtask`, `systemd` | oui | Linux : oui (timer systemd) ; macOS : non pris en charge |
 | coffre des secrets | `creds` | oui | non pris en charge |
 | installation | `setup`, `install` | oui | non pris en charge |
 | CLI AWS automatique | `awsinstall` | oui | non pris en charge |
@@ -48,6 +48,16 @@ $ kura-agent install
 kura-agent install : non pris en charge sous Linux dans cette version (manque : installation,
 planification, coffre des secrets, installation de la CLI AWS, icône).
 ```
+
+Sous Linux, la planification est un timer systemd, `kura-sync.timer`, qui lance le service
+`kura-sync.service` (`kura-agent run --quiet --scheduled`). Les deux unités sont générées depuis
+`schedule` avec la même règle que la tâche Windows, vérifiée en CI contre `systemd-analyze` :
+`daily` et `weekly` à l'heure dite les jours choisis ; `hourly` toutes les heures à la minute dite,
+par séries de 24 h qui démarrent à l'heure dite les jours choisis. `run_if_missed` devient
+`Persistent=true`, `max_duration` + 15 min la limite de systemd. Le service tourne sous le compte
+`kura-agent`, avec la seule capacité `CAP_DAC_READ_SEARCH` (lecture de tout le disque, transmise à
+aws), en écriture dans `/var/lib/kura` et `/var/log/kura` seulement. `install` les mettra en place
+quand l'installation Linux sera écrite.
 
 `KURA_DEV=1` autorise, pour le développement uniquement, des remplaçants non sûrs (secrets non
 chiffrés, processus lus dans `/proc`). Emplacements prévus : `/var/lib/kura`, `/etc/kura` et
@@ -522,6 +532,7 @@ internal/ipc/       dialogue run ↔ icône : messages JSON, canal nommé par se
 internal/tray/      icône : modèle d'affichage (portable), interface Win32
 internal/creds/     coffre de secrets (DPAPI sous Windows)
 internal/platform/  fonctions dépendantes du système : ce qui est écrit pour chacun, « non pris en charge »
+internal/systemd/   planification Linux : kura-sync.service et kura-sync.timer, systemctl
 internal/setup/     ACL, copie des fichiers, icône au démarrage, ancien compte svc-kura (install)
 internal/awsinstall/ CLI AWS absente : MSI fourni ou téléchargé, signature Amazon vérifiée, msiexec
 internal/schedtask/ tâche \Kura\Sync : XML du Planificateur, schtasks
