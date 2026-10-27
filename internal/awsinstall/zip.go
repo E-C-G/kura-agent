@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -126,9 +127,22 @@ func runLogged(logFile, name string, args ...string) error {
 	}
 	defer log.Close()
 	cmd := exec.Command(name, args...)
+	// Dossier et environnement fixes : l'installateur ne dépend ni du dossier courant ni
+	// des variables de l'administrateur (PATH, PYTHONPATH…).
+	cmd.Dir = filepath.Dir(logFile)
+	cmd.Env = safeEnv()
 	cmd.Stdout, cmd.Stderr = log, log
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("%s : %w", filepath.Base(name), err)
 	}
 	return nil
+}
+
+// safeEnv : environnement minimal des programmes lancés pour installer la CLI AWS.
+func safeEnv() []string {
+	home := "/root"
+	if runtime.GOOS == "darwin" {
+		home = "/var/root"
+	}
+	return []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "LANG=C", "LC_ALL=C", "HOME=" + home}
 }

@@ -81,7 +81,7 @@ func (f *fakeSys) system(dir string) system {
 			f.calls = append(f.calls, "awscli")
 			f.msis = c
 			f.awsTemp = tmp
-			return awsinstall.Result{Path: `C:\Program Files\Amazon\AWSCLIV2\aws.exe`, Version: "aws-cli/2.31.0", Installed: true, Signer: "Amazon.com Services LLC"}, f.awsErr
+			return awsinstall.Result{Path: `C:\Program Files\Amazon\AWSCLIV2\aws.exe`, Version: "aws-cli/2.35.0", Installed: true, Signer: "Amazon.com Services LLC"}, f.awsErr
 		},
 		remove: func(p string) error { f.removed = append(f.removed, p); return os.Remove(p) },
 		askAWSKeys: func(n string) (string, error) {

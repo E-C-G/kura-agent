@@ -242,7 +242,7 @@ func TestEnsureLinuxPackage(t *testing.T) {
 			downloads = append(downloads, url)
 			return os.WriteFile(dst, []byte("x"), 0o600)
 		},
-		Version: func(string) (string, error) { return "aws-cli/2.31.0 Python/3.13 Linux/6.8", nil },
+		Version: func(string) (string, error) { return "aws-cli/2.35.0 Python/3.13 Linux/6.8", nil },
 		Package: pkg, TempDir: filepath.Join(dir, "work"), Out: &strings.Builder{},
 	}
 	provided := filepath.Join(dir, pkg.Name)

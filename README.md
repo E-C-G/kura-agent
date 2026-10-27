@@ -265,11 +265,14 @@ avoir protégé `C:\ProgramData\Kura` :
    puis `aws --version`.
 
 Une CLI AWS v1 trouvée dans le PATH est refusée (la désinstaller, ou renseigner `profile.aws_cli`) ;
-une CLI présente qui ne répond pas est signalée, et `validate` tranche.
+une CLI présente qui ne répond pas est signalée, et `validate` tranche. Une CLI v2 antérieure à
+la version minimale (`MinCLIVersion`, 2.32.0) est mise à jour ; un paquet authentiquement signé
+mais plus ancien, posé à côté du paquet `.kura`, est refusé (versions aux failles connues).
 
 Un autre chemin dans `profile.aws_cli` n'est jamais installé automatiquement. L'agent cherche
-aussi `aws.exe` dans `C:\Program Files\Amazon\AWSCLIV2` quand il n'est pas dans le PATH (cas d'une
-CLI tout juste installée, avant que les processus voient le nouveau PATH).
+d'abord `aws.exe` dans `C:\Program Files\Amazon\AWSCLIV2` (`/usr/local/bin/aws` sous Linux et
+macOS), puis dans le PATH : un dossier du PATH modifiable par un utilisateur ne peut pas lui
+substituer un autre `aws`.
 
 ### Installer depuis un paquet de la console
 

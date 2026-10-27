@@ -1,6 +1,6 @@
-//go:build !windows
+//go:build !windows && !linux && !darwin
 
 package main
 
-// hideInput : hors Windows (développement), la saisie reste visible.
+// hideInput : autres systèmes (développement), la saisie reste visible.
 func hideInput() func() { return nil }

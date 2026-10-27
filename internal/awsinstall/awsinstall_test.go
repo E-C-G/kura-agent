@@ -80,7 +80,7 @@ func (f *fake) installer(dir string) Installer {
 			if f.version != "" || f.versionErr != nil {
 				return f.version, f.versionErr
 			}
-			return "aws-cli/2.31.0 Python/3.13 Windows/11", nil
+			return "aws-cli/2.35.0 Python/3.13 Windows/11", nil
 		},
 		TempDir: filepath.Join(dir, "tmp"),
 		Out:     &strings.Builder{},
@@ -214,5 +214,37 @@ func TestIsSnapPath(t *testing.T) {
 		if got := isSnapPath(p, eval); got != want {
 			t.Errorf("%s : %v", p, got)
 		}
+	}
+}
+
+// Audit M4 : une CLI installée trop ancienne est mise à jour ; un paquet authentique mais
+// ancien est refusé après installation.
+func TestMinimumCLIVersion(t *testing.T) {
+	for v, want := range map[string]bool{
+		"aws-cli/2.32.0 Python/3.13": true, "aws-cli/2.35.21 Python/3.13 Linux/6": true, "aws-cli/3.0.0": true,
+		"aws-cli/2.31.99 Python/3.13": false, "aws-cli/2.9.0": false, "aws-cli/2": false, "aws-cli/x": false, "": false,
+	} {
+		if RecentEnough(v) != want {
+			t.Errorf("%q : %v", v, !want)
+		}
+	}
+	// Présente mais ancienne : réinstallée.
+	dir := t.TempDir()
+	f := &fake{installed: true, status: "Valid", subject: amazon, version: "aws-cli/2.20.0 Python/3.11 Windows/10"}
+	in := f.installer(dir)
+	in.Version = func(string) (string, error) {
+		if f.ran != "" {
+			return "aws-cli/2.35.0 Python/3.13 Windows/11", nil
+		}
+		return "aws-cli/2.20.0 Python/3.11 Windows/10", nil
+	}
+	res, err := in.Ensure("", nil)
+	if err != nil || !res.Installed || f.ran == "" || !strings.Contains(in.Out.(*strings.Builder).String(), "mise à jour") {
+		t.Fatalf("mise à jour : %+v %v", res, err)
+	}
+	// Paquet ancien (authentiquement signé) : refusé.
+	f = &fake{status: "Valid", subject: amazon, version: "aws-cli/2.20.0 Python/3.11 Windows/10"}
+	if _, err := f.installer(t.TempDir()).Ensure("", nil); err == nil || !strings.Contains(err.Error(), "trop ancien") {
+		t.Fatalf("paquet ancien accepté : %v", err)
 	}
 }
