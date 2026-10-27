@@ -22,6 +22,11 @@ func SyncArgs(p config.Profile, j config.Job, dryRun bool) []string {
 		"s3://" + p.Bucket + "/" + j.Destination,
 		"--endpoint-url", p.Endpoint,
 		"--no-progress",
+		// Liens symboliques (et, selon la CLI, jonctions) non suivis : un utilisateur qui
+		// écrit dans une source ne doit pas pouvoir y faire entrer un fichier qu'il ne
+		// sait pas lire (secrets de l'agent, profil d'un autre utilisateur, /etc/shadow).
+		// Le garde-fou compte de même, sans suivre les liens.
+		"--no-follow-symlinks",
 	}
 	if p.Region != "" {
 		args = append(args, "--region", p.Region)

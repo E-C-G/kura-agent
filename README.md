@@ -442,10 +442,12 @@ L'agent envoie en `POST` un bilan JSON à la fin de chaque exécution réelle :
 
 - `success` est vrai quand tous les jobs configurés ont tourné sans erreur ; `partial` quand
   l'exécution a été lancée avec `--job`.
-- Avec `token`, l'en-tête `X-Kura-Token` porte le jeton. Avec `hmac: true`, s'ajoutent
-  `X-Kura-Timestamp` et `X-Kura-Signature: sha256=<hex>`, HMAC-SHA256 de
-  `<timestamp>.<corps>` avec le jeton : le broker peut vérifier l'origine du bilan et refuser un
-  bilan rejoué. Jeton, URL et noms de fichiers ne figurent jamais dans le corps.
+- Avec `token` seul, l'en-tête `X-Kura-Token` porte le jeton. Avec `hmac: true`, le jeton ne
+  voyage plus : `X-Kura-Timestamp` et `X-Kura-Signature: sha256=<hex>`, HMAC-SHA256 de
+  `<timestamp>.<corps>` avec le jeton, permettent au broker de vérifier l'origine du bilan et de
+  refuser un bilan rejoué. Jeton, URL et noms de fichiers ne figurent jamais dans le corps.
+- Aucune redirection n'est suivie (le jeton et l'URL de ping ne partent jamais ailleurs) ;
+  l'adresse lue dans le coffre doit être en `https://`, comme dans la configuration.
 - 3 essais (puis 5 s, puis 15 s d'attente) ; en cas d'échec, le bilan est gardé dans
   `C:\ProgramData\Kura\pending\` et renvoyé, dans l'ordre, avant le suivant (20 au plus).
 - Côté broker, prévoir aussi un contrôle quotidien « aucun bilan réussi depuis 48 h », que l'agent
@@ -495,7 +497,9 @@ Le format est défini dans `pkg/pack`, importé par la console : un seul code fa
 
 ## Ce que fait une exécution
 
-1. Prend le verrou `Global\Kura-Run` (une seule exécution à la fois, code 4 sinon).
+1. Prend le verrou `run.lock` du dossier de données (une seule exécution à la fois, code 4
+   sinon). Seuls l'agent et les administrateurs peuvent ouvrir ce fichier : un utilisateur ne
+   peut pas le tenir pour bloquer les sauvegardes.
 2. Les jobs sans `depends_on_pre_task` démarrent tout de suite, en même temps que la pré-tâche ; ceux
    qui en dépendent passent après elle (un report d'Outlook ne retarde donc qu'eux).
    Si un job qui en dépend est lancé : cherche `outlook.exe` dans toutes les sessions et, pour chaque
@@ -503,7 +507,11 @@ Le format est défini dans `pkg/pack`, importé par la console : un seul code fa
    préavis) ; cherche de nouveau et arrête de force ce qui tourne encore (`force: true`), après avoir
    revérifié le nom de chaque processus. S'il reste ouvert, les jobs marqués `depends_on_pre_task`
    sont sautés (avertissement). Après les jobs, l'icône relance Outlook là où il a été fermé.
-3. Pour chaque job avec `delete: true`, **avant chaque tentative** de synchronisation : vérifie la
+3. Chaque source doit être un vrai dossier : une source qui est un lien symbolique ou une
+   jonction est refusée (indiquer le dossier réel). Les liens **dans** une source ne sont pas
+   suivis (`--no-follow-symlinks`) : un utilisateur qui écrit dans une source ne peut pas y
+   faire entrer un fichier qu'il ne sait pas lire.
+   Pour chaque job avec `delete: true`, **avant chaque tentative** de synchronisation : vérifie la
    source, compte ses fichiers, simule (`--dryrun`) et bloque le job si la source semble vide ou si les
    suppressions prévues dépassent les seuils. Un job bloqué ne touche pas au bucket.
    - Tout job avec `delete: true` exige au moins 1 fichier dans sa source, même avec une section
@@ -587,7 +595,7 @@ internal/awscli/    commandes aws s3 sync, lecture de leur sortie
 internal/guard/     comptage des sources, seuils du garde-fou
 internal/procs/     recherche et arrêt de processus toutes sessions
 internal/execx/     lancement d'aws.exe sans fenêtre, arrêt garanti
-internal/lock/      verrou machine
+internal/lock/      verrou d'exécution (run.lock)
 internal/state/     status.json, history.jsonl
 internal/report/    bilan vers healthchecks ou webhook
 internal/ipc/       dialogue run ↔ icône : messages JSON, canal nommé par session

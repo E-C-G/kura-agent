@@ -20,7 +20,7 @@ func TestSyncArgsMatchCurrentScript(t *testing.T) {
 		Exclude: []string{"*$RECYCLE.BIN*", "*System Volume Information*"},
 	}
 	got := strings.Join(SyncArgs(profile, data, false), " ")
-	want := "s3 sync E:/ s3://acme-srv01/DATA --endpoint-url https://s3.eu-central-1.wasabisys.com --no-progress " +
+	want := "s3 sync E:/ s3://acme-srv01/DATA --endpoint-url https://s3.eu-central-1.wasabisys.com --no-progress --no-follow-symlinks " +
 		"--exclude *$RECYCLE.BIN* --exclude *System Volume Information* --delete"
 	if got != want {
 		t.Errorf("commande :\n reçu   %s\n attendu %s", got, want)

@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	neturl "net/url"
 	"strings"
 	"time"
 
@@ -49,6 +50,13 @@ func (o *Options) defaults() {
 	if o.Client == nil {
 		o.Client = &http.Client{Timeout: 15 * time.Second}
 	}
+	if o.Client.CheckRedirect == nil {
+		// Aucune redirection suivie : l'URL de ping (secrète) et le jeton ne partent
+		// jamais vers une autre adresse que celle de la configuration.
+		c := *o.Client
+		c.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+		o.Client = &c
+	}
 	if o.Sleep == nil {
 		o.Sleep = func(ctx context.Context, d time.Duration) error {
 			t := time.NewTimer(d)
@@ -84,6 +92,10 @@ func New(r *config.Report, store creds.Store, o Options) (Reporter, error) {
 		return nil, fmt.Errorf("notify.report.url : %w", err)
 	}
 	url = strings.TrimRight(url, "/")
+	// Revérifiée après lecture du coffre : la configuration n'y voit que credential:<nom>.
+	if u, err := neturl.Parse(url); err != nil || u.Scheme != "https" || u.Host == "" {
+		return nil, fmt.Errorf("notify.report.url : adresse https://… attendue (valeur du coffre à corriger)")
+	}
 	switch r.Type {
 	case config.ReportHealthchecks:
 		rid, err := newUUID()
@@ -143,6 +155,8 @@ func post(ctx context.Context, o Options, url string, body []byte, header http.H
 	switch {
 	case resp.StatusCode >= 200 && resp.StatusCode < 300:
 		return nil
+	case resp.StatusCode >= 300 && resp.StatusCode < 400:
+		return permanentError{fmt.Errorf("réponse %d : redirection non suivie (corriger l'adresse de notify.report)", resp.StatusCode)}
 	case resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500:
 		return fmt.Errorf("réponse %d : %s", resp.StatusCode, strings.TrimSpace(string(msg)))
 	default:

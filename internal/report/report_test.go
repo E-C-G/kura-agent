@@ -162,7 +162,7 @@ func TestWebhookPayloadTokenAndSignature(t *testing.T) {
 		t.Fatal(err)
 	}
 	h := s.hits[0]
-	if h.header.Get("X-Kura-Token") != "jeton-42" || h.header.Get("Content-Type") != "application/json" {
+	if h.header.Get("X-Kura-Token") != "" || h.header.Get("Content-Type") != "application/json" {
 		t.Errorf("en-têtes : %v", h.header)
 	}
 	ts := h.header.Get("X-Kura-Timestamp")
@@ -280,5 +280,53 @@ func TestNilReportMeansNoReporter(t *testing.T) {
 	r, err := New(nil, creds.Store{}, Options{})
 	if r != nil || err != nil {
 		t.Fatalf("pas de destination : (nil, nil) attendu, reçu (%v, %v)", r, err)
+	}
+}
+
+// Audit M3 : une redirection n'est jamais suivie (le jeton et l'URL de ping ne partent
+// pas ailleurs), même avec le client fourni par l'appelant.
+func TestRedirectNotFollowed(t *testing.T) {
+	elsewhere := newServer(t, nil)
+	redirect := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, elsewhere.URL+"/vol", http.StatusFound)
+	}))
+	t.Cleanup(redirect.Close)
+	o := opts(elsewhere, t.TempDir())
+	o.Client = redirect.Client() // même autorité de test, mais pas de CheckRedirect
+	r, err := New(&config.Report{Type: config.ReportWebhook, URL: redirect.URL + "/kura", Token: "jeton-42"}, creds.Store{}, o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = r.Finish(context.Background(), status(state.ResultOK, true), true)
+	if err == nil || !strings.Contains(err.Error(), "redirection non suivie") {
+		t.Fatalf("redirection : %v", err)
+	}
+	if len(elsewhere.hits) != 0 {
+		t.Fatalf("redirection suivie : %+v", elsewhere.hits)
+	}
+}
+
+func TestWebhookTokenWithoutHMAC(t *testing.T) {
+	s := newServer(t, nil)
+	r, err := New(&config.Report{Type: config.ReportWebhook, URL: s.URL + "/kura", Token: "jeton-42"}, creds.Store{}, opts(s, t.TempDir()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Finish(context.Background(), status(state.ResultOK, true), true)
+	if h := s.hits[0].header; h.Get("X-Kura-Token") != "jeton-42" || h.Get("X-Kura-Signature") != "" {
+		t.Fatalf("en-têtes : %v", h)
+	}
+}
+
+// Une URL http rangée dans le coffre est refusée, comme dans la configuration.
+func TestResolvedURLMustBeHTTPS(t *testing.T) {
+	t.Setenv("KURA_DEV", "1")
+	store := creds.Store{Dir: t.TempDir()}
+	if err := store.Set("hc-url", "http://hc-ping.example/uuid"); err != nil {
+		t.Fatal(err)
+	}
+	_, err := New(&config.Report{Type: config.ReportHealthchecks, URL: "credential:hc-url"}, store, Options{})
+	if err == nil || !strings.Contains(err.Error(), "https") || strings.Contains(err.Error(), "hc-ping.example") {
+		t.Fatalf("URL http du coffre : %v", err)
 	}
 }

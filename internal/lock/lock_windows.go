@@ -5,33 +5,36 @@ package lock
 import (
 	"errors"
 	"fmt"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
 
-// acquire crée le mutex nommé. Le verrou est tenu tant que le handle existe :
-// on teste l'existence de l'objet plutôt que sa possession, ce qui évite les
-// contraintes de thread propriétaire des mutex Windows avec les goroutines.
-// Si le processus meurt, Windows ferme le handle et le verrou disparaît.
-//
-// Seul `run` doit ouvrir ce mutex : un autre processus qui en garderait un handle
-// (l'icône, par exemple) ferait croire à une exécution en cours.
-func acquire(name string) (Release, error) {
-	p, err := windows.UTF16PtrFromString(name)
+// lockSDDL : le fichier n'est ouvrable que par SYSTEM et les Administrateurs ; un
+// handle sans accès aux données (attributs seuls) ne bloque pas le partage.
+const lockSDDL = "D:P(A;;FA;;;SY)(A;;FA;;;BA)"
+
+// acquire ouvre run.lock sans partage : tant que le handle existe, toute autre
+// ouverture échoue (ERROR_SHARING_VIOLATION). Windows ferme le handle si le processus
+// meurt.
+func acquire(path string) (Release, error) {
+	p, err := windows.UTF16PtrFromString(path)
 	if err != nil {
 		return nil, err
 	}
-	h, err := windows.CreateMutex(nil, false, p)
+	sd, err := windows.SecurityDescriptorFromString(lockSDDL)
+	if err != nil {
+		return nil, err
+	}
+	sa := &windows.SecurityAttributes{SecurityDescriptor: sd}
+	sa.Length = uint32(unsafe.Sizeof(*sa))
+	h, err := windows.CreateFile(p, windows.GENERIC_READ|windows.GENERIC_WRITE, 0, sa,
+		windows.OPEN_ALWAYS, windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
 	switch {
-	case errors.Is(err, windows.ERROR_ALREADY_EXISTS),
-		// Mutex créé par un autre compte : il existe, donc une exécution est en cours.
-		errors.Is(err, windows.ERROR_ACCESS_DENIED):
-		if h != 0 {
-			windows.CloseHandle(h)
-		}
+	case errors.Is(err, windows.ERROR_SHARING_VIOLATION):
 		return nil, ErrBusy
 	case err != nil:
-		return nil, fmt.Errorf("création du verrou %s : %w", name, err)
+		return nil, fmt.Errorf("verrou %s : %w", path, err)
 	}
 	return func() { windows.CloseHandle(h) }, nil
 }
