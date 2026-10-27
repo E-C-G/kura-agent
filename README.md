@@ -36,7 +36,7 @@ séparées, un fichier par système, et recensées dans `internal/platform` :
 | planification | `schedtask`, `systemd` | oui | Linux : oui (timer systemd) ; macOS : non pris en charge |
 | coffre des secrets | `creds` | oui | Linux : oui (systemd-creds) ; macOS : non pris en charge |
 | installation | `setup`, `install` | oui | non pris en charge |
-| CLI AWS automatique | `awsinstall` | oui | non pris en charge |
+| CLI AWS automatique | `awsinstall` | oui | Linux : oui (zip signé PGP) ; macOS : non pris en charge |
 | icône et canal vers l'icône | `tray`, `ipc` | oui | non pris en charge |
 | fermeture d'applications | `procs` (pré-tâches) | oui | non pris en charge |
 
@@ -69,6 +69,13 @@ déchiffre au démarrage (`ImportCredential=kura.*`) dans `$CREDENTIALS_DIRECTOR
 seul. Les commandes lancées avec `sudo` (`credentials`, `import`, `validate`) les déchiffrent
 elles-mêmes. Le compte de service `kura-agent` (système, sans mot de passe ni shell, dossier
 `/var/lib/kura`) est créé par `systemd-sysusers` s'il manque.
+
+Sous Linux, la CLI AWS absente s'installe depuis le zip officiel de l'architecture
+(`awscli-exe-linux-x86_64.zip` ou `-aarch64.zip`) et sa signature `.sig`, fournis à côté du paquet
+ou téléchargés chez AWS. La signature est vérifiée par `gpgv` avec la clé « AWS CLI Team »
+intégrée à l'agent, dont l'empreinte est contrôlée (`FB5D B77F D5C1 18B8 0511 ADA8 A631 0ACC 4672
+475C`, valable jusqu'au 1er juillet 2027 : une clé prolongée ou nouvelle demande une mise à jour de
+kura-agent) ; puis `aws/install` installe dans `/usr/local/aws-cli`, lien `/usr/local/bin/aws`.
 
 `KURA_DEV=1` autorise, pour le développement uniquement, des remplaçants non sûrs (secrets non
 chiffrés, processus lus dans `/proc`). Emplacements prévus : `/var/lib/kura`, `/etc/kura` et
@@ -200,8 +207,8 @@ Si `aws` n'est ni dans le PATH ni dans `C:\Program Files\Amazon\AWSCLIV2` (et qu
 `profile.aws_cli` est vide ou désigne ce dossier), `install` installe la CLI AWS v2 juste après
 avoir protégé `C:\ProgramData\Kura` :
 
-1. MSI fourni : `--aws-cli-msi FICHIER`, sinon `AWSCLIV2.msi` posé à côté du paquet `.kura` ou de
-   `kura-agent.exe` ;
+1. MSI fourni : `--aws-cli FICHIER` (ancien nom : `--aws-cli-msi`), sinon `AWSCLIV2.msi` posé à
+   côté du paquet `.kura` ou de `kura-agent.exe` ;
 2. sinon, téléchargé depuis `https://awscli.amazonaws.com/AWSCLIV2.msi` (HTTPS, redirections
    HTTPS seulement) ;
    dans les deux cas, le MSI est d'abord copié dans `C:\ProgramData\Kura\awscli`, que seuls

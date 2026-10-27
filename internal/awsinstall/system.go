@@ -3,6 +3,7 @@ package awsinstall
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -10,17 +11,15 @@ import (
 	"time"
 )
 
-// System renvoie l'installateur réel (Windows) ; ailleurs, Signature et RunMSI
-// renvoient une platform.NotImplementedError.
+// System renvoie l'installateur réel de ce système (SystemPackage).
 func System(out io.Writer, tempDir string) Installer {
 	return Installer{
-		Find:      Find,
-		Signature: signature,
-		Download:  HTTPDownload,
-		RunMSI:    runMSI,
-		Version:   Version,
-		TempDir:   tempDir,
-		Out:       out,
+		Find:     Find,
+		Download: HTTPDownload,
+		Version:  Version,
+		Package:  SystemPackage(),
+		TempDir:  tempDir,
+		Out:      out,
 	}
 }
 
@@ -34,7 +33,7 @@ func Find() (string, error) {
 			return p, nil
 		}
 	}
-	return "", errors.New("aws introuvable (ni dans le PATH, ni dans Program Files\\Amazon\\AWSCLIV2)")
+	return "", fmt.Errorf("aws introuvable (ni dans le PATH, ni en %s)", orUnknown(DefaultPath()))
 }
 
 // Version renvoie la première ligne de `aws --version` (aws-cli/2.x.y …).
@@ -64,4 +63,11 @@ func parseSignatureOutput(out string) (status, subject string, err error) {
 		return "", "", errors.New("powershell : réponse vide")
 	}
 	return status, subject, nil
+}
+
+func orUnknown(p string) string {
+	if p == "" {
+		return "emplacement par défaut inconnu"
+	}
+	return p
 }
