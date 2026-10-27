@@ -580,6 +580,9 @@ func (f *fakeSys) macSystem(dir string) system {
 }
 
 func TestInstallMac(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("chemins Unix exigés par les démons launchd")
+	}
 	dir := t.TempDir()
 	f := &fakeSys{t: t}
 	sys := f.macSystem(dir)
