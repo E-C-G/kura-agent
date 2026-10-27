@@ -16,6 +16,7 @@ import (
 	"github.com/E-C-G/kura-agent/internal/creds"
 	"github.com/E-C-G/kura-agent/internal/lock"
 	"github.com/E-C-G/kura-agent/internal/schedtask"
+	"github.com/E-C-G/kura-agent/internal/systemd"
 	"github.com/E-C-G/kura-agent/pkg/config"
 	"github.com/E-C-G/kura-agent/pkg/pack"
 )
@@ -31,6 +32,7 @@ type fakeSys struct {
 	legacy   bool // un compte svc-kura d'une version précédente existe
 	awsErr   error
 	awsTemp  string
+	units    systemd.Units
 	msis     []string
 	removed  []string
 	password string
@@ -88,6 +90,7 @@ func (f *fakeSys) system(dir string) system {
 		vault:      creds.Store{Dir: filepath.Join(data, "credentials")},
 		dataDir:    data,
 		configFile: filepath.Join(data, "config.yaml"),
+		awsWorkDir: filepath.Join(data, "awscli"),
 		out:        &strings.Builder{},
 	}
 }
@@ -457,5 +460,100 @@ func TestInstallPackageRestoresSecretsWhenValidateFails(t *testing.T) {
 	}
 	if _, err := os.Stat(file); err != nil {
 		t.Fatal("paquet supprimé malgré l'échec")
+	}
+}
+
+// linuxSystem : même faux système, version Linux (compte de service, timer systemd).
+func (f *fakeSys) linuxSystem(dir string) system {
+	sys := f.system(dir)
+	sys.linux = true
+	sys.ensureAccount = func() (bool, error) { f.calls = append(f.calls, "account"); return true, nil }
+	sys.installTimer = func(u systemd.Units) error { f.calls = append(f.calls, "timer"); f.units = u; return nil }
+	sys.registerTask = func(string) error { f.t.Fatal("tâche Windows sous Linux"); return nil }
+	sys.installBinary = func(string) (string, string, error) {
+		f.calls = append(f.calls, "binary")
+		return "/usr/local/bin/kura-agent", "", nil
+	}
+	sys.removeBinary = func() (string, error) { f.calls = append(f.calls, "rmbinary"); return "/usr/local/bin/kura-agent", nil }
+	sys.programDir = func() string { return "" }
+	sys.legacyAccount = func(string) bool { return false }
+	sys.awsWorkDir = filepath.Join(dir, "cache", "kura-install")
+	sys.purgeDirs = []string{filepath.Join(dir, "etc-kura"), filepath.Join(dir, "log-kura")}
+	return sys
+}
+
+func TestInstallLinux(t *testing.T) {
+	dir := t.TempDir()
+	f := &fakeSys{t: t}
+	sys := f.linuxSystem(dir)
+	out := sys.out.(*strings.Builder)
+	cfg := writeConfig(t, dir, "")
+	if code := install(sys, installOptions{cfgPath: cfg}); code != 0 {
+		t.Fatalf("code %d ; appels %v", code, f.calls)
+	}
+	if got := strings.Join(f.calls, " "); got != "admin account acl awscli binary validate timer" {
+		t.Fatalf("étapes : %s", got)
+	}
+	if f.awsTemp != sys.awsWorkDir {
+		t.Fatalf("dossier de travail de la CLI AWS : %s", f.awsTemp)
+	}
+	for _, w := range []string{"ExecStart=/usr/local/bin/kura-agent run --quiet --scheduled", "User=kura-agent", "ImportCredential=kura.*"} {
+		if !strings.Contains(f.units.Service, w) {
+			t.Errorf("service sans %q", w)
+		}
+	}
+	if !strings.Contains(f.units.Timer, "OnCalendar=Mon,Fri *-*-* 22:30:00") || !strings.Contains(f.units.Timer, "Persistent=true") {
+		t.Errorf("timer :\n%s", f.units.Timer)
+	}
+	text := out.String()
+	for _, w := range []string{"compte de service kura-agent créé", "timer kura-sync.timer actif", "systemctl start kura-sync.service",
+		"tray.allow_run_now ignoré sous Linux"} {
+		if !strings.Contains(text, w) {
+			t.Errorf("sortie sans %q :\n%s", w, text)
+		}
+	}
+	for _, w := range []string{"schtasks", "kura-agentw.exe", "SYSTEM"} {
+		if strings.Contains(text, w) {
+			t.Errorf("sortie Windows sous Linux (%q) :\n%s", w, text)
+		}
+	}
+	if b, err := os.ReadFile(sys.configFile); err != nil || !strings.Contains(string(b), "acme-srv01") {
+		t.Fatalf("configuration non installée : %v", err)
+	}
+}
+
+func TestInstallLinuxValidateFails(t *testing.T) {
+	dir := t.TempDir()
+	f := &fakeSys{t: t, validate: 3}
+	if code := install(f.linuxSystem(dir), installOptions{cfgPath: writeConfig(t, dir, "")}); code == 0 || strings.Contains(strings.Join(f.calls, " "), "timer") {
+		t.Fatalf("code %d, appels %v", code, f.calls)
+	}
+}
+
+func TestUninstallLinux(t *testing.T) {
+	dir := t.TempDir()
+	f := &fakeSys{t: t}
+	sys := f.linuxSystem(dir)
+	sys.deleteTask = func() error { f.calls = append(f.calls, "rmtimer"); return nil }
+	if err := sys.vault.Init(); err != nil {
+		t.Fatal(err)
+	}
+	sys.vault.Set("wasabi", "AKID:secret")
+	for _, d := range append([]string{sys.dataDir}, sys.purgeDirs...) {
+		os.MkdirAll(d, 0o755)
+	}
+	if code := uninstall(sys, true); code != 0 {
+		t.Fatalf("code %d, appels %v", code, f.calls)
+	}
+	if got := strings.Join(f.calls, " "); got != "admin lock rmautostart stoptrays rmtimer rmbinary" {
+		t.Fatalf("étapes : %s", got)
+	}
+	if names, _ := sys.vault.List(); len(names) != 0 {
+		t.Fatalf("secrets restés : %v", names)
+	}
+	for _, d := range append([]string{sys.dataDir}, sys.purgeDirs...) {
+		if _, err := os.Stat(d); !os.IsNotExist(err) {
+			t.Errorf("%s resté", d)
+		}
 	}
 }

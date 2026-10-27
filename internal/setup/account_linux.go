@@ -7,9 +7,6 @@ import (
 	"strings"
 )
 
-// ServiceAccount : compte système sous lequel tourne le service kura-sync (Linux).
-const ServiceAccount = "kura-agent"
-
 // sysusersLine : compte système sans mot de passe ni shell, dossier /var/lib/kura,
 // groupe du même nom (format sysusers.d).
 const sysusersLine = `u kura-agent - "Kura, sauvegarde vers Wasabi" /var/lib/kura -`
