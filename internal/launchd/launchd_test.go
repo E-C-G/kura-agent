@@ -182,7 +182,7 @@ func TestManager(t *testing.T) {
 	if got := strings.Join(calls, "; "); got != want {
 		t.Fatalf("appels : %s", got)
 	}
-	if st, _ := os.Stat(sp); st.Mode().Perm() != 0o644 {
+	if st, _ := os.Stat(sp); runtime.GOOS != "windows" && st.Mode().Perm() != 0o644 {
 		t.Fatalf("droits : %v", st.Mode())
 	}
 	// run_if_missed retiré : le rattrapage disparaît.
