@@ -26,14 +26,14 @@ Commandes disponibles : `run`, `validate`, `status`, `credentials`, `import`, `i
 
 ## Systèmes pris en charge
 
-Windows (10, 11, Server) seulement pour l'instant ; Linux (Ubuntu 24.04 d'abord, Fedora ensuite)
-puis macOS sont prévus. Le cœur de l'agent (configuration, garde-fou, synchronisation, bilan,
+Windows (10, 11, Server) et Linux (Ubuntu 24.04 ; Fedora ensuite) ; macOS (13 Ventura ou plus
+récent, Apple silicon et Intel) est en cours. Le cœur de l'agent (configuration, garde-fou, synchronisation, bilan,
 paquet `.kura`, état) est commun et testé partout ; les fonctions qui dépendent du système sont
 séparées, un fichier par système, et recensées dans `internal/platform` :
 
 | Fonction | Paquets | Windows | Linux, macOS |
 | --- | --- | --- | --- |
-| planification | `schedtask`, `systemd` | oui | Linux : oui (timer systemd) ; macOS : non pris en charge |
+| planification | `schedtask`, `systemd`, `launchd` | oui | Linux : oui (timer systemd) ; macOS : démons launchd écrits et testés, branchés à l'installation avec le compte `_kura` (en cours) |
 | coffre des secrets | `creds` | oui | Linux : oui (systemd-creds) ; macOS : non pris en charge |
 | installation | `setup`, `install` | oui | Linux : oui ; macOS : non pris en charge |
 | CLI AWS automatique | `awsinstall` | oui | Linux : oui (zip signé PGP) ; macOS : non pris en charge |

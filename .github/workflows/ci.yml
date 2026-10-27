@@ -172,3 +172,34 @@ jobs:
           go build -o kura-agent.exe ./cmd/kura-agent
           ./kura-agent.exe version
           ./kura-agent.exe help
+
+  # macOS (Apple silicon) : tests sur un vrai macOS, plists relues par plutil.
+  macos:
+    name: macOS · tests
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.mod
+
+      - name: Modules
+        run: go mod download
+
+      - name: Tests
+        shell: bash
+        run: |
+          set -o pipefail
+          go test -race -count=1 ./... 2>&1 | tee test.log || {
+            grep -E -- '--- FAIL|^FAIL|panic:|_test\.go:[0-9]+:' test.log | head -20 |
+              while IFS= read -r l; do echo "::error::$l"; done
+            exit 1
+          }
+
+      - name: Lancement du binaire
+        run: |
+          go build -o kura-agent ./cmd/kura-agent
+          ./kura-agent version
+          ./kura-agent help

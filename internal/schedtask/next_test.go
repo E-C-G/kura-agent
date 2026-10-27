@@ -43,3 +43,35 @@ func TestNext(t *testing.T) {
 		t.Error("heure invalide : instant zéro attendu")
 	}
 }
+
+func TestPrevAndMissed(t *testing.T) {
+	loc := time.Local
+	time.Local = time.UTC
+	t.Cleanup(func() { time.Local = loc })
+	s := config.Schedule{Type: "daily", Time: "22:30"}
+	now := time.Date(2026, 10, 27, 9, 0, 0, 0, time.UTC)
+	prev := time.Date(2026, 10, 26, 22, 30, 0, 0, time.UTC)
+	if got := Prev(s, now); !got.Equal(prev) {
+		t.Fatalf("Prev : %v", got)
+	}
+	if got := Prev(s, prev); !got.Equal(prev) {
+		t.Fatalf("Prev à l'heure dite : %v", got)
+	}
+	installed := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	for _, c := range []struct {
+		last, since time.Time
+		want        bool
+	}{
+		{time.Date(2026, 10, 25, 22, 30, 5, 0, time.UTC), installed, true},  // poste éteint lundi soir
+		{time.Date(2026, 10, 26, 22, 30, 1, 0, time.UTC), installed, false}, // passage fait
+		{time.Time{}, time.Date(2026, 10, 27, 8, 0, 0, 0, time.UTC), false}, // installé ce matin
+		{time.Time{}, installed, true},
+	} {
+		if got := Missed(s, c.last, c.since, now); got != c.want {
+			t.Errorf("dernier %v, depuis %v : %v", c.last, c.since, got)
+		}
+	}
+	if Missed(config.Schedule{Type: "weekly", Time: "22:30"}, time.Time{}, installed, now) {
+		t.Fatal("planification invalide : rattrapage")
+	}
+}
