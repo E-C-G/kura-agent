@@ -27,7 +27,9 @@ Commandes disponibles : `run`, `validate`, `status`, `credentials`, `import`, `i
 ## Systèmes pris en charge
 
 Windows (10, 11, Server) et Linux (Ubuntu 24.04 ; Fedora ensuite) ; macOS (13 Ventura ou plus
-récent, Apple silicon et Intel) est en cours. Le cœur de l'agent (configuration, garde-fou, synchronisation, bilan,
+récent, Apple silicon et Intel) est en cours : chaque release en contient les archives
+(`kura-agent_<version>_darwin_amd64.tar.gz` pour Intel, `darwin_arm64` pour Apple silicon), non
+signées, pour essai (`xattr -d com.apple.quarantine kura-agent` après téléchargement). Le cœur de l'agent (configuration, garde-fou, synchronisation, bilan,
 paquet `.kura`, état) est commun et testé partout ; les fonctions qui dépendent du système sont
 séparées, un fichier par système, et recensées dans `internal/platform` :
 

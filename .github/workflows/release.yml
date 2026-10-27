@@ -71,9 +71,51 @@ jobs:
           path: dist/*.deb
           retention-days: 1
 
+  # macOS : archives Intel et Apple silicon, non signées (pas encore de compte Apple
+  # Developer) : pour essai, à débloquer avec xattr après téléchargement.
+  macos:
+    name: Archives macOS
+    needs: test
+    runs-on: macos-latest
+    env:
+      TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.mod
+      - name: Build et archives
+        run: |
+          v="${TAG#v}"
+          commit="$(git rev-parse --short HEAD)"
+          mkdir -p dist
+          for arch in amd64 arm64; do
+            name="kura-agent_${v}_darwin_${arch}"
+            mkdir -p "pkg/$name"
+            GOOS=darwin GOARCH=$arch CGO_ENABLED=0 go build -trimpath \
+              -ldflags "-s -w -X main.version=$v -X main.commit=$commit -X main.date=$(date -u +%Y-%m-%d)" \
+              -o "pkg/$name/kura-agent" ./cmd/kura-agent
+            cp README.md "pkg/$name/"
+            cp configs/example-macos.yaml "pkg/$name/config.example.yaml"
+            tar -C pkg -czf "dist/$name.tar.gz" "$name"
+          done
+          lipo -archs "pkg/kura-agent_${v}_darwin_amd64/kura-agent" | grep -qx x86_64
+          lipo -archs "pkg/kura-agent_${v}_darwin_arm64/kura-agent" | grep -qx arm64
+          out="$("pkg/kura-agent_${v}_darwin_arm64/kura-agent" version)" && echo "$out"
+          [[ "$out" == *"$v"* ]] || { echo "::error::version absente du binaire"; exit 1; }
+          ls -l dist
+      - uses: actions/upload-artifact@v7
+        with:
+          name: macos
+          path: dist/*.tar.gz
+          retention-days: 1
+
   build:
     name: Build, signature, publication
-    needs: [test, linux]
+    needs: [test, linux, macos]
     # Runner Windows : signtool y est disponible pour la signature Authenticode.
     runs-on: windows-latest
     permissions:
@@ -159,6 +201,11 @@ jobs:
           name: deb
           path: dist
 
+      - uses: actions/download-artifact@v7
+        with:
+          name: macos
+          path: dist
+
       - name: Archive et sommes de contrôle
         shell: bash
         run: |
@@ -168,7 +215,7 @@ jobs:
           cp configs/example.yaml "pkg/$name/config.example.yaml"
           (cd pkg && 7z a -tzip -bso0 "../dist/$name.zip" "$name")
           cp dist/kura-agent.exe "dist/kura-agent_${{ steps.v.outputs.version }}_windows_amd64.exe"
-          (cd dist && sha256sum "$name.zip" "kura-agent_${{ steps.v.outputs.version }}_windows_amd64.exe" kura-agent_*.deb > SHA256SUMS)
+          (cd dist && sha256sum "$name.zip" "kura-agent_${{ steps.v.outputs.version }}_windows_amd64.exe" kura-agent_*.deb kura-agent_*_darwin_*.tar.gz > SHA256SUMS)
           cat dist/SHA256SUMS
 
       - name: Publication
@@ -177,20 +224,29 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           v="${{ steps.v.outputs.version }}"
-          flags=(--verify-tag --generate-notes --title "kura-agent $v")
+          flags=(--verify-tag --generate-notes --title "kura-agent $v" --notes-file "$RUNNER_TEMP/notes.md")
           [[ "${{ steps.v.outputs.prerelease }}" == "true" ]] && flags+=(--prerelease)
+          # Mentions placées avant les notes générées automatiquement.
+          : > "$RUNNER_TEMP/notes.md"
           if [[ "$HAS_SIGNING_CERT" != "true" ]]; then
-            # Mention placée avant les notes générées automatiquement.
-            cat > "$RUNNER_TEMP/notes.md" <<'NOTES'
-          > **Exécutable non signé.** Windows SmartScreen peut afficher « Windows a protégé votre ordinateur » :
+            cat >> "$RUNNER_TEMP/notes.md" <<'NOTES'
+          > **Exécutable Windows non signé.** Windows SmartScreen peut afficher « Windows a protégé votre ordinateur » :
           > cliquer sur *Informations complémentaires* puis *Exécuter quand même*. Après téléchargement,
           > `Unblock-File .\kura-agent.exe` retire l'avertissement. Vérifier d'abord l'empreinte :
           > `Get-FileHash .\kura-agent.exe -Algorithm SHA256` doit correspondre à la ligne de `SHA256SUMS`.
+
           NOTES
-            flags+=(--notes-file "$RUNNER_TEMP/notes.md")
           fi
+          cat >> "$RUNNER_TEMP/notes.md" <<'NOTES'
+          > **macOS : archives non signées, pour essai** (Intel `darwin_amd64`, Apple silicon `darwin_arm64`).
+          > Vérifier l'empreinte (`shasum -a 256`), décompresser, puis `xattr -d com.apple.quarantine kura-agent`
+          > avant le premier lancement. Installation : `sudo ./kura-agent install --config …`, puis accorder
+          > l'accès complet au disque à `/usr/local/bin/kura-agent`.
+
+          NOTES
           gh release create "$TAG" "${flags[@]}" \
             "dist/kura-agent_${v}_windows_amd64.zip" \
             "dist/kura-agent_${v}_windows_amd64.exe" \
             dist/kura-agent_*.deb \
+            dist/kura-agent_*_darwin_*.tar.gz \
             dist/SHA256SUMS
