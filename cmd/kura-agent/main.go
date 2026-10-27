@@ -268,6 +268,9 @@ func resolveAWS(configured string) (string, error) {
 		if _, err := os.Stat(configured); err != nil {
 			return "", fmt.Errorf("profile.aws_cli : %q introuvable (AWS CLI v2 installée ?)", configured)
 		}
+		if awsinstall.IsSnap(configured) {
+			return "", fmt.Errorf("profile.aws_cli : %q est la CLI AWS du paquet snap, qui ne démarre pas sous le service (droits restreints) : laisser profile.aws_cli vide et relancer sudo kura-agent install, qui installe la version officielle", configured)
+		}
 		return configured, nil
 	}
 	// Aussi à l'emplacement par défaut du MSI : juste après une installation par
@@ -496,14 +499,15 @@ func label(r string) string {
 }
 
 func printSummary(w io.Writer, st *state.Status) {
-	fmt.Fprintf(w, "\nExécution %s : %s (code %d)", st.RunID, label(st.Result), st.ExitCode)
+	if st.State == "running" {
+		fmt.Fprintf(w, "\nExécution %s : en cours depuis %s", st.RunID, st.StartedAt.Local().Format("15:04"))
+	} else {
+		fmt.Fprintf(w, "\nExécution %s : %s (code %d)", st.RunID, label(st.Result), st.ExitCode)
+	}
 	if st.DryRun {
 		fmt.Fprint(w, " — simulation")
 	}
 	fmt.Fprintln(w)
-	if st.State == "running" {
-		fmt.Fprintln(w, "  en cours")
-	}
 	if st.Message != "" {
 		fmt.Fprintf(w, "  %s\n", st.Message)
 	}
