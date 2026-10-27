@@ -125,9 +125,17 @@ func TestGenerate(t *testing.T) {
 	} else {
 		wellFormed(t, p.Sync)
 	}
+	// Sans compte : root (aucune clé UserName).
+	root := params
+	root.User = ""
+	if p, err := Generate(s, root); err != nil || strings.Contains(string(p.Sync), "UserName") {
+		t.Fatalf("root : %v", err)
+	} else {
+		wellFormed(t, p.Sync)
+		lint(t, p.Sync)
+	}
 	for _, bad := range []Params{
 		{Command: "kura-agent", User: "_kura", DataDir: "/d", LogsDir: "/l"},
-		{Command: "/k", User: "", DataDir: "/d", LogsDir: "/l"},
 		{Command: "/k", User: "a b", DataDir: "/d", LogsDir: "/l"},
 		{Command: "/k", User: "_kura", DataDir: "d", LogsDir: "/l"},
 	} {

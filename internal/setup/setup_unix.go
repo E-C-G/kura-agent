@@ -1,3 +1,5 @@
+//go:build linux || darwin
+
 package setup
 
 import (
@@ -6,20 +8,27 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
+
+	"github.com/E-C-G/kura-agent/internal/paths"
 )
 
-// Linux : installation dans les emplacements standards ; pas d'icône pour l'instant.
+// Linux et macOS : installation dans les emplacements standards ; pas d'icône pour
+// l'instant.
 //
-//	/etc/kura                configuration (root, lisible par kura-agent)
-//	/var/lib/kura            état (le service la reprend à son compte au démarrage)
-//	/etc/credstore.encrypted secrets chiffrés par systemd-creds (root seul)
-//	/usr/local/bin/kura-agent exécutable copié par install, sauf si kura-agent est
+//	Linux  /etc/kura                configuration (root, lisible par kura-agent)
+//	       /var/lib/kura            état (le service la reprend à son compte au démarrage)
+//	       /etc/credstore.encrypted secrets chiffrés par systemd-creds (root seul)
+//	macOS  /Library/Application Support/Kura  configuration et état (root, lisibles par tous)
+//	       …/Kura/credentials       secrets chiffrés, clé dans le trousseau Système (root seul)
+//	       /Library/Logs/Kura       journaux
+//	tous   /usr/local/bin/kura-agent exécutable copié par install, sauf si kura-agent est
 //	                         déjà dans /usr/bin (paquet deb) ou /usr/local/bin
 
 // BinDir : emplacement de l'exécutable copié par install.
 const BinDir = "/usr/local/bin"
 
-// GUIName : pas de version sans console sous Linux.
+// GUIName : pas de version sans console sous Linux et macOS.
 const GUIName = ""
 
 // LocalAccountSID : sans objet sous Linux (ancien compte svc-kura de Windows).
@@ -32,9 +41,14 @@ func AccountSID(string) (string, error) { return "", notImplemented() }
 func RemoveAccount(string) error { return notImplemented() }
 
 // SecureDataDir crée les dossiers de l'agent : données en 0755 (aucun secret, lisibles
-// par tous comme sous Windows), configuration en 0755, appartenant à root.
+// par tous comme sous Windows), configuration en 0755, appartenant à root ; sous macOS
+// aussi les journaux (sous Linux, systemd les crée pour le service).
 func SecureDataDir(dir string) error {
-	for _, d := range []string{dir, "/etc/kura"} {
+	dirs := []string{dir, paths.ConfigDir()}
+	if runtime.GOOS == "darwin" {
+		dirs = append(dirs, paths.LogsDir())
+	}
+	for _, d := range dirs {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			return err
 		}
@@ -45,7 +59,7 @@ func SecureDataDir(dir string) error {
 	return nil
 }
 
-// ProgramDir : pas de dossier propre à l'agent sous Linux (exécutable dans BinDir).
+// ProgramDir : pas de dossier propre à l'agent sous Linux et macOS (exécutable dans BinDir).
 func ProgramDir() string { return "" }
 
 // InstallBinary : exécutable déjà dans /usr/bin ou /usr/local/bin, gardé tel quel ;
@@ -109,7 +123,7 @@ func RemoveBinary() (removed string, err error) {
 	return p, nil
 }
 
-// SetTrayAutostart : icône pas encore écrite sous Linux.
+// SetTrayAutostart : icône pas encore écrite sous Linux et macOS.
 func SetTrayAutostart(string) error { return notImplemented() }
 
 // RemoveTrayAutostart : rien à retirer sous Linux pour l'instant.

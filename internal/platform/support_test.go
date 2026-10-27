@@ -10,6 +10,7 @@ func TestSupportTable(t *testing.T) {
 	want := map[string]map[Feature]bool{
 		"windows": {Scheduling: true, Vault: true, Install: true, AWSCLISetup: true, Tray: true, AppControl: true},
 		"linux":   {Install: true, Scheduling: true, Vault: true, AWSCLISetup: true},
+		"darwin":  {Install: true, Scheduling: true, Vault: true},
 	}[runtime.GOOS]
 	for _, f := range All {
 		if got := Supported(f); got != want[f] {

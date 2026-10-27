@@ -14,6 +14,7 @@ import (
 
 	"github.com/E-C-G/kura-agent/internal/awsinstall"
 	"github.com/E-C-G/kura-agent/internal/creds"
+	"github.com/E-C-G/kura-agent/internal/launchd"
 	"github.com/E-C-G/kura-agent/internal/lock"
 	"github.com/E-C-G/kura-agent/internal/paths"
 	"github.com/E-C-G/kura-agent/internal/schedtask"
@@ -55,6 +56,13 @@ type system struct {
 	ensureAccount func() (created bool, err error)
 	installTimer  func(systemd.Units) error
 	removeBinary  func() (string, error)
+
+	// macOS : démons launchd sous root, exécutable dans /usr/local/bin, clé du coffre
+	// dans le trousseau Système (retirée par uninstall --purge).
+	darwin         bool
+	installDaemons func(launchd.Plists) error
+	removeVaultKey func() error
+	logsDir        string
 
 	vault      creds.Store
 	dataDir    string
@@ -106,6 +114,16 @@ func realSystem() system {
 		sys.awsWorkDir = "/var/cache/kura-install"
 		sys.purgeDirs = []string{paths.LogsDir(), paths.ConfigDir(), sys.awsWorkDir}
 	}
+	if runtime.GOOS == "darwin" {
+		daemons := launchd.System()
+		sys.darwin = true
+		sys.installDaemons = daemons.Install
+		sys.deleteTask = daemons.Remove
+		sys.removeBinary = setup.RemoveBinary
+		sys.removeVaultKey = creds.DeleteSystemKey
+		sys.purgeDirs = []string{paths.LogsDir()}
+	}
+	sys.logsDir = paths.LogsDir()
 	return sys
 }
 
@@ -256,6 +274,8 @@ func install(sys system, opt installOptions) int {
 		home := "le dossier .aws de SYSTEM\n(C:\\Windows\\System32\\config\\systemprofile)"
 		if sys.linux {
 			home = "/var/lib/kura/.aws"
+		} else if sys.darwin {
+			home = filepath.Join(sys.dataDir, ".aws")
 		}
 		fmt.Fprintf(out, "Attention : sans profile.aws_credentials, la CLI AWS cherchera ses clés dans %s. Conseillé : aws_credentials: credential:wasabi.\n", home)
 	}
@@ -279,6 +299,8 @@ func install(sys system, opt installOptions) int {
 	}
 	if sys.linux {
 		step("dossiers %s et %s prêts ; coffre %s réservé à root", sys.dataDir, filepath.Dir(sys.configFile), sys.vault.Dir)
+	} else if sys.darwin {
+		step("dossiers %s et %s prêts ; coffre %s réservé à root, clé dans le trousseau Système", sys.dataDir, sys.logsDir, sys.vault.Dir)
 	} else {
 		step("dossier %s protégé (Utilisateurs en lecture, coffre réservé aux administrateurs)", sys.dataDir)
 	}
@@ -361,7 +383,7 @@ func install(sys system, opt installOptions) int {
 		return fail(exitInstallFailed, "copie de l'exécutable : %v", err)
 	}
 	step("exécutable : %s", exe)
-	if gui == "" && !sys.linux {
+	if gui == "" && !sys.linux && !sys.darwin {
 		fmt.Fprintf(out, "Attention : %s absent à côté de l'exécutable : pas d'icône (préavis par simple attente, pas de relance d'Outlook).\n", setup.GUIName)
 	}
 
@@ -403,6 +425,8 @@ func install(sys system, opt installOptions) int {
 			name := schedtask.Name
 			if sys.linux {
 				name = systemd.TimerName
+			} else if sys.darwin {
+				name = launchd.Label
 			}
 			return fail(exitInstallFailed, "validate a échoué : planification %s non créée ni modifiée. Corriger puis relancer install.", name)
 		}
@@ -411,6 +435,10 @@ func install(sys system, opt installOptions) int {
 
 	if sys.linux {
 		if code := installLinuxTimer(sys, cfg, exe, step, fail); code != exitInstallOK {
+			return code
+		}
+	} else if sys.darwin {
+		if code := installMacDaemons(sys, cfg, exe, step, fail); code != exitInstallOK {
 			return code
 		}
 	} else if code := installWindowsTask(sys, cfg, exe, step, fail); code != exitInstallOK {
@@ -444,6 +472,18 @@ Suite conseillée :
   2. sudo systemctl start --no-block %s   une vraie exécution, comme planifiée, puis kura-agent status
   3. systemctl list-timers %s      prochain passage ; journal : journalctl -u %s
 `, systemd.ServiceName, systemd.TimerName, systemd.ServiceName)
+		return exitInstallOK
+	}
+	if sys.darwin {
+		fmt.Fprintf(out, `
+Installation terminée.
+Avant la première sauvegarde : Réglages Système > Confidentialité et sécurité > Accès
+complet au disque, ajouter %s (sinon Documents, Bureau et Mail restent illisibles).
+Suite conseillée :
+  1. sudo kura-agent run --dry-run                  simulation, rien n'est copié ni supprimé
+  2. sudo launchctl kickstart system/%s   une vraie exécution, comme planifiée, puis kura-agent status
+  3. journaux : %s
+`, exe, launchd.Label, sys.logsDir)
 		return exitInstallOK
 	}
 	fmt.Fprintf(out, `
@@ -518,6 +558,26 @@ func installLinuxTimer(sys system, cfg *config.Config, exe string, step func(str
 		return fail(exitInstallFailed, "planification : %v", err)
 	}
 	step("timer %s actif : %s, compte %s", systemd.TimerName, describeSchedule(cfg.Schedule), setup.ServiceAccount)
+	return exitInstallOK
+}
+
+// installMacDaemons met en place les démons launchd (root) : sauvegarde planifiée et,
+// avec run_if_missed, rattrapage au démarrage.
+func installMacDaemons(sys system, cfg *config.Config, exe string, step func(string, ...any), fail func(int, string, ...any) int) int {
+	if len(cfg.Tray.AllowRunNow) > 0 {
+		fmt.Fprintln(sys.out, "Attention : tray.allow_run_now ignoré sous macOS pour l'instant (lancement : sudo launchctl kickstart system/"+launchd.Label+").")
+	}
+	p, err := launchd.Generate(cfg.Schedule, launchd.Params{Command: exe, DataDir: sys.dataDir, LogsDir: sys.logsDir})
+	if err != nil {
+		return fail(exitInstallConfig, "planification : %v", err)
+	}
+	if err := sys.installDaemons(p); err != nil {
+		return fail(exitInstallFailed, "planification : %v", err)
+	}
+	step("démon %s actif : %s, compte root", launchd.Label, describeSchedule(cfg.Schedule))
+	if p.CatchUp != nil {
+		step("rattrapage au démarrage : démon %s", launchd.CatchUpLabel)
+	}
 	return exitInstallOK
 }
 
@@ -634,6 +694,8 @@ func uninstall(sys system, purge bool) int {
 		errs = append(errs, err)
 	} else if sys.linux {
 		step("timer %s et service %s retirés", systemd.TimerName, systemd.ServiceName)
+	} else if sys.darwin {
+		step("démons %s et %s retirés", launchd.Label, launchd.CatchUpLabel)
 	} else {
 		step("tâche %s supprimée", schedtask.Name)
 	}
@@ -655,7 +717,7 @@ func uninstall(sys system, purge bool) int {
 			step("%s supprimé", dir)
 		}
 	}
-	if sys.linux {
+	if sys.linux || sys.darwin {
 		switch p, err := sys.removeBinary(); {
 		case err != nil:
 			errs = append(errs, err)
@@ -669,6 +731,11 @@ func uninstall(sys system, purge bool) int {
 		for _, n := range names {
 			if err == nil {
 				err = sys.vault.Delete(n)
+			}
+		}
+		if err == nil && sys.removeVaultKey != nil {
+			if err = sys.removeVaultKey(); err == nil {
+				step("clé du coffre retirée du trousseau Système")
 			}
 		}
 		if err != nil {
