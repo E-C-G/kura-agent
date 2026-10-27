@@ -122,6 +122,9 @@ func (in Installer) Ensure(want string, candidates []string) (Result, error) {
 	if err := os.MkdirAll(in.TempDir, 0o700); err != nil {
 		return Result{}, err
 	}
+	if err := secureWorkDir(in.TempDir); err != nil {
+		return Result{}, fmt.Errorf("dossier de travail de la CLI AWS : %w", err)
+	}
 	file := filepath.Join(in.TempDir, pkg.Name)
 	sig := ""
 	if pkg.SigName() != "" {

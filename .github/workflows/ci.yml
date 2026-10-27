@@ -53,6 +53,11 @@ jobs:
       - name: Vet (Linux)
         run: go vet ./...
 
+      # Vulnérabilités connues (bibliothèque standard du compilateur utilisé, dépendances) :
+      # la CI échoue si le code appelle une fonction touchée.
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
+
       - name: Vet (Windows)
         run: GOOS=windows GOARCH=amd64 go vet ./...
 
@@ -153,7 +158,7 @@ jobs:
 
       - name: Modules
         shell: bash
-        run: go mod tidy
+        run: go mod download && go mod verify
 
       # Les échecs remontent en annotations : lisibles sans télécharger le journal.
       - name: Tests
