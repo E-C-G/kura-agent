@@ -677,11 +677,19 @@ func uninstall(sys system, purge bool) int {
 		return exitInstallFailed
 	}
 	release, err := sys.acquireLock()
-	if err != nil {
+	if errors.Is(err, lock.ErrBusy) {
 		fmt.Fprintln(os.Stderr, "ÉCHEC : une sauvegarde est en cours ; réessayer quand elle sera terminée (kura-agent status)")
 		return exitInstallFailed
 	}
-	defer release()
+	if err != nil {
+		// Dossier de données déjà absent : rien ne peut tourner.
+		release = func() {}
+	}
+	defer func() {
+		if release != nil {
+			release()
+		}
+	}()
 
 	var errs []error
 	if err := sys.removeAutostart(); err != nil {
@@ -726,6 +734,10 @@ func uninstall(sys system, purge bool) int {
 		}
 	}
 	if purge {
+		// Le verrou est un fichier du dossier de données : libéré avant de l'effacer (la
+		// planification est déjà retirée).
+		release()
+		release = nil
 		// Les secrets d'abord : sous Linux, ils ne sont pas dans dataDir.
 		names, err := sys.vault.List()
 		for _, n := range names {

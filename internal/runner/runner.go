@@ -708,6 +708,11 @@ func (r *run) preflight(ctx context.Context, j config.Job, out io.Writer, log *s
 		log.Error("source inaccessible", "source", j.Source, "err", err)
 		return nil, false
 	}
+	if err := guard.CheckSourceNotLink(j.Source); err != nil {
+		js.Result, js.Message = state.ResultError, err.Error()
+		log.Error("source refusée", "source", j.Source, "err", err)
+		return nil, false
+	}
 	if !j.Delete || j.Guard == nil {
 		return nil, true
 	}

@@ -96,11 +96,13 @@ func (w *webhook) deliver(ctx context.Context, p Payload) error {
 	}
 	h := http.Header{"Content-Type": {"application/json"}}
 	if w.token != "" {
-		h.Set("X-Kura-Token", w.token)
 		if w.hmac {
+			// La signature suffit : le jeton lui-même ne voyage pas.
 			ts := strconv.FormatInt(p.SentAt.Unix(), 10)
 			h.Set("X-Kura-Timestamp", ts)
 			h.Set("X-Kura-Signature", "sha256="+Sign(w.token, ts, body))
+		} else {
+			h.Set("X-Kura-Token", w.token)
 		}
 	}
 	return send(ctx, w.opt, w.url, body, h)
