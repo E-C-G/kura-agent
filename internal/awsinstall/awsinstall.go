@@ -110,7 +110,13 @@ func (in Installer) Ensure(want string, candidates []string) (Result, error) {
 		if !strings.HasPrefix(v, "aws-cli/2.") {
 			return Result{}, fmt.Errorf("%s est la CLI AWS %s : la v2 est nécessaire (désinstaller l'ancienne, ou renseigner profile.aws_cli)", p, v)
 		}
-		return Result{Path: p, Version: v}, nil
+		if RecentEnough(v) {
+			return Result{Path: p, Version: v}, nil
+		}
+		if pkg.Name == "" || pkg.Verify == nil || pkg.Install == nil {
+			return Result{}, fmt.Errorf("%s : CLI AWS %s antérieure à %s, à mettre à jour", p, cliVersion(v), MinCLIVersion)
+		}
+		fmt.Fprintf(in.Out, "  CLI AWS %s antérieure à %s : mise à jour\n", cliVersion(v), MinCLIVersion)
 	}
 	if pkg.Name == "" || pkg.Verify == nil || pkg.Install == nil {
 		return Result{}, platform.NotImplemented(platform.AWSCLISetup)
@@ -185,8 +191,66 @@ func (in Installer) Ensure(want string, candidates []string) (Result, error) {
 	if err != nil {
 		return Result{}, fmt.Errorf("%s installé mais ne répond pas : %v", p, err)
 	}
+	if !RecentEnough(v) {
+		// Paquet authentique mais ancien (posé à côté du paquet .kura) : refusé.
+		return Result{}, fmt.Errorf("%s a installé la CLI AWS %s, antérieure à %s : paquet trop ancien, retirer %s et relancer (téléchargement de la dernière version)",
+			res.Source, cliVersion(v), MinCLIVersion, pkg.Name)
+	}
 	res.Path, res.Version = p, v
 	return res, nil
+}
+
+// MinCLIVersion : plus ancienne CLI AWS v2 acceptée. Un paquet signé par Amazon mais
+// ancien (vulnérabilités connues) est refusé, une CLI installée plus ancienne est mise
+// à jour. À relever régulièrement, avec la clé PGP d'AWS.
+const MinCLIVersion = "2.32.0"
+
+// RecentEnough : « aws-cli/2.x.y Python/… » au moins MinCLIVersion.
+func RecentEnough(versionLine string) bool {
+	return versionAtLeast(cliVersion(versionLine), MinCLIVersion)
+}
+
+// cliVersion extrait « 2.x.y » de « aws-cli/2.x.y Python/… ».
+func cliVersion(line string) string {
+	f := strings.Fields(line)
+	if len(f) == 0 {
+		return ""
+	}
+	return strings.TrimPrefix(f[0], "aws-cli/")
+}
+
+func versionAtLeast(v, min string) bool {
+	parse := func(s string) []int {
+		var out []int
+		for _, p := range strings.Split(s, ".") {
+			n := 0
+			if p == "" {
+				return nil
+			}
+			for _, c := range p {
+				if c < '0' || c > '9' {
+					return nil
+				}
+				n = n*10 + int(c-'0')
+			}
+			out = append(out, n)
+		}
+		return out
+	}
+	a, b := parse(v), parse(min)
+	if a == nil || b == nil {
+		return false
+	}
+	for i := 0; i < len(b); i++ {
+		x := 0
+		if i < len(a) {
+			x = a[i]
+		}
+		if x != b[i] {
+			return x > b[i]
+		}
+	}
+	return true
 }
 
 func copyFile(src, dst string) error {

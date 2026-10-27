@@ -172,9 +172,14 @@ func verifyPGP(file, sig, keyASC, fpr string, gpgv func(keyring, sig, file strin
 	return "AWS CLI Team <aws-cli@amazon.com> (" + fpr[:4] + "…" + fpr[len(fpr)-4:] + ")", nil
 }
 
+// gpgvPath : gpgv du paquet Debian et Ubuntu (apt s'en sert, toujours présent).
+const gpgvPath = "/usr/bin/gpgv"
+
 // runGPGV : gpgv, toujours présent sous Debian et Ubuntu (apt s'en sert).
 func runGPGV(keyring, sig, file string) (string, error) {
-	cmd := exec.Command("gpgv", "--status-fd", "1", "--keyring", keyring, sig, file)
+	// Chemin fixe : jamais un gpgv trouvé dans le PATH de l'administrateur.
+	cmd := exec.Command(gpgvPath, "--status-fd", "1", "--keyring", keyring, sig, file)
+	cmd.Env = safeEnv()
 	var out, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &stderr
 	err := cmd.Run()

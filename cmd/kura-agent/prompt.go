@@ -22,7 +22,7 @@ func readLine() (string, error) {
 }
 
 // askSecret pose une question et lit une ligne sans l'afficher quand l'entrée est une
-// console (Windows) ; redirigée depuis un fichier ou un tube, la ligne est lue telle quelle.
+// console (Windows) ou un terminal (Linux, macOS) ; redirigée depuis un fichier ou un tube, la ligne est lue telle quelle.
 func askSecret(prompt string) (string, error) {
 	fmt.Fprint(os.Stderr, prompt)
 	restore := hideInput()

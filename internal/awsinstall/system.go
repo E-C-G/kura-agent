@@ -25,11 +25,20 @@ func System(out io.Writer, tempDir string) Installer {
 	}
 }
 
-// Find cherche aws dans le PATH (sous macOS, dans les seuls dossiers du PATH du démon,
-// MacSearchDirs), puis à l'emplacement d'installation par défaut. Sous Linux, la CLI du paquet snap est écartée : snap-confine exige des droits que le
-// service kura-sync n'a pas (il ne garde que la lecture du disque), elle échoue donc
-// sous le service alors qu'elle marche avec sudo.
+// Find cherche aws à l'emplacement d'installation par défaut, puis dans le PATH (sous
+// macOS, dans les seuls dossiers du PATH du démon, MacSearchDirs). Sous Linux, la CLI
+// du paquet snap est écartée : snap-confine exige des droits que le service kura-sync
+// n'a pas (il ne garde que la lecture du disque), elle échoue donc sous le service
+// alors qu'elle marche avec sudo.
 func Find() (string, error) {
+	// L'emplacement d'installation officiel d'abord : un dossier du PATH modifiable par
+	// un utilisateur ne doit pas pouvoir y substituer son propre aws, lancé ensuite par
+	// SYSTEM ou root.
+	if p := DefaultPath(); p != "" {
+		if st, err := os.Stat(p); err == nil && st.Mode().IsRegular() {
+			return p, nil
+		}
+	}
 	snap := ""
 	switch runtime.GOOS {
 	case "darwin":
