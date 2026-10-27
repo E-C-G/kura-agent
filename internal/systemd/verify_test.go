@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -12,9 +13,7 @@ import (
 // systemd-analyze verify relit les unités générées comme le ferait systemd :
 // directives inconnues, valeurs invalides, timer sans service.
 func TestUnitsVerifiedBySystemd(t *testing.T) {
-	if _, err := exec.LookPath("systemd-analyze"); err != nil {
-		t.Skip("systemd-analyze absent")
-	}
+	needSystemdAnalyze(t)
 	if _, err := os.Stat("/usr/bin/true"); err != nil {
 		t.Skip("/usr/bin/true absent")
 	}
@@ -32,5 +31,17 @@ func TestUnitsVerifiedBySystemd(t *testing.T) {
 	out, err := exec.Command("systemd-analyze", "verify", "--man=no", svc, tim).CombinedOutput()
 	if err != nil || strings.TrimSpace(string(out)) != "" {
 		t.Fatalf("systemd-analyze verify : %v\n%s", err, out)
+	}
+}
+
+// needSystemdAnalyze : sans systemd-analyze, les tests de comparaison sont sautés,
+// sauf en CI sous Linux où ils doivent tourner.
+func needSystemdAnalyze(t *testing.T) {
+	t.Helper()
+	if _, err := exec.LookPath("systemd-analyze"); err != nil {
+		if os.Getenv("CI") != "" && runtime.GOOS == "linux" {
+			t.Fatal("systemd-analyze absent de la CI Linux : comparaison impossible")
+		}
+		t.Skip("systemd-analyze absent")
 	}
 }

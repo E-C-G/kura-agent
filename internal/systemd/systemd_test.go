@@ -108,9 +108,7 @@ func TestManager(t *testing.T) {
 // Les expressions générées, lues par systemd lui-même (systemd-analyze calendar),
 // donnent les mêmes déclenchements que la tâche Windows (schedtask.Next).
 func TestSameRunsAsWindows(t *testing.T) {
-	if _, err := exec.LookPath("systemd-analyze"); err != nil {
-		t.Skip("systemd-analyze absent")
-	}
+	needSystemdAnalyze(t)
 	// systemd-analyze (TZ) et schedtask.Next (time.Local) dans le même fuseau.
 	t.Setenv("TZ", "UTC")
 	local := time.Local
