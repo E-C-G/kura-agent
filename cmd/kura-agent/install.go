@@ -98,7 +98,8 @@ type installOptions struct {
 	// console ; remplace cfgPath.
 	pkgPath string
 	keep    bool // garder le .kura après une installation réussie
-	// msiCandidates : emplacements possibles de AWSCLIV2.msi, si la CLI AWS manque.
+	// msiCandidates : emplacements possibles du paquet de la CLI AWS (AWSCLIV2.msi
+	// sous Windows, zip et .sig sous Linux), si elle manque.
 	msiCandidates []string
 }
 
@@ -107,7 +108,9 @@ func cmdInstall(args []string) int {
 	cfgPath := fs.String("config", paths.ConfigFile(), "configuration à installer (copiée dans "+paths.ConfigFile()+")")
 	pkg := fs.String("package", "", "paquet d'installation .kura préparé par la console (configuration et secrets)")
 	keep := fs.Bool("keep", false, "garder le fichier .kura après l'installation")
-	msi := fs.String("aws-cli-msi", "", "MSI de la CLI AWS à utiliser si elle manque (défaut : "+awsinstall.MSIName+" à côté du paquet ou de kura-agent.exe, sinon téléchargé chez AWS)")
+	awsPkg := awsinstall.SystemPackage().Name
+	msi := fs.String("aws-cli", "", "paquet de la CLI AWS à utiliser si elle manque, signature .sig à côté sous Linux (défaut : "+orNone(awsPkg)+" à côté du paquet ou de kura-agent, sinon téléchargé chez AWS)")
+	fs.StringVar(msi, "aws-cli-msi", "", "ancien nom de --aws-cli")
 	skipValidate := fs.Bool("skip-validate", false, "créer la tâche même si validate échoue (déconseillé)")
 	if err := fs.Parse(args); err != nil {
 		return exitInstallConfig
@@ -115,12 +118,12 @@ func cmdInstall(args []string) int {
 	explicit := map[string]bool{}
 	fs.Visit(func(f *flag.Flag) { explicit[f.Name] = true })
 	if fs.NArg() != 0 || (explicit["config"] && explicit["package"]) {
-		fmt.Fprintln(os.Stderr, "usage : kura-agent install [--config FICHIER | --package FICHIER.kura] [--aws-cli-msi FICHIER] [--keep] [--skip-validate]")
+		fmt.Fprintln(os.Stderr, "usage : kura-agent install [--config FICHIER | --package FICHIER.kura] [--aws-cli FICHIER] [--keep] [--skip-validate]")
 		return exitInstallConfig
 	}
 	if *msi != "" {
 		if st, err := os.Stat(*msi); err != nil || !st.Mode().IsRegular() {
-			fmt.Fprintf(os.Stderr, "ÉCHEC : --aws-cli-msi : %s introuvable\n", *msi)
+			fmt.Fprintf(os.Stderr, "ÉCHEC : --aws-cli : %s introuvable\n", *msi)
 			return exitInstallConfig
 		}
 	}
@@ -128,10 +131,10 @@ func cmdInstall(args []string) int {
 	opt.msiCandidates = []string{*msi}
 	if *msi == "" {
 		if *pkg != "" {
-			opt.msiCandidates = append(opt.msiCandidates, filepath.Join(filepath.Dir(*pkg), awsinstall.MSIName))
+			opt.msiCandidates = append(opt.msiCandidates, filepath.Join(filepath.Dir(*pkg), awsPkg))
 		}
 		if exe, err := os.Executable(); err == nil {
-			opt.msiCandidates = append(opt.msiCandidates, filepath.Join(filepath.Dir(exe), awsinstall.MSIName))
+			opt.msiCandidates = append(opt.msiCandidates, filepath.Join(filepath.Dir(exe), awsPkg))
 		}
 	}
 	return install(realSystem(), opt)
@@ -250,7 +253,7 @@ func install(sys system, opt installOptions) int {
 		case res.Warning != "":
 			fmt.Fprintf(out, "Attention : CLI AWS : %s\n", res.Warning)
 		case res.Installed:
-			step("CLI AWS installée : %s (%s, MSI signé par %s)", res.Version, res.Path, res.Signer)
+			step("CLI AWS installée : %s (%s, paquet signé par %s)", res.Version, res.Path, res.Signer)
 			if res.RebootRequired {
 				fmt.Fprintln(out, "Attention : Windows demande un redémarrage pour terminer l'installation de la CLI AWS.")
 			}

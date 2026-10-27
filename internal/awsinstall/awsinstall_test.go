@@ -59,20 +59,22 @@ func (f *fake) installer(dir string) Installer {
 			}
 			return "", errors.New("absent")
 		},
-		Signature: func(msi string) (string, string, error) { f.signed = msi; return f.status, f.subject, nil },
+		Package: Package{Name: MSIName, URL: DownloadURL,
+			Verify: verifyMSI(func(msi string) (string, string, error) { f.signed = msi; return f.status, f.subject, nil }),
+			Install: func(msi, work, log string) (bool, error) {
+				f.ran = msi
+				b, _ := os.ReadFile(msi)
+				f.ranContent = string(b)
+				f.installed = true
+				return false, nil
+			},
+		},
 		Download: func(url, dst string) error {
 			f.downloaded = url
 			if f.dlErr != nil {
 				return f.dlErr
 			}
 			return os.WriteFile(dst, []byte("msi"), 0o600)
-		},
-		RunMSI: func(msi, log string) (bool, error) {
-			f.ran = msi
-			b, _ := os.ReadFile(msi)
-			f.ranContent = string(b)
-			f.installed = true
-			return false, nil
 		},
 		Version: func(string) (string, error) {
 			if f.version != "" || f.versionErr != nil {
@@ -163,7 +165,7 @@ func TestEnsureWantedPath(t *testing.T) {
 	// Une autre CLI dans le PATH ne compte pas : le chemin configuré manque.
 	f := &fake{installed: true, status: "Valid", subject: amazon}
 	in := f.installer(dir)
-	in.RunMSI = func(msi, log string) (bool, error) {
+	in.Package.Install = func(msi, work, log string) (bool, error) {
 		f.ran = msi
 		os.MkdirAll(filepath.Dir(want), 0o755)
 		return false, os.WriteFile(want, nil, 0o755)

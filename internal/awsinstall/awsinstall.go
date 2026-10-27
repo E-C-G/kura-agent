@@ -1,19 +1,24 @@
 // Package awsinstall installe la CLI AWS v2 sur un poste qui ne l'a pas encore, pour
-// `kura-agent install` : MSI fourni avec le paquet d'installation s'il est là, sinon
-// téléchargé chez AWS. Dans les deux cas, la signature Authenticode du MSI est
-// vérifiée (valide, signataire Amazon) avant de lancer msiexec.
+// `kura-agent install` : paquet fourni avec le paquet d'installation s'il est là,
+// sinon téléchargé chez AWS. Dans les deux cas, la signature est vérifiée avant
+// l'installation :
+//
+//	Windows   AWSCLIV2.msi                 Authenticode valide, signataire Amazon, msiexec
+//	Linux     awscli-exe-linux-<arch>.zip  signature PGP (.sig) de la clé « AWS CLI Team »
+//	          et sa signature .sig         intégrée à l'agent (gpgv), puis aws/install
 package awsinstall
 
 import (
 	"errors"
 	"fmt"
-	"github.com/E-C-G/kura-agent/internal/platform"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/E-C-G/kura-agent/internal/platform"
 )
 
 // DownloadURL : dernière version de la CLI AWS v2 pour Windows (64 bits).
@@ -22,7 +27,8 @@ const DownloadURL = "https://awscli.amazonaws.com/AWSCLIV2.msi"
 // MSIName : nom attendu du MSI posé à côté du paquet ou de kura-agent.exe.
 const MSIName = "AWSCLIV2.msi"
 
-// maxDownload : le MSI fait environ 40 Mo ; au-delà de 300 Mo, ce n'est pas lui.
+// maxDownload : le MSI fait environ 40 Mo, le zip Linux environ 60 Mo ; au-delà de
+// 300 Mo, ce n'est pas lui.
 const maxDownload = 300 << 20
 
 // Signers : organisations (champ O= du certificat) acceptées comme signataire du MSI.
@@ -32,25 +38,41 @@ var Signers = []string{"Amazon.com Services LLC", "Amazon Web Services, Inc.", "
 // (errors.Is ; le détail est une platform.NotImplementedError).
 var ErrUnsupported = platform.ErrNotImplemented
 
+// Package décrit la CLI AWS telle qu'AWS la distribue pour un système.
+type Package struct {
+	Name   string // fichier, posé à côté du paquet .kura ou téléchargé
+	URL    string
+	SigURL string // signature détachée (Linux : <URL>.sig), vide si elle est intégrée
+	// Verify contrôle le fichier (et sa signature) et renvoie le signataire.
+	Verify func(file, sig string) (signer string, err error)
+	// Install installe depuis le fichier vérifié ; work : dossier de travail privé.
+	Install func(file, work, logFile string) (rebootRequired bool, err error)
+}
+
+// SigName : nom de la signature détachée, posée à côté du fichier.
+func (p Package) SigName() string {
+	if p.SigURL == "" {
+		return ""
+	}
+	return p.Name + ".sig"
+}
+
 // Installer regroupe les opérations, remplaçables dans les tests.
 type Installer struct {
-	// Find cherche aws.exe (PATH, puis emplacement d'installation par défaut).
-	Find func() (string, error)
-	// Signature renvoie l'état Authenticode (« Valid »…) et le sujet du signataire.
-	Signature func(msi string) (status, subject string, err error)
-	Download  func(url, dst string) error
-	// RunMSI lance l'installation silencieuse ; rebootRequired pour le code 3010.
-	RunMSI  func(msi, logFile string) (rebootRequired bool, err error)
-	Version func(aws string) (string, error)
-	TempDir string
-	Out     io.Writer
+	// Find cherche aws (PATH, puis emplacement d'installation par défaut).
+	Find     func() (string, error)
+	Download func(url, dst string) error
+	Version  func(aws string) (string, error)
+	Package  Package
+	TempDir  string
+	Out      io.Writer
 }
 
 // Result décrit la CLI trouvée ou installée.
 type Result struct {
 	Path, Version  string
 	Installed      bool
-	Source         string // MSI utilisé (chemin local, ou URL de téléchargement)
+	Source         string // paquet utilisé (chemin local, ou URL de téléchargement)
 	Signer         string
 	RebootRequired bool
 	// Warning : CLI présente mais qui ne répond pas ; l'installation continue,
@@ -60,16 +82,17 @@ type Result struct {
 
 // Ensure vérifie que la CLI AWS v2 est présente et l'installe sinon.
 //
-// want : chemin exigé de aws.exe (profile.aws_cli), vide pour le PATH ou
-// l'emplacement par défaut. candidates : emplacements possibles d'un MSI fourni,
-// dans l'ordre de préférence ; le premier qui existe est utilisé, sinon le MSI est
-// téléchargé.
+// want : chemin exigé de aws (profile.aws_cli), vide pour le PATH ou l'emplacement
+// par défaut. candidates : emplacements possibles d'un paquet fourni (Package.Name),
+// dans l'ordre de préférence ; le premier qui existe est utilisé (avec sa signature
+// .sig à côté, quand le système en a une), sinon le paquet est téléchargé.
 //
-// Le MSI est toujours copié (ou téléchargé) dans TempDir, qui doit être un dossier
-// que seuls SYSTEM et les administrateurs peuvent modifier : la signature vérifiée
-// est bien celle du fichier que msiexec installe, sans qu'un processus non élevé
-// puisse le remplacer entre les deux.
+// Le paquet est toujours copié (ou téléchargé) dans TempDir, qui doit être un dossier
+// que seuls les administrateurs peuvent modifier : la signature vérifiée est bien
+// celle du fichier installé, sans qu'un processus non élevé puisse le remplacer
+// entre les deux.
 func (in Installer) Ensure(want string, candidates []string) (Result, error) {
+	pkg := in.Package
 	find := func() (string, error) {
 		if want == "" {
 			return in.Find()
@@ -89,6 +112,9 @@ func (in Installer) Ensure(want string, candidates []string) (Result, error) {
 		}
 		return Result{Path: p, Version: v}, nil
 	}
+	if pkg.Name == "" || pkg.Verify == nil || pkg.Install == nil {
+		return Result{}, platform.NotImplemented(platform.AWSCLISetup)
+	}
 	res := Result{Installed: true}
 	if err := os.RemoveAll(in.TempDir); err != nil {
 		return Result{}, err
@@ -96,8 +122,13 @@ func (in Installer) Ensure(want string, candidates []string) (Result, error) {
 	if err := os.MkdirAll(in.TempDir, 0o700); err != nil {
 		return Result{}, err
 	}
-	msi := filepath.Join(in.TempDir, MSIName)
-	defer os.Remove(msi)
+	file := filepath.Join(in.TempDir, pkg.Name)
+	sig := ""
+	if pkg.SigName() != "" {
+		sig = filepath.Join(in.TempDir, pkg.SigName())
+		defer os.Remove(sig)
+	}
+	defer os.Remove(file)
 	src := ""
 	for _, c := range candidates {
 		if c == "" {
@@ -109,31 +140,36 @@ func (in Installer) Ensure(want string, candidates []string) (Result, error) {
 		}
 	}
 	if src == "" {
-		fmt.Fprintf(in.Out, "  CLI AWS absente : téléchargement de %s…\n", DownloadURL)
-		if err := in.Download(DownloadURL, msi); err != nil {
-			return Result{}, fmt.Errorf("téléchargement de la CLI AWS : %w (poser %s à côté du paquet et relancer)", err, MSIName)
+		fmt.Fprintf(in.Out, "  CLI AWS absente : téléchargement de %s…\n", pkg.URL)
+		err := in.Download(pkg.URL, file)
+		if err == nil && sig != "" {
+			err = in.Download(pkg.SigURL, sig)
 		}
-		res.Source = DownloadURL
+		if err != nil {
+			return Result{}, fmt.Errorf("téléchargement de la CLI AWS : %w (poser %s à côté du paquet et relancer)", err, pkg.Name)
+		}
+		res.Source = pkg.URL
 	} else {
 		fmt.Fprintf(in.Out, "  CLI AWS absente : installation depuis %s\n", src)
-		if err := copyFile(src, msi); err != nil {
+		if err := copyFile(src, file); err != nil {
 			return Result{}, fmt.Errorf("copie de %s : %w", src, err)
+		}
+		if sig != "" {
+			if err := copyFile(src+".sig", sig); err != nil {
+				return Result{}, fmt.Errorf("signature %s.sig : %w (elle accompagne toujours %s)", src, err, pkg.Name)
+			}
 		}
 		res.Source = src
 	}
 
-	status, subject, err := in.Signature(msi)
-	if err != nil {
-		return Result{}, fmt.Errorf("vérification de la signature de %s : %w", res.Source, err)
-	}
-	signer, err := CheckSigner(status, subject)
+	signer, err := pkg.Verify(file, sig)
 	if err != nil {
 		return Result{}, fmt.Errorf("%s refusé, rien n'a été installé : %w", res.Source, err)
 	}
 	res.Signer = signer
 
 	logFile := filepath.Join(in.TempDir, "awscli-install.log")
-	reboot, err := in.RunMSI(msi, logFile)
+	reboot, err := pkg.Install(file, in.TempDir, logFile)
 	if err != nil {
 		return Result{}, fmt.Errorf("installation de la CLI AWS : %w (journal : %s)", err, logFile)
 	}
@@ -165,6 +201,17 @@ func copyFile(src, dst string) error {
 		err = cerr
 	}
 	return err
+}
+
+// verifyMSI : signature Authenticode valide d'une organisation Amazon.
+func verifyMSI(signature func(string) (string, string, error)) func(file, sig string) (string, error) {
+	return func(file, _ string) (string, error) {
+		status, subject, err := signature(file)
+		if err != nil {
+			return "", fmt.Errorf("vérification de la signature : %w", err)
+		}
+		return CheckSigner(status, subject)
+	}
 }
 
 // CheckSigner accepte une signature valide d'une organisation de Signers et renvoie
@@ -255,15 +302,4 @@ func HTTPDownload(url, dst string) error {
 		err = errors.New("fichier anormalement gros")
 	}
 	return err
-}
-
-// DefaultPath : emplacement d'installation du MSI (C:\Program Files\Amazon\AWSCLIV2).
-// Le PATH du processus qui vient de lancer msiexec n'est pas mis à jour : la CLI
-// fraîchement installée est cherchée là.
-func DefaultPath() string {
-	pf := os.Getenv("ProgramFiles")
-	if pf == "" {
-		return ""
-	}
-	return filepath.Join(pf, "Amazon", "AWSCLIV2", "aws.exe")
 }
