@@ -142,7 +142,7 @@ type installOptions struct {
 	pkgPath string
 	keep    bool // garder le .kura après une installation réussie
 	// msiCandidates : emplacements possibles du paquet de la CLI AWS (AWSCLIV2.msi
-	// sous Windows, zip et .sig sous Linux), si elle manque.
+	// sous Windows, zip et .sig sous Linux, AWSCLIV2.pkg sous macOS), si elle manque.
 	msiCandidates []string
 }
 

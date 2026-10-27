@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/E-C-G/kura-agent/internal/awsinstall"
 	"github.com/E-C-G/kura-agent/internal/schedtask"
 	"github.com/E-C-G/kura-agent/pkg/config"
 )
@@ -102,6 +103,12 @@ func TestGenerate(t *testing.T) {
 	} {
 		if !strings.Contains(sync, want) {
 			t.Errorf("démon de sauvegarde sans %q :\n%s", want, sync)
+		}
+	}
+	// Le démon trouve la CLI AWS là où install la cherche.
+	for _, d := range awsinstall.MacSearchDirs {
+		if !strings.Contains(sync, "<string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>") || !strings.Contains("/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:", d+":") {
+			t.Errorf("PATH du démon sans %s", d)
 		}
 	}
 	if strings.Contains(sync, "RunAtLoad") || !strings.Contains(catch, "<key>RunAtLoad</key>\n\t<true/>") ||

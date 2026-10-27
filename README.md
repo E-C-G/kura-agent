@@ -35,20 +35,24 @@ séparées, un fichier par système, et recensées dans `internal/platform` :
 | --- | --- | --- | --- |
 | planification | `schedtask`, `systemd`, `launchd` | oui | Linux : oui (timer systemd) ; macOS : oui (démons launchd sous root, rattrapage au démarrage) |
 | coffre des secrets | `creds` | oui | Linux : oui (systemd-creds) ; macOS : oui (AES-256-GCM, clé dans le trousseau Système) |
-| installation | `setup`, `install` | oui | Linux : oui ; macOS : écrite, mais `install` attend la CLI AWS automatique |
-| CLI AWS automatique | `awsinstall` | oui | Linux : oui (zip signé PGP) ; macOS : non pris en charge |
+| installation | `setup`, `install` | oui | Linux : oui ; macOS : oui (root ; accès complet au disque à accorder à la main) |
+| CLI AWS automatique | `awsinstall` | oui | Linux : oui (zip signé PGP) ; macOS : oui (`AWSCLIV2.pkg` signé par l'équipe Apple d'Amazon, notarisé) |
 | icône et canal vers l'icône | `tray`, `ipc` | oui | non pris en charge |
 | fermeture d'applications | `procs` (pré-tâches) | oui | non pris en charge |
 
 Hors Windows, une commande qui a besoin d'une fonction absente s'arrête tout de suite et dit ce
 qui manque. Sous Linux, toutes les commandes fonctionnent sauf `tray` (avec `sudo` pour le coffre
 et l'installation) ; une configuration avec `pre_tasks` ou `post_tasks` y est refusée (fermeture
-d'applications et icône à venir). Sous macOS :
+d'applications et icône à venir). Sous macOS (13 Ventura ou plus récent), toutes les commandes fonctionnent sauf `tray`, avec
+`sudo` pour le coffre et l'installation ; mêmes refus de `pre_tasks` et `post_tasks`. Avant la
+première sauvegarde, accorder l'accès complet au disque à `/usr/local/bin/kura-agent`
+(Réglages Système > Confidentialité et sécurité) : sans lui, Documents, Bureau et Mail restent
+illisibles, même pour root. Hors système pris en charge :
 
 ```text
-$ sudo kura-agent install
-kura-agent install : non pris en charge sous macOS dans cette version (manque : installation
-de la CLI AWS).
+$ kura-agent install
+kura-agent install : non pris en charge sous freebsd dans cette version (manque : installation,
+planification, coffre des secrets, installation de la CLI AWS).
 ```
 
 ### Installer sous Linux (Ubuntu 24.04)
