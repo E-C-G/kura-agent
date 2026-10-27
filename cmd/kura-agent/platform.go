@@ -52,7 +52,7 @@ func checkMissing(cmd string, missing []platform.Feature, dev bool, stderr io.Wr
 		return true
 	}
 	fmt.Fprintf(stderr, "kura-agent %s : non pris en charge sous %s dans cette version (manque : %s).\n"+
-		"Windows uniquement pour l'instant ; seules status et version fonctionnent ici.\n",
+		"Windows uniquement pour l'instant.\n",
 		cmd, platform.OSName(), strings.Join(names, ", "))
 	return false
 }
