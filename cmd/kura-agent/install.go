@@ -361,7 +361,7 @@ func install(sys system, opt installOptions) int {
 		return fail(exitInstallFailed, "copie de l'exécutable : %v", err)
 	}
 	step("exécutable : %s", exe)
-	if gui == "" && setup.GUIName != "" {
+	if gui == "" && !sys.linux {
 		fmt.Fprintf(out, "Attention : %s absent à côté de l'exécutable : pas d'icône (préavis par simple attente, pas de relance d'Outlook).\n", setup.GUIName)
 	}
 
