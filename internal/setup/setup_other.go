@@ -2,38 +2,42 @@
 
 package setup
 
-// CheckAdmin : installation réservée à Windows.
-func CheckAdmin() error { return ErrUnsupported }
+import "github.com/E-C-G/kura-agent/internal/platform"
 
-// LocalAccountSID : Windows uniquement.
-func LocalAccountSID(string) (string, error) { return "", ErrUnsupported }
+func notImplemented() error { return platform.NotImplemented(platform.Install) }
 
-// AccountSID : Windows uniquement.
-func AccountSID(string) (string, error) { return "", ErrUnsupported }
+// CheckAdmin : installation pas encore écrite pour ce système.
+func CheckAdmin() error { return notImplemented() }
 
-// RemoveAccount : Windows uniquement.
-func RemoveAccount(string) error { return ErrUnsupported }
+// LocalAccountSID : pas encore écrit pour ce système.
+func LocalAccountSID(string) (string, error) { return "", notImplemented() }
 
-// SecureDataDir : Windows uniquement.
-func SecureDataDir(string) error { return ErrUnsupported }
+// AccountSID : pas encore écrit pour ce système.
+func AccountSID(string) (string, error) { return "", notImplemented() }
 
-// ProgramDir : Windows uniquement.
+// RemoveAccount : pas encore écrit pour ce système.
+func RemoveAccount(string) error { return notImplemented() }
+
+// SecureDataDir : pas encore écrit pour ce système.
+func SecureDataDir(string) error { return notImplemented() }
+
+// ProgramDir : pas encore écrit pour ce système.
 func ProgramDir() string { return "" }
 
 // GUIName est la version sans console de l'exécutable.
 const GUIName = "kura-agentw.exe"
 
-// InstallBinary : Windows uniquement.
-func InstallBinary(string) (string, string, error) { return "", "", ErrUnsupported }
+// InstallBinary : pas encore écrit pour ce système.
+func InstallBinary(string) (string, string, error) { return "", "", notImplemented() }
 
-// SetTrayAutostart : Windows uniquement.
-func SetTrayAutostart(string) error { return ErrUnsupported }
+// SetTrayAutostart : pas encore écrit pour ce système.
+func SetTrayAutostart(string) error { return notImplemented() }
 
-// RemoveTrayAutostart : Windows uniquement.
-func RemoveTrayAutostart() error { return ErrUnsupported }
+// RemoveTrayAutostart : pas encore écrit pour ce système.
+func RemoveTrayAutostart() error { return notImplemented() }
 
-// StopTrays : Windows uniquement.
+// StopTrays : pas encore écrit pour ce système.
 func StopTrays() int { return 0 }
 
-// RemoveProgramDir : Windows uniquement.
-func RemoveProgramDir(string) (bool, error) { return false, ErrUnsupported }
+// RemoveProgramDir : pas encore écrit pour ce système.
+func RemoveProgramDir(string) (bool, error) { return false, notImplemented() }

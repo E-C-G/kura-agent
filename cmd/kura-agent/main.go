@@ -82,6 +82,9 @@ func main() {
 		fmt.Fprint(os.Stderr, usage)
 		os.Exit(2)
 	}
+	if _, ok := commandNeeds[os.Args[1]]; ok && !checkPlatform(os.Args[1], os.Stderr) {
+		os.Exit(unsupportedCode(os.Args[1]))
+	}
 	var code int
 	switch os.Args[1] {
 	case "run":

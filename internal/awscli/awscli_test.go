@@ -73,7 +73,7 @@ func TestCounterCountsAcrossChunks(t *testing.T) {
 
 // Le filtrage reproduit celui de la CLI (motif joint au dossier source, fnmatch).
 func TestExcludeMatcher(t *testing.T) {
-	m := ExcludeMatcher("D:/Projets", []string{"*/.git/*", "*/.venv/*", "*.pyc", "*Thumbs.db", "build[0-9]/*"})
+	m := excludeMatcher("D:/Projets", []string{"*/.git/*", "*/.venv/*", "*.pyc", "*Thumbs.db", "build[0-9]/*"}, true)
 	for path, want := range map[string]bool{
 		`D:\Projets\outils\agent\.venv\lib64`:              true,
 		`D:\Projets\outils\agent\.venv\bin\\U0001d70bthon`: true,
@@ -94,10 +94,26 @@ func TestExcludeMatcher(t *testing.T) {
 
 func TestSkippedExcludedAreSeparated(t *testing.T) {
 	c := NewCounter(nil)
-	c.Excluded = ExcludeMatcher("D:/Projets", []string{"*/.venv/*"})
+	c.Excluded = excludeMatcher("D:/Projets", []string{"*/.venv/*"}, true)
 	c.Write([]byte("warning: Skipping file D:\\Projets\\p\\.venv\\lib64. File does not exist.\n" +
 		"warning: Skipping file D:\\Projets\\p\\notes. version 2.docx. File/Directory is not readable.\n"))
 	if got := c.Counts(); got.Skipped != 1 || got.SkippedExcluded != 1 {
 		t.Fatalf("comptes : %+v", got)
+	}
+}
+
+// Hors Windows : chemins Unix, casse respectée.
+func TestExcludeMatcherUnix(t *testing.T) {
+	m := excludeMatcher("/home/alice/Documents/", []string{"*/.git/*", "*.tmp"}, false)
+	for path, want := range map[string]bool{
+		"/home/alice/Documents/projet/.git/config": true,
+		"/home/alice/Documents/a.tmp":              true,
+		"/home/alice/Documents/projet/.GIT/config": false, // casse respectée
+		"/home/alice/Documents/A.TMP":              false,
+		"/home/bob/Documents/a.tmp":                false, // hors de la source
+	} {
+		if got := m(path); got != want {
+			t.Errorf("%s : %v, attendu %v", path, got, want)
+		}
 	}
 }

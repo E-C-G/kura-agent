@@ -14,8 +14,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Format, analyse statique pour Linux et Windows, tests avec détection de concurrence,
-  # puis binaire Windows conservé comme artefact.
+  # Format, analyse statique pour Linux, Windows et macOS, tests avec détection de
+  # concurrence, puis binaire Windows conservé comme artefact.
   linux:
     name: Linux · format, vet, tests, build Windows
     runs-on: ubuntu-latest
@@ -55,6 +55,14 @@ jobs:
 
       - name: Vet (Windows)
         run: GOOS=windows GOARCH=amd64 go vet ./...
+
+      # Linux et macOS : fonctions système pas encore écrites (internal/platform), mais
+      # le code commun et les réponses « non pris en charge » doivent compiler.
+      - name: Vet et build (macOS, Linux)
+        run: |
+          GOOS=darwin GOARCH=arm64 go vet ./...
+          GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build -o /dev/null ./cmd/kura-agent
+          GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o /dev/null ./cmd/kura-agent
 
       - name: Tests
         run: go test -race -count=1 ./...

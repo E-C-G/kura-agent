@@ -1,12 +1,13 @@
 // Package setup réunit les opérations système de `kura-agent install` et
 // `uninstall` : compte de service, droits, ACL, copie des fichiers.
-// Tout est propre à Windows ; ailleurs, chaque fonction renvoie ErrUnsupported.
+// Tout est propre à Windows ; ailleurs, chaque fonction renvoie une
+// platform.NotImplementedError (fonction platform.Install).
 package setup
 
-import "errors"
+import "github.com/E-C-G/kura-agent/internal/platform"
 
-// ErrUnsupported : opération réservée à Windows.
-var ErrUnsupported = errors.New("installation : Windows uniquement")
+// ErrUnsupported : opération pas encore écrite pour ce système (errors.Is).
+var ErrUnsupported = platform.ErrNotImplemented
 
 // LegacyAccount est le compte de service des versions 0.3.0 à 0.4.1. La tâche tourne
 // désormais sous SYSTEM ; install et uninstall suppriment ce compte s'il existe.

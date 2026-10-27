@@ -7,6 +7,7 @@ package awsinstall
 import (
 	"errors"
 	"fmt"
+	"github.com/E-C-G/kura-agent/internal/platform"
 	"io"
 	"net/http"
 	"os"
@@ -27,8 +28,9 @@ const maxDownload = 300 << 20
 // Signers : organisations (champ O= du certificat) acceptées comme signataire du MSI.
 var Signers = []string{"Amazon.com Services LLC", "Amazon Web Services, Inc.", "Amazon.com, Inc."}
 
-// ErrUnsupported : vérification de signature et msiexec n'existent que sous Windows.
-var ErrUnsupported = errors.New("installation de la CLI AWS : Windows uniquement")
+// ErrUnsupported : installation automatique pas encore écrite pour ce système
+// (errors.Is ; le détail est une platform.NotImplementedError).
+var ErrUnsupported = platform.ErrNotImplemented
 
 // Installer regroupe les opérations, remplaçables dans les tests.
 type Installer struct {
