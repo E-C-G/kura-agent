@@ -53,9 +53,20 @@ planification, coffre des secrets, installation de la CLI AWS).
 
 ### Installer sous Linux (Ubuntu 24.04)
 
+Le paquet Debian de la release (`kura-agent_<version>_amd64.deb`, ou `arm64`) installe
+l'exécutable dans `/usr/bin` et crée le compte de service ; il ne configure rien :
+
 ```bash
-sudo kura-agent install --config config.yaml        # ou --package <fichier>.kura
+sudo apt install ./kura-agent_0.7.0_amd64.deb
+sudo kura-agent install --package <fichier>.kura   # ou --config config.yaml
 ```
+
+Le paquet dépend de `systemd` (254 ou plus récent, pour `ImportCredential`), `gpgv` et
+`ca-certificates` ; exemple de configuration dans `/usr/share/doc/kura-agent/examples/config.yaml`.
+`apt remove` retire aussi le timer et le service (`kura-agent uninstall`) ; `apt purge` efface en
+plus configuration, état, journaux et secrets `kura.*` (le compte `kura-agent` reste). Construction :
+`make deb` (ou `scripts/build-deb.sh VERSION ARCH BINAIRE DOSSIER`) ; la CI installe le paquet sur
+un vrai Ubuntu, le met en place (compte, timer) puis le purge à chaque commit.
 
 `install` (rejouable, comme sous Windows) :
 

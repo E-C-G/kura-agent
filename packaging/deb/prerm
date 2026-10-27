@@ -1,0 +1,14 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+remove|deconfigure)
+	# Retrait du paquet : le timer et le service ne doivent pas survivre à
+	# l'exécutable. Configuration, secrets et journaux restent (purge : postrm).
+	if [ -f /etc/systemd/system/kura-sync.timer ]; then
+		/usr/bin/kura-agent uninstall || true
+	fi
+	;;
+esac
+
+exit 0

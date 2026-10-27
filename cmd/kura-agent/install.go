@@ -441,7 +441,7 @@ func install(sys system, opt installOptions) int {
 Installation terminée.
 Suite conseillée :
   1. sudo kura-agent run --dry-run           simulation, rien n'est copié ni supprimé
-  2. sudo systemctl start %s       une vraie exécution, comme planifiée, puis kura-agent status
+  2. sudo systemctl start --no-block %s   une vraie exécution, comme planifiée, puis kura-agent status
   3. systemctl list-timers %s      prochain passage ; journal : journalctl -u %s
 `, systemd.ServiceName, systemd.TimerName, systemd.ServiceName)
 		return exitInstallOK

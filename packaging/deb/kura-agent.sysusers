@@ -1,0 +1,2 @@
+# Compte du service kura-sync : système, sans mot de passe ni shell.
+u kura-agent - "Kura, sauvegarde vers Wasabi" /var/lib/kura -
