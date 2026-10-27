@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/E-C-G/kura-agent/internal/platform"
+	"github.com/E-C-G/kura-agent/pkg/config"
 )
 
 func TestCheckMissing(t *testing.T) {
@@ -41,5 +42,24 @@ func TestCommandsOnThisSystem(t *testing.T) {
 		if len(commandNeeds[cmd]) != 0 {
 			t.Errorf("%s ne doit dépendre d'aucune fonction système", cmd)
 		}
+	}
+}
+
+func TestConfigMissing(t *testing.T) {
+	cfg := &config.Config{PreTasks: []config.PreTask{{Type: "close_process", Process: "outlook.exe"}},
+		PostTasks: []config.PostTask{{Type: "start_process", Process: "outlook.exe"}}}
+	none := func(platform.Feature) bool { return false }
+	err := configMissing(cfg, none, false)
+	if err == nil || !strings.Contains(err.Error(), "pre_tasks") || !strings.Contains(err.Error(), "post_tasks") {
+		t.Fatalf("%v", err)
+	}
+	if err := configMissing(cfg, none, true); err != nil {
+		t.Fatalf("mode développement : %v", err)
+	}
+	if err := configMissing(&config.Config{}, none, false); err != nil {
+		t.Fatalf("sans pré-tâches : %v", err)
+	}
+	if err := configMissing(cfg, func(platform.Feature) bool { return true }, false); err != nil {
+		t.Fatalf("tout pris en charge : %v", err)
 	}
 }

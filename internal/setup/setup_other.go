@@ -2,13 +2,6 @@
 
 package setup
 
-import "github.com/E-C-G/kura-agent/internal/platform"
-
-func notImplemented() error { return platform.NotImplemented(platform.Install) }
-
-// CheckAdmin : installation pas encore écrite pour ce système.
-func CheckAdmin() error { return notImplemented() }
-
 // LocalAccountSID : pas encore écrit pour ce système.
 func LocalAccountSID(string) (string, error) { return "", notImplemented() }
 

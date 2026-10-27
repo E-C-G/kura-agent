@@ -1,9 +1,12 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"strings"
+
+	"github.com/E-C-G/kura-agent/pkg/config"
 
 	"github.com/E-C-G/kura-agent/internal/platform"
 	"github.com/E-C-G/kura-agent/internal/runner"
@@ -12,7 +15,7 @@ import (
 // commandNeeds : fonctions dépendantes du système dont chaque commande a besoin.
 // status, version et help n'en ont besoin d'aucune.
 var commandNeeds = map[string][]platform.Feature{
-	"run":         {platform.Vault, platform.AppControl},
+	"run":         {platform.Vault}, // pré- et post-tâches : platformConfig
 	"validate":    {platform.Vault},
 	"credentials": {platform.Vault},
 	"import":      {platform.Vault},
@@ -51,8 +54,28 @@ func checkMissing(cmd string, missing []platform.Feature, dev bool, stderr io.Wr
 			cmd, platform.OSName(), strings.Join(names, ", "))
 		return true
 	}
-	fmt.Fprintf(stderr, "kura-agent %s : non pris en charge sous %s dans cette version (manque : %s).\n"+
-		"Windows uniquement pour l'instant.\n",
+	fmt.Fprintf(stderr, "kura-agent %s : non pris en charge sous %s dans cette version (manque : %s).\n",
 		cmd, platform.OSName(), strings.Join(names, ", "))
 	return false
+}
+
+// platformConfig refuse une configuration qui demande une fonction absente de ce
+// système : pré-tâches (fermeture d'applications) et post-tâches (relance par
+// l'icône). Sans elles, la sauvegarde tourne.
+func platformConfig(cfg *config.Config) error {
+	return configMissing(cfg, platform.Supported, platform.DevMode())
+}
+
+func configMissing(cfg *config.Config, supported func(platform.Feature) bool, dev bool) error {
+	if dev {
+		return nil
+	}
+	var errs []error
+	if len(cfg.PreTasks) > 0 && !supported(platform.AppControl) {
+		errs = append(errs, fmt.Errorf("pre_tasks : %w", platform.NotImplemented(platform.AppControl)))
+	}
+	if len(cfg.PostTasks) > 0 && !supported(platform.Tray) {
+		errs = append(errs, fmt.Errorf("post_tasks : %w", platform.NotImplemented(platform.Tray)))
+	}
+	return errors.Join(errs...)
 }

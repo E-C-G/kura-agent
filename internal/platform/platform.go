@@ -7,7 +7,7 @@
 //
 //	Fonction                      Paquets                         Windows   Linux, macOS
 //	planification                 schedtask, systemd              oui       Linux (systemd) ; macOS à venir
-//	coffre des secrets            creds                           oui       non (à venir)
+//	coffre des secrets            creds                           oui       Linux (systemd-creds) ; macOS à venir
 //	installation                  setup, cmd/kura-agent install   oui       non (à venir)
 //	CLI AWS automatique           awsinstall                      oui       non (à venir)
 //	icône et canal vers l'icône   tray, ipc                       oui       non (à venir)

@@ -9,6 +9,8 @@ import "github.com/E-C-G/kura-agent/internal/platform"
 // ErrUnsupported : opération pas encore écrite pour ce système (errors.Is).
 var ErrUnsupported = platform.ErrNotImplemented
 
+func notImplemented() error { return platform.NotImplemented(platform.Install) }
+
 // LegacyAccount est le compte de service des versions 0.3.0 à 0.4.1. La tâche tourne
 // désormais sous SYSTEM ; install et uninstall suppriment ce compte s'il existe.
 const LegacyAccount = "svc-kura"
