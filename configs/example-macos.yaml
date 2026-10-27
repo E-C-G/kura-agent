@@ -1,0 +1,41 @@
+# Exemple de configuration Kura Agent sous macOS (données fictives).
+# Cas typique : un Mac personnel dont on sauvegarde les documents de alice vers un
+# bucket Wasabi.
+#
+# Emplacement en production : /Library/Application Support/Kura/config.yaml (installé
+# par sudo kura-agent install). Aucun secret dans ce fichier. Avant la première
+# sauvegarde, accorder l'accès complet au disque à /usr/local/bin/kura-agent.
+
+version: 1
+
+profile:
+  name: acme-mac01
+  aws_credentials: credential:wasabi   # clé du poste, rangée par kura-agent credentials set-aws ou install --package
+  endpoint: https://s3.eu-central-1.wasabisys.com
+  region: eu-central-1
+  bucket: acme-mac01
+  # aws_cli vide : CLI AWS officielle (/usr/local/bin/aws), installée par install si absente
+
+schedule:
+  type: daily
+  time: "22:30"
+  run_if_missed: true            # rattrapage au démarrage si le Mac était éteint
+  max_duration: 6h
+
+jobs:
+  - id: documents
+    source: /Users/alice/Documents
+    destination: Users/alice/Documents
+    delete: true
+    exclude:
+      - "*/.DS_Store"
+      - "*/Library/Caches/*"
+
+notify:
+  report:
+    type: healthchecks
+    url: credential:hc-url
+
+logging:
+  level: info
+  retention_days: 90
