@@ -202,3 +202,17 @@ func TestParseSignatureOutput(t *testing.T) {
 		t.Fatal("réponse vide acceptée")
 	}
 }
+
+func TestIsSnapPath(t *testing.T) {
+	eval := func(p string) (string, error) {
+		return map[string]string{
+			"/usr/local/bin/aws": "/usr/local/aws-cli/v2/2.35.21/dist/aws",
+			"/bin/aws-snap-lien": "/usr/bin/snap",
+		}[p], nil
+	}
+	for p, want := range map[string]bool{"/snap/bin/aws": true, "/bin/aws-snap-lien": true, "/usr/local/bin/aws": false} {
+		if got := isSnapPath(p, eval); got != want {
+			t.Errorf("%s : %v", p, got)
+		}
+	}
+}

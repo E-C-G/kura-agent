@@ -1,5 +1,6 @@
 // Package systemd décrit la planification de kura-agent sous Linux : un service
-// kura-sync.service (une exécution de « kura-agent run ») déclenché par un timer
+// kura-sync.service (une exécution de « kura-agent run », déroulé aussi dans le
+// journal) déclenché par un timer
 // kura-sync.timer, générés depuis la section schedule de la configuration, puis
 // les installe ou les retire (systemctl).
 //
@@ -158,7 +159,8 @@ After=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=%s run --quiet --scheduled
+# Sans --quiet : le déroulé va aussi dans le journal (journalctl -u kura-sync).
+ExecStart=%s run --scheduled
 # Code 1 : avertissement (fichiers ignorés), pas un échec du service.
 SuccessExitStatus=1
 TimeoutStartSec=%d

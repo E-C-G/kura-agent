@@ -7,6 +7,8 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -23,17 +25,57 @@ func System(out io.Writer, tempDir string) Installer {
 	}
 }
 
-// Find cherche aws dans le PATH, puis à l'emplacement d'installation par défaut.
+// Find cherche aws dans le PATH, puis à l'emplacement d'installation par défaut. Sous
+// Linux, la CLI du paquet snap est écartée : snap-confine exige des droits que le
+// service kura-sync n'a pas (il ne garde que la lecture du disque), elle échoue donc
+// sous le service alors qu'elle marche avec sudo.
 func Find() (string, error) {
-	if p, err := exec.LookPath("aws"); err == nil {
-		return p, nil
+	snap := ""
+	if runtime.GOOS != "linux" {
+		if p, err := exec.LookPath("aws"); err == nil {
+			return p, nil
+		}
+	} else {
+		for _, dir := range filepath.SplitList(os.Getenv("PATH")) {
+			if dir == "" {
+				continue
+			}
+			p, err := exec.LookPath(filepath.Join(dir, "aws"))
+			if err != nil {
+				continue
+			}
+			if IsSnap(p) {
+				snap = p
+				continue
+			}
+			return p, nil
+		}
 	}
 	if p := DefaultPath(); p != "" {
 		if st, err := os.Stat(p); err == nil && st.Mode().IsRegular() {
 			return p, nil
 		}
 	}
+	if snap != "" {
+		return "", fmt.Errorf("seule la CLI AWS du paquet snap est présente (%s), inutilisable sous le service : sudo kura-agent install installe la version officielle", snap)
+	}
 	return "", fmt.Errorf("aws introuvable (ni dans le PATH, ni en %s)", orUnknown(DefaultPath()))
+}
+
+// IsSnap : CLI fournie par un paquet snap (Linux).
+func IsSnap(p string) bool {
+	if runtime.GOOS != "linux" {
+		return false
+	}
+	return isSnapPath(p, filepath.EvalSymlinks)
+}
+
+func isSnapPath(p string, eval func(string) (string, error)) bool {
+	if strings.HasPrefix(p, "/snap/") {
+		return true
+	}
+	r, err := eval(p)
+	return err == nil && (strings.HasPrefix(r, "/snap/") || strings.HasSuffix(r, "/usr/bin/snap"))
 }
 
 // Version renvoie la première ligne de `aws --version` (aws-cli/2.x.y …).

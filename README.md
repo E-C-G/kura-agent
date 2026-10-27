@@ -79,7 +79,7 @@ Ensuite : `sudo systemctl start kura-sync.service` (une vraie exécution, comme 
 `/var/log/kura`, `/etc/kura` et `/var/cache/kura-install`. Le compte `kura-agent` est gardé.
 
 Sous Linux, la planification est un timer systemd, `kura-sync.timer`, qui lance le service
-`kura-sync.service` (`kura-agent run --quiet --scheduled`). Les deux unités sont générées depuis
+`kura-sync.service` (`kura-agent run --scheduled`, déroulé aussi dans `journalctl -u kura-sync`). Les deux unités sont générées depuis
 `schedule` avec la même règle que la tâche Windows, vérifiée en CI contre `systemd-analyze` :
 `daily` et `weekly` à l'heure dite les jours choisis ; `hourly` toutes les heures à la minute dite,
 par séries de 24 h qui démarrent à l'heure dite les jours choisis. `run_if_missed` devient
@@ -102,6 +102,9 @@ ou téléchargés chez AWS. La signature est vérifiée par `gpgv` avec la clé 
 intégrée à l'agent, dont l'empreinte est contrôlée (`FB5D B77F D5C1 18B8 0511 ADA8 A631 0ACC 4672
 475C`, valable jusqu'au 1er juillet 2027 : une clé prolongée ou nouvelle demande une mise à jour de
 kura-agent) ; puis `aws/install` installe dans `/usr/local/aws-cli`, lien `/usr/local/bin/aws`.
+La CLI du paquet snap (`/snap/bin/aws`) est écartée : `snap-confine` exige des droits que le
+service n'a pas (il ne garde que la lecture du disque), elle échoue sous le service alors qu'elle
+marche avec `sudo`. `install` installe alors la version officielle, qui passe avant dans le PATH.
 
 `KURA_DEV=1` autorise, pour le développement uniquement, des remplaçants non sûrs (secrets non
 chiffrés, processus lus dans `/proc`). Emplacements prévus : `/var/lib/kura`, `/etc/kura` et

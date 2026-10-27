@@ -497,7 +497,7 @@ func TestInstallLinux(t *testing.T) {
 	if f.awsTemp != sys.awsWorkDir {
 		t.Fatalf("dossier de travail de la CLI AWS : %s", f.awsTemp)
 	}
-	for _, w := range []string{"ExecStart=/usr/local/bin/kura-agent run --quiet --scheduled", "User=kura-agent", "ImportCredential=kura.*"} {
+	for _, w := range []string{"ExecStart=/usr/local/bin/kura-agent run --scheduled", "User=kura-agent", "ImportCredential=kura.*"} {
 		if !strings.Contains(f.units.Service, w) {
 			t.Errorf("service sans %q", w)
 		}
