@@ -26,12 +26,52 @@ jobs:
           go-version-file: go.mod
           cache-dependency-path: go.mod
       - run: go mod tidy && go mod verify
-      - run: go vet ./... && GOOS=windows go vet ./...
+      - run: go vet ./... && GOOS=windows go vet ./... && GOOS=darwin go vet ./...
       - run: go test -race -count=1 ./...
+
+  # Linux : paquets Debian (Ubuntu) amd64 et arm64 ; amd64 installé et purgé sur le
+  # runner avant publication.
+  linux:
+    name: Paquets deb
+    needs: test
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.mod
+      - name: Build et paquets
+        run: |
+          v="${TAG#v}"
+          commit="$(git rev-parse --short HEAD)"
+          for arch in amd64 arm64; do
+            GOOS=linux GOARCH=$arch CGO_ENABLED=0 go build -trimpath \
+              -ldflags "-s -w -X main.version=$v -X main.commit=$commit -X main.date=$(date -u +%Y-%m-%d)" \
+              -o "build/$arch/kura-agent" ./cmd/kura-agent
+            sh scripts/build-deb.sh "$v" "$arch" "build/$arch/kura-agent" dist
+          done
+          ls -l dist
+      - name: Installation et purge (amd64)
+        run: |
+          sudo dpkg -i dist/kura-agent_*_amd64.deb
+          id kura-agent
+          out="$(kura-agent version)" && echo "$out"
+          [[ "$out" == *"${TAG#v}"* ]] || { echo "::error::version absente du binaire"; exit 1; }
+          sudo dpkg --purge kura-agent
+      - uses: actions/upload-artifact@v7
+        with:
+          name: deb
+          path: dist/*.deb
+          retention-days: 1
 
   build:
     name: Build, signature, publication
-    needs: test
+    needs: [test, linux]
     # Runner Windows : signtool y est disponible pour la signature Authenticode.
     runs-on: windows-latest
     permissions:
@@ -112,6 +152,11 @@ jobs:
           echo "$out"
           [[ "$out" == *"${{ steps.v.outputs.version }}"* ]] || { echo "::error::version absente du binaire"; exit 1; }
 
+      - uses: actions/download-artifact@v7
+        with:
+          name: deb
+          path: dist
+
       - name: Archive et sommes de contrôle
         shell: bash
         run: |
@@ -121,7 +166,7 @@ jobs:
           cp configs/example.yaml "pkg/$name/config.example.yaml"
           (cd pkg && 7z a -tzip -bso0 "../dist/$name.zip" "$name")
           cp dist/kura-agent.exe "dist/kura-agent_${{ steps.v.outputs.version }}_windows_amd64.exe"
-          (cd dist && sha256sum "$name.zip" "kura-agent_${{ steps.v.outputs.version }}_windows_amd64.exe" > SHA256SUMS)
+          (cd dist && sha256sum "$name.zip" "kura-agent_${{ steps.v.outputs.version }}_windows_amd64.exe" kura-agent_*.deb > SHA256SUMS)
           cat dist/SHA256SUMS
 
       - name: Publication
@@ -145,4 +190,5 @@ jobs:
           gh release create "$TAG" "${flags[@]}" \
             "dist/kura-agent_${v}_windows_amd64.zip" \
             "dist/kura-agent_${v}_windows_amd64.exe" \
+            dist/kura-agent_*.deb \
             dist/SHA256SUMS

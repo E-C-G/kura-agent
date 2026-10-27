@@ -1,0 +1,40 @@
+# Exemple de configuration Kura Agent sous Linux (données fictives).
+# Cas typique : un ordinateur personnel sous Ubuntu dont on sauvegarde les
+# documents de alice vers un bucket Wasabi.
+#
+# Emplacement en production : /etc/kura/config.yaml (installé par kura-agent install).
+# Aucun secret dans ce fichier.
+
+version: 1
+
+profile:
+  name: acme-portable01
+  aws_credentials: credential:wasabi   # clé du poste, rangée par kura-agent import ou install --package
+  endpoint: https://s3.eu-central-1.wasabisys.com
+  region: eu-central-1
+  bucket: acme-portable01
+  # aws_cli vide : CLI AWS officielle (/usr/local/bin/aws), installée par install si absente
+
+schedule:
+  type: daily
+  time: "22:30"
+  run_if_missed: true            # rattrapage au démarrage si l'ordinateur était éteint
+  max_duration: 6h
+
+jobs:
+  - id: documents
+    source: /home/alice/Documents
+    destination: home/alice/Documents
+    delete: true
+    exclude:
+      - "*/.cache/*"
+      - "*/node_modules/*"
+
+notify:
+  report:
+    type: healthchecks
+    url: credential:hc-url
+
+logging:
+  level: info
+  retention_days: 90

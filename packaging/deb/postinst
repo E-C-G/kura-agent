@@ -1,0 +1,25 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+configure)
+	# Compte du service (aussi créé par « kura-agent install » s'il manque).
+	systemd-sysusers kura-agent.conf
+
+	# Une configuration déjà installée : systemd relit les unités (chemin de
+	# l'exécutable inchangé, /usr/bin/kura-agent).
+	if [ -f /etc/systemd/system/kura-sync.timer ]; then
+		systemctl daemon-reload || true
+		if ! grep -q '^ExecStart=/usr/bin/kura-agent ' /etc/systemd/system/kura-sync.service 2>/dev/null; then
+			echo "kura-agent : le service utilise encore un autre exécutable ; relancer « sudo kura-agent install » pour passer à /usr/bin/kura-agent."
+		fi
+	else
+		echo "kura-agent installé. Configurer ce poste : sudo kura-agent install --package <fichier>.kura (ou --config <fichier>)."
+	fi
+	if [ -e /usr/local/bin/kura-agent ]; then
+		echo "Attention : /usr/local/bin/kura-agent (copie manuelle) passe avant /usr/bin/kura-agent dans le PATH : le supprimer."
+	fi
+	;;
+esac
+
+exit 0

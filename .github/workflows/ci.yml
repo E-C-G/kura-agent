@@ -17,7 +17,7 @@ jobs:
   # Format, analyse statique pour Linux, Windows et macOS, tests avec détection de
   # concurrence, puis binaire Windows conservé comme artefact.
   linux:
-    name: Linux · format, vet, tests, build Windows
+    name: Linux · format, vet, tests, build Windows et deb
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -76,6 +76,59 @@ jobs:
           GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath \
             -ldflags "-s -w -H=windowsgui -X main.version=${VERSION} -X main.commit=${GITHUB_SHA::7} -X main.date=$(date -u +%Y-%m-%d)" \
             -o dist/kura-agentw.exe ./cmd/kura-agent
+
+      # Paquet Debian (Ubuntu) : construit, installé sur le runner, mis en place
+      # (compte, timer) puis purgé ; artefact téléchargeable pour les essais.
+      - name: Build Linux et paquet deb
+        run: |
+          VERSION="0.0.0-dev+${GITHUB_SHA::7}"
+          GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath \
+            -ldflags "-s -w -X main.version=${VERSION} -X main.commit=${GITHUB_SHA::7} -X main.date=$(date -u +%Y-%m-%d)" \
+            -o dist/linux/kura-agent ./cmd/kura-agent
+          sh scripts/build-deb.sh "$VERSION" amd64 dist/linux/kura-agent dist/linux
+          dpkg-deb --info dist/linux/kura-agent_*_amd64.deb
+          dpkg-deb --contents dist/linux/kura-agent_*_amd64.deb
+
+      - name: Paquet deb de bout en bout
+        run: |
+          set -x
+          sudo dpkg -i dist/linux/kura-agent_*_amd64.deb
+          id kura-agent
+          test "$(command -v kura-agent)" = /usr/bin/kura-agent
+          mkdir -p "$RUNNER_TEMP/source" && echo essai > "$RUNNER_TEMP/source/a.txt"
+          cat > "$RUNNER_TEMP/kura.yaml" <<EOF
+          version: 1
+          profile:
+            name: ci
+            endpoint: https://s3.eu-central-1.wasabisys.com
+            region: eu-central-1
+            bucket: acme-ci
+          schedule:
+            type: daily
+            time: "22:30"
+            run_if_missed: true
+          jobs:
+            - id: data
+              source: $RUNNER_TEMP/source
+              destination: DATA
+          EOF
+          sudo kura-agent install --config "$RUNNER_TEMP/kura.yaml" --skip-validate
+          systemctl list-timers --all kura-sync.timer | grep kura-sync.timer
+          systemctl cat kura-sync.service | grep -x 'ExecStart=/usr/bin/kura-agent run --scheduled'
+          systemctl is-enabled kura-sync.timer
+          test -f /etc/kura/config.yaml
+          sudo dpkg --purge kura-agent
+          test ! -e /etc/systemd/system/kura-sync.timer
+          test ! -e /etc/kura && test ! -e /var/lib/kura
+          test ! -e /usr/bin/kura-agent
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: kura-agent-linux-amd64-${{ github.sha }}
+          path: |
+            dist/linux/kura-agent
+            dist/linux/kura-agent_*_amd64.deb
+          retention-days: 14
 
       - uses: actions/upload-artifact@v7
         with:
