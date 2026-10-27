@@ -221,7 +221,11 @@ remet un kit (exécutables, MSI de la CLI AWS, paquet `.kura` avec configuration
    ```
    `install` est rejouable : relancé avec un nouvel exécutable ou une configuration modifiée, il met à
    jour l'installation (l'ancienne configuration est gardée en `config.yaml.<date>.bak`). Il :
-   - protège `C:\ProgramData\Kura` (Utilisateurs en lecture seule, coffre réservé aux administrateurs) ;
+   - protège `C:\ProgramData\Kura` (Utilisateurs en lecture seule, coffre réservé aux administrateurs,
+     propriétaire : groupe Administrateurs). Un dossier créé à l'avance par un compte non
+     administrateur (qui en resterait propriétaire et pourrait se rendre l'accès) ou une jonction
+     à sa place sont refusés, avec la commande pour les supprimer ; même contrôle pour
+     `credentials\` et `awscli\` ;
    - copie la configuration dans `C:\ProgramData\Kura\config.yaml` et l'exécutable dans
      `C:\Program Files\Kura\` ;
    - demande les secrets référencés par `credential:` qui manquent au coffre (saisie masquée) ;

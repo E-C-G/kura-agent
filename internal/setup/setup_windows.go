@@ -17,6 +17,7 @@ import (
 	"golang.org/x/sys/windows/registry"
 
 	"github.com/E-C-G/kura-agent/internal/procs"
+	"github.com/E-C-G/kura-agent/internal/secdir"
 )
 
 var (
@@ -183,12 +184,11 @@ func ntErr(status uintptr) error {
 	return syscall.Errno(r)
 }
 
-// SecureDataDir crée le dossier de données et lui applique DataDirSDDL.
+// SecureDataDir crée le dossier de données et lui applique DataDirSDDL, après avoir
+// refusé une jonction ou un dossier créé à l'avance par un compte non administrateur
+// (internal/secdir) ; le dossier est ensuite au groupe Administrateurs.
 func SecureDataDir(dir string) error {
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
-	}
-	return applySDDL(dir, DataDirSDDL)
+	return secdir.Secure(dir, DataDirSDDL)
 }
 
 func applySDDL(path, sddl string) error {
