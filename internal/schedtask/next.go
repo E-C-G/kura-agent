@@ -61,3 +61,21 @@ func Next(s config.Schedule, after time.Time) time.Time {
 
 var weekdayNum = map[string]time.Weekday{"mon": time.Monday, "tue": time.Tuesday, "wed": time.Wednesday,
 	"thu": time.Thursday, "fri": time.Friday, "sat": time.Saturday, "sun": time.Sunday}
+
+// Prev renvoie le dernier déclenchement de la planification au plus tard à at, ou
+// l'instant zéro s'il n'y en a pas dans les 8 jours qui précèdent.
+func Prev(s config.Schedule, at time.Time) time.Time {
+	var last time.Time
+	for c := Next(s, at.Add(-8*24*time.Hour)); !c.IsZero() && !c.After(at); c = Next(s, c) {
+		last = c
+	}
+	return last
+}
+
+// Missed indique si un déclenchement prévu au plus tard à now n'a pas eu lieu :
+// postérieur au dernier lancement (lastStart) et à la mise en place de la
+// planification (since). Sert au rattrapage au démarrage sous macOS.
+func Missed(s config.Schedule, lastStart, since, now time.Time) bool {
+	p := Prev(s, now)
+	return !p.IsZero() && p.After(lastStart) && p.After(since)
+}

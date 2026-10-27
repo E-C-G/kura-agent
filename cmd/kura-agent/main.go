@@ -23,6 +23,7 @@ import (
 	"github.com/E-C-G/kura-agent/internal/creds"
 	"github.com/E-C-G/kura-agent/internal/execx"
 	"github.com/E-C-G/kura-agent/internal/ipc"
+	"github.com/E-C-G/kura-agent/internal/launchd"
 	"github.com/E-C-G/kura-agent/internal/lock"
 	"github.com/E-C-G/kura-agent/internal/paths"
 	"github.com/E-C-G/kura-agent/internal/platform"
@@ -44,7 +45,7 @@ var (
 const usage = `kura-agent — sauvegarde planifiée vers Wasabi
 
 Usage :
-  kura-agent run      [--config FICHIER] [--job ID]... [--dry-run] [--force-deletes --job ID] [--quiet] [--scheduled]
+  kura-agent run      [--config FICHIER] [--job ID]... [--dry-run] [--force-deletes --job ID] [--quiet] [--scheduled [--catch-up]]
   kura-agent validate [--config FICHIER] [--offline]
   kura-agent status   [--json]
   kura-agent credentials set NOM [--from-env VARIABLE]
@@ -138,7 +139,12 @@ func cmdRun(args []string) int {
 	force := fs.Bool("force-deletes", false, "lever les plafonds de suppressions du garde-fou (avec --job)")
 	quiet := fs.Bool("quiet", false, "ne pas recopier le journal à l'écran")
 	scheduled := fs.Bool("scheduled", false, "lancement par la tâche planifiée : respecte la suspension (kura-agent suspend)")
+	catchUp := fs.Bool("catch-up", false, "avec --scheduled, lancement au démarrage (macOS) : ne sauvegarde que si un passage prévu a été manqué")
 	if err := fs.Parse(args); err != nil {
+		return runner.ExitConfig
+	}
+	if *catchUp && !*scheduled {
+		fmt.Fprintln(os.Stderr, "--catch-up s'emploie avec --scheduled")
 		return runner.ExitConfig
 	}
 	if *scheduled {
@@ -146,6 +152,15 @@ func cmdRun(args []string) int {
 			fmt.Printf("planification suspendue jusqu'au %s : rien à faire\n", sp.Until.Local().Format("02/01/2006 15:04"))
 			return runner.ExitOK
 		}
+	}
+	if *catchUp {
+		missed, why := catchUpNeeded(*cfgPath, launchd.System().InstalledAt(), time.Now())
+		fmt.Println(why)
+		if !missed {
+			return runner.ExitOK
+		}
+		// Au démarrage, le réseau n'est pas toujours prêt.
+		time.Sleep(catchUpDelay)
 	}
 
 	if *force && len(jobs) != 1 {
