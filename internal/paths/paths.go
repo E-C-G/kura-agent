@@ -33,8 +33,10 @@ func layoutFor(goos, override, programData string) layout {
 		d := filepath.Join(programData, "Kura")
 		return layout{d, d, filepath.Join(d, "logs"), filepath.Join(d, "credentials")}
 	case "darwin":
+		// Chemins Unix, écrits tels quels (filepath.Join les écrirait à la façon du
+		// système de compilation).
 		d := "/Library/Application Support/Kura"
-		return layout{d, d, "/Library/Logs/Kura", filepath.Join(d, "credentials")}
+		return layout{d, d, "/Library/Logs/Kura", d + "/credentials"}
 	default:
 		// Secrets chiffrés par systemd-creds, à l'emplacement standard de systemd.
 		return layout{"/var/lib/kura", "/etc/kura", "/var/log/kura", "/etc/credstore.encrypted"}
