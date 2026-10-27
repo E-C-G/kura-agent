@@ -109,6 +109,13 @@ func WriteAtomic(path string, v any) error {
 		tmp.Close()
 		return err
 	}
+	// Lisible par tous (CreateTemp crée en 0600) : l'icône et kura-agent status
+	// tournent sous le compte de l'utilisateur ; aucun secret ici. Sous Windows,
+	// seuls les droits du dossier comptent.
+	if err := tmp.Chmod(0o644); err != nil {
+		tmp.Close()
+		return err
+	}
 	if err := tmp.Sync(); err != nil {
 		tmp.Close()
 		return err
@@ -167,6 +174,10 @@ func AppendHistory(path string, s Status) error {
 	}
 	defer os.Remove(tmp.Name())
 	if _, err := tmp.Write(append(bytes.Join(lines, []byte("\n")), '\n')); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(0o644); err != nil { // lisible par tous, comme status.json
 		tmp.Close()
 		return err
 	}
