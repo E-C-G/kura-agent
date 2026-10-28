@@ -309,12 +309,23 @@ func execute(ctx context.Context, stdout, stderr io.Writer, d restoreDeps, cfg *
 	logPath := ""
 	var logw io.Writer = io.Discard
 	if err := os.MkdirAll(d.logsDir, 0o755); err == nil {
-		logPath = filepath.Join(d.logsDir, "restore-"+started.Format("20060102-150405")+".log")
-		if f, err := os.OpenFile(logPath, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o644); err == nil {
-			defer f.Close()
-			logw = f
-		} else {
-			logPath = ""
+		// Un journal par restauration, même pour deux restaurations de la même seconde
+		// (deux fenêtres de l'icône).
+		for i := 1; i < 100; i++ {
+			name := "restore-" + started.Format("20060102-150405")
+			if i > 1 {
+				name += fmt.Sprintf("-%d", i)
+			}
+			p := filepath.Join(d.logsDir, name+".log")
+			f, err := os.OpenFile(p, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+			if errors.Is(err, fs.ErrExist) {
+				continue
+			}
+			if err == nil {
+				defer f.Close()
+				logw, logPath = f, p
+			}
+			break
 		}
 	}
 	fmt.Fprintf(logw, "kura-agent %s restore — %s\n", d.version, started.Local().Format("02/01/2006 15:04:05"))

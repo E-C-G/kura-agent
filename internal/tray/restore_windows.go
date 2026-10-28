@@ -239,6 +239,7 @@ type restoreWin struct {
 	listener *ipc.Listener
 	peer     *ipc.Peer
 	chunks   map[int][]ipc.RestoreFile
+	listSeq  int // numéro de la liste attendue : les lots d'une liste abandonnée sont écartés
 	ctx      context.Context
 	cancel   context.CancelFunc
 }
@@ -631,12 +632,15 @@ func (w *restoreWin) handle(hwnd uintptr, m uint32, wParam, lParam uintptr) (uin
 		w.mu.Lock()
 		p, l := w.peer, w.listener
 		w.mu.Unlock()
-		if p != nil {
-			p.Close()
-		}
-		if l != nil {
-			_ = l.Close()
-		}
+		// Hors du thread de l'interface : fermer le canal peut attendre la tâche.
+		go func() {
+			if p != nil {
+				p.Close()
+			}
+			if l != nil {
+				_ = l.Close()
+			}
+		}()
 		if w.font != 0 {
 			procDeleteObject.Call(w.font)
 		}
@@ -721,9 +725,12 @@ func (w *restoreWin) connect() {
 		_ = l.Close()
 		return
 	}
-	cmd := exec.Command(filepath.Join(os.Getenv("SystemRoot"), "System32", "schtasks.exe"), "/Run", "/TN", schedtask.RestoreName)
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: windows.CREATE_NO_WINDOW}
-	if out, err := cmd.CombinedOutput(); err != nil {
+	launch := func() ([]byte, error) {
+		cmd := exec.Command(filepath.Join(os.Getenv("SystemRoot"), "System32", "schtasks.exe"), "/Run", "/TN", schedtask.RestoreName)
+		cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: windows.CREATE_NO_WINDOW}
+		return cmd.CombinedOutput()
+	}
+	if out, err := launch(); err != nil {
 		a.log.Warn("lancement de la tâche de restauration", "err", err, "sortie", strings.TrimSpace(string(out)))
 		fail("Lancement impossible de la tâche " + schedtask.RestoreName + " :\n" + strings.TrimSpace(string(out)) +
 			"\n\nElle est créée par « kura-agent install » (version 0.15.0 ou plus) pour les comptes de tray.users.")
@@ -731,7 +738,14 @@ func (w *restoreWin) connect() {
 		return
 	}
 	// La tâche se joint en quelques secondes ; au-delà d'une minute, on abandonne.
+	// Relance à 15 s : une tâche qui finissait au moment du premier lancement l'a ignoré.
 	timer := time.AfterFunc(time.Minute, func() { _ = l.Close() })
+	retry := time.AfterFunc(15*time.Second, func() {
+		if w.currentPeer() == nil && w.ctx.Err() == nil {
+			_, _ = launch()
+		}
+	})
+	defer retry.Stop()
 	for {
 		conn, err := l.Accept()
 		if err != nil {
@@ -787,7 +801,9 @@ func (w *restoreWin) onMsg(m ipc.Msg) {
 	case ipc.TypeRestoreFiles:
 		if m.Restore != nil {
 			w.mu.Lock()
-			w.chunks[m.Restore.Req] = append(w.chunks[m.Restore.Req], m.Restore.Files...)
+			if m.Restore.Req == w.listSeq {
+				w.chunks[m.Restore.Req] = append(w.chunks[m.Restore.Req], m.Restore.Files...)
+			}
 			w.mu.Unlock()
 		}
 	case ipc.TypeRestoreProgress:
@@ -846,7 +862,12 @@ func (w *restoreWin) list() {
 	w.populate(nil)
 	procShowWindow.Call(w.ctl[idOpenDir], swHide)
 	w.status("Lecture des sauvegardes de " + w.folder + "…")
-	m := ipc.Msg{Type: ipc.TypeRestoreList, Path: w.folder, Restore: &ipc.RestoreData{At: w.at}}
+	w.mu.Lock()
+	w.listSeq++
+	seq := w.listSeq
+	w.chunks = map[int][]ipc.RestoreFile{}
+	w.mu.Unlock()
+	m := ipc.Msg{Type: ipc.TypeRestoreList, Path: w.folder, Restore: &ipc.RestoreData{At: w.at, Req: seq}}
 	p := w.currentPeer()
 	if p == nil {
 		w.waiting = false
@@ -858,13 +879,8 @@ func (w *restoreWin) list() {
 		defer cancel()
 		r, err := p.Request(ctx, m)
 		w.mu.Lock()
-		// Les lots portent le numéro de la requête, connu une fois envoyée : on les
-		// rassemble tous (une seule liste à la fois).
-		var files []ipc.RestoreFile
-		for k, v := range w.chunks {
-			files = append(files, v...)
-			delete(w.chunks, k)
-		}
+		files := w.chunks[seq]
+		delete(w.chunks, seq)
 		w.mu.Unlock()
 		w.a.invoke(func() {
 			if rw != w {

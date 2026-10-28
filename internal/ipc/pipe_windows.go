@@ -82,25 +82,18 @@ type conn struct {
 	gone      atomic.Bool // fermée : plus aucune écriture
 	nowait    bool        // côté run : écritures non bloquantes, avec délai
 	close     func(windows.Handle) error
-	serverSID string // côté run : compte du processus qui sert le canal
-	serverPID uint32 // côté run : processus qui sert le canal (icône vérifiée)
+	serverSID string        // côté run : compte du processus qui sert le canal
+	serverTok windows.Token // côté run : jeton de ce processus, pris lors de sa vérification
 }
 
 // ServerToken (côté tâche) : jeton d'emprunt d'identité du compte de l'icône qui sert
-// le canal, copié depuis son processus (vérifié par Dial). À fermer par l'appelant.
+// le canal, pris sur son processus au moment où Dial l'a vérifié. À fermer par l'appelant.
 func (c *conn) ServerToken() (windows.Token, error) {
-	p, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, c.serverPID)
-	if err != nil {
-		return 0, err
+	if c.serverTok == 0 {
+		return 0, errors.New("jeton de l'icône indisponible")
 	}
-	defer windows.CloseHandle(p)
-	var tok windows.Token
-	if err := windows.OpenProcessToken(p, windows.TOKEN_QUERY|windows.TOKEN_DUPLICATE, &tok); err != nil {
-		return 0, err
-	}
-	defer tok.Close()
 	var dup windows.Token
-	if err := windows.DuplicateTokenEx(tok, windows.TOKEN_QUERY|windows.TOKEN_IMPERSONATE, nil,
+	if err := windows.DuplicateTokenEx(c.serverTok, windows.TOKEN_QUERY|windows.TOKEN_IMPERSONATE, nil,
 		windows.SecurityImpersonation, windows.TokenImpersonation, &dup); err != nil {
 		return 0, err
 	}
@@ -399,22 +392,26 @@ func dialPipe(pipe string, session int) (io.ReadWriteCloser, error) {
 	if err != nil {
 		return nil, err
 	}
-	sid, pid, err := checkServer(h, session)
+	sid, tok, err := checkServer(h, session)
 	if err != nil {
 		windows.CloseHandle(h)
 		return nil, err
 	}
 	mode := uint32(windows.PIPE_READMODE_BYTE | windows.PIPE_NOWAIT)
 	if err := windows.SetNamedPipeHandleState(h, &mode, nil, nil); err != nil {
+		tok.Close()
 		windows.CloseHandle(h)
 		return nil, err
 	}
-	return &conn{h: h, close: windows.CloseHandle, nowait: true, serverSID: sid, serverPID: pid}, nil
+	return &conn{h: h, nowait: true, serverSID: sid, serverTok: tok, close: func(h windows.Handle) error {
+		tok.Close()
+		return windows.CloseHandle(h)
+	}}, nil
 }
 
 // checkServer vérifie session et exécutable du serveur, et renvoie le SID de son compte
-// et son processus.
-func checkServer(h windows.Handle, session int) (string, uint32, error) {
+// et une copie de son jeton (emprunt d'identité).
+func checkServer(h windows.Handle, session int) (string, windows.Token, error) {
 	var pid, sid uint32
 	if err := windows.GetNamedPipeServerProcessId(h, &pid); err != nil {
 		return "", 0, err
@@ -448,8 +445,10 @@ func checkServer(h windows.Handle, session int) (string, uint32, error) {
 	if !strings.EqualFold(filepath.Dir(server), filepath.Dir(self)) || !allowed {
 		return "", 0, fmt.Errorf("canal servi par %s, pas par une icône Kura : ignoré", server)
 	}
+	// Jeton pris sur le processus vérifié ci-dessus, par le même handle : il ne peut pas
+	// appartenir à un autre processus qui aurait repris son numéro.
 	var tok windows.Token
-	if err := windows.OpenProcessToken(p, windows.TOKEN_QUERY, &tok); err != nil {
+	if err := windows.OpenProcessToken(p, windows.TOKEN_QUERY|windows.TOKEN_DUPLICATE, &tok); err != nil {
 		return "", 0, err
 	}
 	defer tok.Close()
@@ -457,7 +456,12 @@ func checkServer(h windows.Handle, session int) (string, uint32, error) {
 	if err != nil {
 		return "", 0, err
 	}
-	return u.User.Sid.String(), pid, nil
+	var dup windows.Token
+	if err := windows.DuplicateTokenEx(tok, windows.TOKEN_QUERY|windows.TOKEN_IMPERSONATE|windows.TOKEN_DUPLICATE, nil,
+		windows.SecurityImpersonation, windows.TokenImpersonation, &dup); err != nil {
+		return "", 0, err
+	}
+	return u.User.Sid.String(), dup, nil
 }
 
 // Sessions liste les sessions Windows ouvertes (hors session 0 des services).

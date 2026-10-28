@@ -368,13 +368,21 @@ L'icône ouvre pour cela un second canal (`\\.\pipe\KuraRestore-<session>-…`, 
 (SYSTEM, créée par `install`, lançable par les comptes de `tray.users`, une instance pour toutes les
 sessions). La tâche (`kura-agent restore --serve`) joint la fenêtre (exécutable et session vérifiés
 comme pour `run`) ; la fenêtre n'accepte qu'un client SYSTEM. Tout est vérifié par la tâche, avec le
-jeton du processus de l'icône : le compte doit figurer dans `tray.users` ; un dossier n'est listé que
-si le compte peut y créer des fichiers (contrôle d'accès de Windows fait avec son jeton, jamais le
-profil d'un autre compte) ; les fichiers sont écrits **en son nom** (emprunt d'identité), donc à lui
-et seulement là où il pourrait écrire lui-même. Le compte ne voit jamais la clé. À leur place, la
-tâche prend le verrou de la sauvegarde. Journal et bilan comme en ligne de commande, avec le compte
-qui a restauré ; journal de la tâche : `restore-tray.log` dans le dossier des journaux. La tâche
-s'arrête 90 s après la fermeture de la dernière fenêtre, ou au bout de 30 min sans demande.
+jeton du processus de l'icône (pris lors de sa vérification) : le compte doit figurer dans
+`tray.users` ; un fichier n'est listé que si le compte peut écrire dans **son** dossier (contrôle
+d'accès de Windows fait avec son jeton, dossier par dossier : le sous-dossier privé d'un dossier
+commun n'apparaît pas, ni le profil d'un autre compte) ; un dossier disparu n'est restaurable depuis
+l'icône que dans le profil du compte (ailleurs, il a pu appartenir à un autre compte : restauration
+par l'administrateur, en ligne de commande) ; les fichiers sont écrits **en son nom** (emprunt
+d'identité), donc à lui et seulement là où il pourrait écrire lui-même, et jamais à la place d'un
+fichier existant, même apparu pendant la restauration. Le compte ne voit jamais la clé. La date est
+bornée à 90 jours par la tâche elle-même. Pas de verrou de la sauvegarde depuis l'icône (rien n'y
+est remplacé ; un compte standard ne doit pas pouvoir bloquer la sauvegarde). Le dossier
+« Restauration Kura … » se trouve dans une source sauvegardée : il partira à la sauvegarde
+suivante, le supprimer une fois les fichiers remis en place. Journal et bilan comme en ligne de
+commande, avec le compte qui a restauré ; journal de la tâche : `restore-tray.log` dans le dossier
+des journaux. La tâche s'arrête 90 s après la fermeture de la dernière fenêtre, ou au bout de 30 min
+sans demande.
 
 Mise à jour, pour les seuls membres du groupe Administrateurs du poste (groupes imbriqués
 compris ; sous UAC, le compte compte même si ses droits ne sont pas encore élevés) : **Mettre à

@@ -20,6 +20,7 @@ type fakeTrayUser struct {
 	account string
 	home    string
 	allowed []string
+	denied  []string
 	mu      sync.Mutex
 	imp     int // emprunts d'identité
 	closed  bool
@@ -39,7 +40,19 @@ func (u *fakeTrayUser) Impersonate() (func(), error) {
 	u.mu.Unlock()
 	return func() {}, nil
 }
+func (u *fakeTrayUser) CanWriteAll(dirs []string) []error {
+	out := make([]error, len(dirs))
+	for i, d := range dirs {
+		out[i] = u.CanWrite(d)
+	}
+	return out
+}
 func (u *fakeTrayUser) CanWrite(dir string) error {
+	for _, a := range u.denied {
+		if dir == a || strings.HasPrefix(dir, a+string(filepath.Separator)) {
+			return errors.New("accès refusé")
+		}
+	}
 	for _, a := range u.allowed {
 		if dir == a || strings.HasPrefix(dir, a+string(filepath.Separator)) {
 			return nil
@@ -108,7 +121,7 @@ func TestServeRestoreFromTray(t *testing.T) {
 	cfg, _ := b.d.loadConfig("")
 	cfg.Tray.Users = []string{"alice"}
 	os.MkdirAll(b.src, 0o755)
-	u := &fakeTrayUser{account: `ACME\alice`, allowed: []string{b.src}}
+	u := &fakeTrayUser{account: `ACME\alice`, home: b.src, allowed: []string{b.src}}
 	w, code := startServe(t, b, u)
 
 	h := <-w.hello
@@ -135,6 +148,7 @@ func TestServeRestoreFromTray(t *testing.T) {
 
 	// hors de son périmètre : refusé, sans lecture du bucket
 	before := len(b.l.prefixes)
+	os.MkdirAll(filepath.Join(b.dir, "srv", "projets"), 0o755)
 	r = w.request(t, ipc.Msg{Type: ipc.TypeRestoreList, Path: filepath.Join(b.dir, "srv", "projets"), Restore: &ipc.RestoreData{}})
 	if !strings.Contains(r.Message, "pas le droit") || len(b.l.prefixes) != before {
 		t.Fatalf("projets : %q", r.Message)
@@ -171,14 +185,14 @@ func TestServeRestoreFromTray(t *testing.T) {
 		t.Errorf("bilan : %+v", st)
 	}
 
-	// à leur place : seulement les absents, verrou de la sauvegarde pris
+	// à leur place : seulement les absents, sans verrou de la sauvegarde
 	os.MkdirAll(docs, 0o755)
 	os.WriteFile(filepath.Join(docs, "a.txt"), []byte("actuel"), 0o644)
 	w.request(t, m)
 	w.peer.Send(ipc.Msg{Type: ipc.TypeRestorePick, Restore: &ipc.RestoreData{Rels: []string{"a.txt", "sous dossier/b.txt"}}})
 	r = w.request(t, ipc.Msg{Type: ipc.TypeRestoreRun, Restore: &ipc.RestoreData{Mode: ipc.RestoreMissing}})
-	if !r.OK || r.Restore.Done != 1 || r.Restore.Kept != 1 || b.locked != 1 || b.held {
-		t.Fatalf("à leur place : ok=%v %q %+v verrou %d/%v", r.OK, r.Message, r.Restore, b.locked, b.held)
+	if !r.OK || r.Restore.Done != 1 || r.Restore.Kept != 1 || b.locked != 0 {
+		t.Fatalf("à leur place : ok=%v %q %+v verrou %d", r.OK, r.Message, r.Restore, b.locked)
 	}
 	if data, _ := os.ReadFile(filepath.Join(docs, "a.txt")); string(data) != "actuel" {
 		t.Fatal("fichier présent remplacé")
@@ -186,12 +200,14 @@ func TestServeRestoreFromTray(t *testing.T) {
 	if data, _ := os.ReadFile(filepath.Join(docs, "sous dossier", "b.txt")); string(data) != want("b1", 5) {
 		t.Fatal("fichier absent non remis")
 	}
-	// sauvegarde en cours : refus
-	b.busy = true
-	w.request(t, m)
-	w.peer.Send(ipc.Msg{Type: ipc.TypeRestorePick, Restore: &ipc.RestoreData{Rels: []string{"a.txt"}}})
-	if r = w.request(t, ipc.Msg{Type: ipc.TypeRestoreRun, Restore: &ipc.RestoreData{Mode: ipc.RestoreMissing}}); r.OK || !strings.Contains(r.Message, "sauvegarde est en cours") {
-		t.Fatalf("verrou occupé : %+v", r)
+	// au-delà de 90 jours : refusé par la tâche, quoi que demande la fenêtre
+	old := restoreNow.AddDate(0, 0, -120)
+	if r = w.request(t, ipc.Msg{Type: ipc.TypeRestoreList, Path: docs, Restore: &ipc.RestoreData{At: &old}}); !strings.Contains(r.Message, "90 jours") {
+		t.Fatalf("120 jours : %q", r.Message)
+	}
+	// chemin piégé
+	if r = w.request(t, ipc.Msg{Type: ipc.TypeRestoreList, Path: docs + "\nx", Restore: &ipc.RestoreData{}}); r.Message != "Chemin invalide." {
+		t.Fatalf("caractère de contrôle : %q", r.Message)
 	}
 
 	// fenêtre fermée : la tâche s'arrête
@@ -221,5 +237,46 @@ func TestServeRefusesUnlistedAccount(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("connexion gardée")
 	}
+	<-code
+}
+
+// Dossier commun : un sous-dossier privé n'apparaît pas, un dossier disparu hors du
+// profil n'est pas restaurable depuis l'icône.
+func TestServeScopeSharedFolder(t *testing.T) {
+	b := newToBench(t)
+	cfg, _ := b.d.loadConfig("")
+	cfg.Tray.Users = []string{"alice"}
+	docs := filepath.Join(b.src, "Documents")
+	private := filepath.Join(docs, "sous dossier")
+	os.MkdirAll(private, 0o755)
+	u := &fakeTrayUser{account: `ACME\alice`, allowed: []string{b.src}, denied: []string{private}}
+	w, code := startServe(t, b, u)
+	<-w.hello
+
+	m := ipc.Msg{Type: ipc.TypeRestoreList, Path: docs, Restore: &ipc.RestoreData{Req: 7}}
+	r := w.request(t, m)
+	if r.Restore.Total != 2 || !strings.Contains(r.Message, "pas accessibles") || r.Restore.Req != 7 {
+		t.Fatalf("liste : %q %+v", r.Message, r.Restore)
+	}
+	w.mu.Lock()
+	for _, f := range w.files[7] {
+		if strings.HasPrefix(f.Rel, "sous dossier") {
+			t.Errorf("fichier privé listé : %s", f.Rel)
+		}
+	}
+	w.mu.Unlock()
+	if r = w.request(t, ipc.Msg{Type: ipc.TypeRestoreHistory, Restore: &ipc.RestoreData{Rel: "sous dossier/b.txt"}}); len(r.Restore.Versions) != 0 {
+		t.Fatal("historique d'un fichier privé")
+	}
+	w.peer.Send(ipc.Msg{Type: ipc.TypeRestorePick, Restore: &ipc.RestoreData{Rels: []string{"sous dossier/b.txt"}}})
+	if r = w.request(t, ipc.Msg{Type: ipc.TypeRestoreRun, Restore: &ipc.RestoreData{Mode: ipc.RestoreCopy}}); r.OK || r.Message != "Aucun fichier coché." {
+		t.Fatalf("restauration d'un fichier privé : %+v", r)
+	}
+	// dossier disparu hors du profil : refusé sans lecture du bucket
+	n := len(b.l.prefixes)
+	if r = w.request(t, ipc.Msg{Type: ipc.TypeRestoreList, Path: filepath.Join(b.src, "Disparu"), Restore: &ipc.RestoreData{}}); !strings.Contains(r.Message, "n'existe plus") || len(b.l.prefixes) != n {
+		t.Fatalf("dossier disparu : %q", r.Message)
+	}
+	w.peer.Close()
 	<-code
 }

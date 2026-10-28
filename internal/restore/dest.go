@@ -143,16 +143,26 @@ func (d *Dest) Write(ctx context.Context, g Getter, rel string, v Version) error
 	if err != nil {
 		return err
 	}
-	// Dernier contrôle juste avant le renommage : la place est toujours libre.
-	if _, err := d.root.Lstat(rel); err == nil {
-		_ = d.root.Remove(tmp)
+	return d.place(tmp, rel)
+}
+
+// place donne au temporaire son nom sans jamais remplacer un fichier apparu entre-temps
+// (une application qui enregistre au même moment) : un lien physique se crée de façon
+// exclusive, puis le temporaire est retiré. Sur un système de fichiers sans liens
+// physiques (FAT, exFAT), dernier contrôle puis renommage.
+func (d *Dest) place(tmp, rel string) error {
+	defer d.root.Remove(tmp) // sans effet une fois renommé
+	err := d.root.Link(tmp, rel)
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, fs.ErrExist):
 		return ErrExists
 	}
-	if err := d.root.Rename(tmp, rel); err != nil {
-		_ = d.root.Remove(tmp)
-		return err
+	if _, err := d.root.Lstat(rel); err == nil {
+		return ErrExists
 	}
-	return nil
+	return d.root.Rename(tmp, rel)
 }
 
 // Replace remplace le fichier rel par la version v en gardant le fichier actuel à côté,

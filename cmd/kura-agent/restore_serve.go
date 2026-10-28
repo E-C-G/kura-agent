@@ -7,13 +7,13 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/E-C-G/kura-agent/internal/ipc"
-	"github.com/E-C-G/kura-agent/internal/lock"
 	"github.com/E-C-G/kura-agent/internal/restore"
 	"github.com/E-C-G/kura-agent/pkg/config"
 )
@@ -30,6 +30,8 @@ type trayUser interface {
 	// CanWrite : le compte peut créer des fichiers dans dir (contrôle fait par le
 	// système avec le jeton du compte).
 	CanWrite(dir string) error
+	// CanWriteAll : CanWrite pour chaque dossier, en un seul passage au nom du compte.
+	CanWriteAll(dirs []string) []error
 	// Do exécute f sur un thread verrouillé, au nom du compte.
 	Do(f func() error) error
 	// Impersonate prend l'identité du compte sur le thread courant (verrouillé par
@@ -84,17 +86,8 @@ func serveRestore(ctx context.Context, sd serveDeps, cfgPath string) int {
 	tick := time.NewTicker(sd.poll)
 	defer tick.Stop()
 	for {
-		mu.Lock()
-		n := len(active)
-		if n > 0 {
-			last = time.Now()
-		}
-		idle := time.Since(last)
-		mu.Unlock()
-		if n == 0 && idle > sd.linger {
-			logf("plus aucune fenêtre : fin")
-			return exitRestoreOK
-		}
+		// Recherche des fenêtres d'abord : une fenêtre ouverte juste avant la fin est
+		// jointe (la tâche, déjà lancée, ignore un nouveau lancement).
 		if list, err := sd.sessions(); err == nil {
 			for _, s := range list {
 				mu.Lock()
@@ -124,6 +117,17 @@ func serveRestore(ctx context.Context, sd serveDeps, cfgPath string) int {
 				}(s)
 			}
 		}
+		mu.Lock()
+		n := len(active)
+		if n > 0 {
+			last = time.Now()
+		}
+		idle := time.Since(last)
+		mu.Unlock()
+		if n == 0 && idle > sd.linger {
+			logf("plus aucune fenêtre : fin")
+			return exitRestoreOK
+		}
 		select {
 		case <-ctx.Done():
 			return exitRestoreOK
@@ -149,18 +153,25 @@ type trayListing struct {
 	path     string // dossier choisi, tel que le système l'écrit
 	target   restore.Target
 	at       time.Time
-	versions []restore.Version
-	files    []restore.File
+	versions []restore.Version // de la cible seulement
+	files    []restore.File    // visibles par le compte
+	names    map[string]bool   // Rel des fichiers visibles
 }
 
 func (ts *traySession) serve(ctx context.Context, conn io.ReadWriteCloser) {
 	msgs := make(chan ipc.Msg, 64)
-	peer := ipc.NewPeer(conn, func(m ipc.Msg) {
+	var peer *ipc.Peer
+	ready := make(chan struct{})
+	peer = ipc.NewPeer(conn, func(m ipc.Msg) {
+		<-ready
+		// Contre-pression : la lecture attend que la demande précédente soit traitée,
+		// rien n'est perdu.
 		select {
 		case msgs <- m:
-		default: // fenêtre trop bavarde : ignoré
+		case <-peer.Done():
 		}
 	})
+	close(ready)
 	defer peer.Close()
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -250,14 +261,11 @@ func (ts *traySession) handle(ctx context.Context, peer *ipc.Peer, m ipc.Msg) {
 			fail(ipc.TypeRestoreVersions, "Afficher d'abord un dossier.")
 			return
 		}
-		if restore.CheckRel(rd.Rel) != "" {
+		if !ts.listing.names[rd.Rel] {
 			fail(ipc.TypeRestoreVersions, "Fichier inconnu.")
 			return
 		}
-		key := rd.Rel
-		if k := ts.listing.target.Key; k != "" {
-			key = k + "/" + rd.Rel
-		}
+		key := strings.TrimPrefix(ts.listing.target.Key+"/"+rd.Rel, "/")
 		var vs []ipc.RestoreVersion
 		for _, v := range restore.History(ts.listing.versions, key, ts.sd.windows) {
 			if len(vs) == trayMaxVersions {
@@ -267,18 +275,23 @@ func (ts *traySession) handle(ctx context.Context, peer *ipc.Peer, m ipc.Msg) {
 		}
 		reply(ipc.Msg{Type: ipc.TypeRestoreVersions, Restore: &ipc.RestoreData{Rel: rd.Rel, Versions: vs}})
 	case ipc.TypeRestorePick:
+		if ts.listing == nil {
+			return
+		}
 		if ts.picks == nil {
 			ts.picks = map[string]bool{}
 		}
 		for _, r := range rd.Rels {
-			ts.picks[r] = true
+			if ts.listing.names[r] { // seulement des fichiers de la liste envoyée
+				ts.picks[r] = true
+			}
 		}
 	case ipc.TypeRestoreRun:
 		ts.run(ctx, peer, m, rd)
 	}
 }
 
-// list : état du dossier choisi à la date demandée.
+// list : état du dossier choisi à la date demandée, réduit à ce que le compte peut voir.
 func (ts *traySession) list(ctx context.Context, peer *ipc.Peer, m ipc.Msg, rd *ipc.RestoreData) {
 	fail := func(format string, a ...any) {
 		_ = peer.Reply(m, ipc.Msg{Type: ipc.TypeRestoreListed, Message: fmt.Sprintf(format, a...), Restore: &ipc.RestoreData{}})
@@ -289,11 +302,16 @@ func (ts *traySession) list(ctx context.Context, peer *ipc.Peer, m ipc.Msg, rd *
 		fail("%v", err)
 		return
 	}
-	t, _ := restore.Resolve(ts.cfg, dir, ts.sd.windows)
+	now := ts.sd.now()
 	var at time.Time
-	if rd.At != nil && rd.At.Before(ts.sd.now()) {
+	if rd.At != nil && rd.At.Before(now) {
+		if now.Sub(*rd.At) > time.Duration(trayRetentionDays)*24*time.Hour {
+			fail("%d jours au plus : les versions plus anciennes sont effacées par le cycle de vie du bucket.", trayRetentionDays)
+			return
+		}
 		at = *rd.At
 	}
+	t, _ := restore.Resolve(ts.cfg, dir, ts.sd.windows)
 	lctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer cancel()
 	vs, err := listTarget(lctx, ts.b, t, ts.sd.windows)
@@ -302,43 +320,150 @@ func (ts *traySession) list(ctx context.Context, peer *ipc.Peer, m ipc.Msg, rd *
 		fail("Bucket injoignable : %v", err)
 		return
 	}
-	files := restore.StateAt(vs, t, at, ts.sd.windows)
+	// Seules les versions de la cible restent en mémoire (la relecture sans casse lit
+	// le job entier).
+	var mine []restore.Version
+	for _, v := range vs {
+		if t.Covers(v.Key, ts.sd.windows) {
+			mine = append(mine, v)
+		}
+	}
+	files := restore.StateAt(mine, t, at, ts.sd.windows)
+	if !t.Root && len(files) == 1 && len(files[0].Key) == len(t.Key) {
+		fail("%s est un fichier : choisir le dossier qui le contient.", dir)
+		return
+	}
+	files, hidden := ts.visible(dir, files)
 	msg := ""
+	if hidden {
+		msg = "Certains dossiers ne vous sont pas accessibles : leurs fichiers ne sont pas listés."
+	}
 	if len(files) > trayMaxFiles {
 		files = files[:trayMaxFiles]
 		msg = fmt.Sprintf("Plus de %d fichiers : seuls les %d premiers sont listés ; choisir un sous-dossier.", trayMaxFiles, trayMaxFiles)
 	}
-	ts.listing = &trayListing{path: dir, target: t, at: at, versions: vs, files: files}
+	l := &trayListing{path: dir, target: t, at: at, versions: mine, files: files, names: map[string]bool{}}
 	var out []ipc.RestoreFile
 	var total int64
 	for _, f := range files {
+		l.names[f.Rel] = true
 		out = append(out, ipc.RestoreFile{Rel: f.Rel, Size: f.Version.Size, BackedUp: f.Version.LastModified,
 			DeletedSince: f.DeletedSince, Newer: f.NewerSince, Problem: f.Problem})
 		total += f.Version.Size
 	}
+	ts.listing = l
+	req := rd.Req // numéro choisi par la fenêtre : elle écarte les lots d'une liste abandonnée
+	if req == 0 {
+		req = m.ID
+	}
 	for _, chunk := range ipc.ChunkFiles(out) {
-		if err := peer.Send(ipc.Msg{Type: ipc.TypeRestoreFiles, Restore: &ipc.RestoreData{Req: m.ID, Files: chunk}}); err != nil {
+		if err := peer.Send(ipc.Msg{Type: ipc.TypeRestoreFiles, Restore: &ipc.RestoreData{Req: req, Files: chunk}}); err != nil {
 			return
 		}
 	}
 	_ = peer.Reply(m, ipc.Msg{Type: ipc.TypeRestoreListed, Path: dir, Message: msg,
-		Restore: &ipc.RestoreData{Total: len(files), Bytes: total}})
+		Restore: &ipc.RestoreData{Req: req, Total: len(files), Bytes: total}})
 }
 
-// allowed vérifie un dossier demandé par la fenêtre : absolu, dans la source d'un job,
-// et le compte peut écrire dans son plus proche dossier existant.
-func (ts *traySession) allowed(path string) (string, error) {
-	if path == "" {
+// within : p est home ou en dessous.
+func within(home, p string, foldCase bool) bool {
+	if home == "" {
+		return false
+	}
+	home = strings.TrimRight(home, `/\`)
+	if foldCase {
+		home, p = strings.ToLower(home), strings.ToLower(p)
+	}
+	return p == home || strings.HasPrefix(p, home+string(filepath.Separator))
+}
+
+// reach : dossier où le compte doit pouvoir écrire pour restaurer dans dir. Pour un
+// dossier disparu, son plus proche parent existant, mais seulement dans le profil du
+// compte : ailleurs (dossier commun), un dossier supprimé a pu être celui d'un autre
+// compte ; il se restaure alors en ligne de commande, par un administrateur.
+func (ts *traySession) reach(dir string) (string, bool) {
+	ne := nearestExisting(dir)
+	if ne != dir && !within(ts.u.Home(), ne, ts.sd.windows) {
+		return ne, false
+	}
+	return ne, true
+}
+
+// visible garde les fichiers que le compte peut restaurer : ceux dont le dossier (ou,
+// disparu dans son profil, le plus proche parent existant) lui est ouvert en écriture.
+// Les droits sont vérifiés par Windows, avec le jeton du compte, dossier par dossier :
+// un sous-dossier privé d'un dossier commun n'apparaît pas.
+func (ts *traySession) visible(base string, files []restore.File) ([]restore.File, bool) {
+	parentOf := func(f restore.File) string {
+		p := filepath.Join(base, filepath.FromSlash(path.Dir(f.Rel)))
+		if !within(base, p, ts.sd.windows) {
+			return base // nom refusé (..) : rattaché au dossier choisi
+		}
+		return p
+	}
+	reachOf := map[string]string{} // dossier du fichier → dossier à vérifier ("" : refusé)
+	var check []string
+	seen := map[string]bool{}
+	for _, f := range files {
+		p := parentOf(f)
+		if _, ok := reachOf[p]; ok {
+			continue
+		}
+		ne, ok := ts.reach(p)
+		if !ok {
+			reachOf[p] = ""
+			continue
+		}
+		reachOf[p] = ne
+		if !seen[ne] {
+			seen[ne] = true
+			check = append(check, ne)
+		}
+	}
+	allowed := map[string]bool{}
+	for i, err := range ts.u.CanWriteAll(check) {
+		allowed[check[i]] = err == nil
+	}
+	var out []restore.File
+	hidden := false
+	for _, f := range files {
+		if ne := reachOf[parentOf(f)]; ne != "" && allowed[ne] {
+			out = append(out, f)
+		} else {
+			hidden = true
+		}
+	}
+	return out, hidden
+}
+
+// allowed vérifie un dossier demandé par la fenêtre : chemin absolu ordinaire, dans la
+// source d'un job, et le compte peut y écrire (ou, disparu dans son profil, dans son plus
+// proche parent existant).
+func (ts *traySession) allowed(p string) (string, error) {
+	if p == "" {
 		return "", errors.New("Choisir un dossier.")
 	}
-	dir := filepath.Clean(path)
-	if !filepath.IsAbs(dir) && !(ts.sd.windows && len(dir) >= 3 && dir[1] == ':') {
+	for _, r := range p {
+		if r < 0x20 || r == 0x7f {
+			return "", errors.New("Chemin invalide.")
+		}
+	}
+	dir := filepath.Clean(p)
+	if ts.sd.windows {
+		if len(dir) < 3 || dir[1] != ':' || (dir[2] != '\\' && dir[2] != '/') {
+			return "", errors.New("Chemin incomplet : choisir un dossier d'un disque de ce poste.")
+		}
+	} else if !filepath.IsAbs(dir) {
 		return "", errors.New("Chemin incomplet : choisir un dossier.")
 	}
 	if _, err := restore.Resolve(ts.cfg, dir, ts.sd.windows); err != nil {
 		return "", fmt.Errorf("%s n'est pas sauvegardé par Kura.", dir)
 	}
-	if err := ts.u.CanWrite(nearestExisting(dir)); err != nil {
+	ne, ok := ts.reach(dir)
+	if !ok {
+		return "", fmt.Errorf("%s n'existe plus. Hors de votre profil, un dossier supprimé se restaure par l'administrateur du poste.", dir)
+	}
+	if err := ts.u.CanWrite(ne); err != nil {
 		ts.logf("%s : accès refusé à %s (%v)", ts.u.Account(), dir, err)
 		return "", fmt.Errorf("Vous ne pouvez pas restaurer %s : vous n'avez pas le droit d'y écrire.", dir)
 	}
@@ -350,10 +475,7 @@ func (ts *traySession) run(ctx context.Context, peer *ipc.Peer, m ipc.Msg, rd *i
 	l := ts.listing
 	picks := ts.picks
 	ts.picks = nil
-	// Le verrou de la sauvegarde (à leur place) est rendu avant la réponse.
-	unlock := func() {}
 	reply := func(r ipc.RestoreData, msg string, ok bool) {
-		unlock()
 		_ = peer.Reply(m, ipc.Msg{Type: ipc.TypeRestoreDone, OK: ok, Message: msg, Restore: &r})
 	}
 	done := func(r ipc.RestoreData, msg string) { reply(r, msg, msg == "" && r.Failed == 0) }
@@ -371,9 +493,14 @@ func (ts *traySession) run(ctx context.Context, peer *ipc.Peer, m ipc.Msg, rd *i
 		done(ipc.RestoreData{}, "Aucun fichier coché.")
 		return
 	}
-	// Le dossier est revérifié : les droits ont pu changer depuis la liste.
+	// Dossier et sous-dossiers revérifiés : les droits ont pu changer depuis la liste.
 	if _, err := ts.allowed(l.path); err != nil {
 		done(ipc.RestoreData{}, err.Error())
+		return
+	}
+	chosen, _ = ts.visible(l.path, chosen)
+	if len(chosen) == 0 {
+		done(ipc.RestoreData{}, "Ces fichiers ne vous sont plus accessibles.")
 		return
 	}
 	d := ts.sd.restoreDeps
@@ -383,21 +510,30 @@ func (ts *traySession) run(ctx context.Context, peer *ipc.Peer, m ipc.Msg, rd *i
 	var kept, preFailed []keptItem
 	switch rd.Mode {
 	case ipc.RestoreCopy:
-		parent, base := filepath.Dir(l.path), filepath.Base(l.path)
-		if parent == l.path || restore.CheckRel(base) != "" {
-			parent, base = l.path, "" // racine d'un lecteur : le nouveau dossier va dedans
+		// À côté du dossier choisi (ou de son plus proche parent existant).
+		near, _ := ts.reach(l.path)
+		parent, base := filepath.Dir(near), filepath.Base(l.path)
+		switch {
+		case near != l.path:
+			parent = near // dossier choisi disparu : le nouveau dossier va dans son parent existant
+		case parent == near || restore.CheckRel(base) != "":
+			parent, base = near, "" // racine d'un lecteur : le nouveau dossier va dedans
 		}
 		if err := ts.u.CanWrite(parent); err != nil {
 			done(ipc.RestoreData{}, fmt.Sprintf("Vous ne pouvez pas créer de dossier dans %s : choisir « À leur place ».", parent))
 			return
 		}
-		name := "Restauration Kura " + ts.sd.now().Format("2006-01-02 15h04")
-		for i := 2; ; i++ {
-			if _, err := os.Lstat(filepath.Join(parent, name)); errors.Is(err, fs.ErrNotExist) {
-				break
+		stamp := ts.sd.now().Format("2006-01-02 15h04")
+		name := "Restauration Kura " + stamp
+		_ = ts.u.Do(func() error { // nom libre, vu par le compte
+			for i := 2; i < 100; i++ {
+				if _, err := os.Lstat(filepath.Join(parent, name)); errors.Is(err, fs.ErrNotExist) {
+					return nil
+				}
+				name = fmt.Sprintf("Restauration Kura %s (%d)", stamp, i)
 			}
-			name = fmt.Sprintf("Restauration Kura %s (%d)", ts.sd.now().Format("2006-01-02 15h04"), i)
-		}
+			return nil
+		})
 		root, where, mode = parent, filepath.Join(parent, name), "to"
 		for _, f := range chosen {
 			out := name + "/" + f.Rel
@@ -407,9 +543,22 @@ func (ts *traySession) run(ctx context.Context, peer *ipc.Peer, m ipc.Msg, rd *i
 			items = append(items, restore.Item{File: f, Out: out})
 		}
 	case ipc.RestoreMissing:
-		root, where, mode = l.path, l.path, "in_place"
+		// Racine : le dossier choisi, ou s'il a disparu (dans le profil du compte) son plus
+		// proche parent existant ; les dossiers manquants sont recréés au nom du compte.
+		near, _ := ts.reach(l.path)
+		lead, err := filepath.Rel(near, l.path)
+		if err != nil || strings.HasPrefix(lead, "..") {
+			done(ipc.RestoreData{}, "Dossier inaccessible.")
+			return
+		}
+		lead = filepath.ToSlash(lead)
+		root, where, mode = near, l.path, "in_place"
 		for _, f := range chosen {
-			items = append(items, restore.Item{File: f, Out: f.Rel})
+			out := f.Rel
+			if lead != "." {
+				out = lead + "/" + f.Rel
+			}
+			items = append(items, restore.Item{File: f, Out: out})
 		}
 	default:
 		done(ipc.RestoreData{}, "Mode inconnu.")
@@ -417,20 +566,9 @@ func (ts *traySession) run(ctx context.Context, peer *ipc.Peer, m ipc.Msg, rd *i
 	}
 	restore.MarkConflicts(items, d.foldCase)
 
-	if mode == "in_place" {
-		release, err := d.lock()
-		if err != nil {
-			msg := fmt.Sprintf("Verrou de la sauvegarde : %v", err)
-			if errors.Is(err, lock.ErrBusy) {
-				msg = "Une sauvegarde est en cours : réessayer quand elle sera finie."
-			}
-			done(ipc.RestoreData{}, msg)
-			return
-		}
-		var once sync.Once
-		unlock = func() { once.Do(release) }
-		defer unlock()
-	}
+	// Pas de verrou de la sauvegarde ici, contrairement à la ligne de commande : rien
+	// n'est jamais remplacé depuis l'icône, et un compte standard ne doit pas pouvoir
+	// bloquer la sauvegarde planifiée le temps d'une longue restauration.
 
 	var dest *restore.Dest
 	if err := ts.u.Do(func() error {

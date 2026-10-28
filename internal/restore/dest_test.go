@@ -336,3 +336,29 @@ func TestSameContentMultipart(t *testing.T) {
 		t.Fatal("contenu modifié jugé identique")
 	}
 }
+
+// Un fichier apparu entre la lecture et la mise en place n'est jamais remplacé.
+func TestPlaceNeverReplaces(t *testing.T) {
+	d := newDest(t)
+	os.WriteFile(filepath.Join(d.Dir, "a.txt"), []byte("actuel"), 0o644)
+	os.WriteFile(filepath.Join(d.Dir, ".tmp"), []byte("restauré"), 0o644)
+	if err := d.place(".tmp", "a.txt"); !errors.Is(err, ErrExists) {
+		t.Fatalf("%v", err)
+	}
+	if got, _ := os.ReadFile(filepath.Join(d.Dir, "a.txt")); string(got) != "actuel" {
+		t.Fatalf("remplacé : %q", got)
+	}
+	if _, err := os.Stat(filepath.Join(d.Dir, ".tmp")); err == nil {
+		t.Fatal("temporaire laissé")
+	}
+	os.WriteFile(filepath.Join(d.Dir, ".tmp"), []byte("restauré"), 0o644)
+	if err := d.place(".tmp", "b.txt"); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := os.ReadFile(filepath.Join(d.Dir, "b.txt")); string(got) != "restauré" {
+		t.Fatalf("%q", got)
+	}
+	if entries, _ := os.ReadDir(d.Dir); len(entries) != 2 {
+		t.Fatalf("%v", entries)
+	}
+}

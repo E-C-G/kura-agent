@@ -75,7 +75,28 @@ const (
 // CanWrite ouvre dir pour y ajouter fichiers et dossiers, au nom du compte : Windows
 // fait le contrôle d'accès avec son jeton (ni SYSTEM ni privilège de sauvegarde).
 func (u *winTrayUser) CanWrite(dir string) error {
-	return u.Do(func() error {
+	return u.Do(func() error { return canWriteHere(dir) })
+}
+
+// CanWriteAll : CanWrite pour chaque dossier, sur un seul thread au nom du compte.
+func (u *winTrayUser) CanWriteAll(dirs []string) []error {
+	out := make([]error, len(dirs))
+	if err := u.Do(func() error {
+		for i, d := range dirs {
+			out[i] = canWriteHere(d)
+		}
+		return nil
+	}); err != nil {
+		for i := range out {
+			out[i] = err
+		}
+	}
+	return out
+}
+
+// canWriteHere : contrôle sur le thread courant, qui porte déjà l'identité du compte.
+func canWriteHere(dir string) error {
+	{
 		p, err := windows.UTF16PtrFromString(dir)
 		if err != nil {
 			return err
@@ -98,7 +119,7 @@ func (u *winTrayUser) CanWrite(dir string) error {
 			return errors.New("pas un dossier")
 		}
 		return nil
-	})
+	}
 }
 
 func realServeDeps() (serveDeps, func()) {
