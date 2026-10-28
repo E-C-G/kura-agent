@@ -767,6 +767,9 @@ func (r *run) simulate(ctx context.Context, j config.Job, out io.Writer, log *sl
 		}
 		outcome := awscli.Classify(code)
 		if outcome == awscli.OK || outcome == awscli.Warning {
+			// Une tentative précédente en échec a marqué le job en erreur : la
+			// simulation a finalement abouti, l'échec passager ne compte plus.
+			js.Result, js.Message = state.ResultOK, ""
 			return counts, true
 		}
 		js.Result, js.Message = state.ResultError, fmt.Sprintf("simulation en échec (code %d)", code)
