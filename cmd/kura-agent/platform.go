@@ -78,5 +78,10 @@ func configMissing(cfg *config.Config, supported func(platform.Feature) bool, de
 	if len(cfg.PostTasks) > 0 && !supported(platform.Tray) {
 		errs = append(errs, fmt.Errorf("post_tasks : %w", platform.NotImplemented(platform.Tray)))
 	}
+	for i, p := range cfg.Prepare {
+		if p.Type == config.PrepareDBExport && p.Engine == config.EngineSQLServer && !supported(platform.SQLServerExport) {
+			errs = append(errs, fmt.Errorf("prepare[%d] (%s) : %w", i, p.ID, platform.NotImplemented(platform.SQLServerExport)))
+		}
+	}
 	return errors.Join(errs...)
 }

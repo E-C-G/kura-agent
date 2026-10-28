@@ -36,7 +36,10 @@ type Spec struct {
 	Env   []string  // environnement complet du processus
 	Dir   string    // dossier de travail ; vide : celui de l'agent
 	Stdin io.Reader // nil : aucune entrée
-	Out   io.Writer // stdout et stderr
+	Out   io.Writer // stdout, et stderr si ErrOut est nil
+	// ErrOut reçoit stderr à part (journal), quand stdout porte le résultat (export
+	// d'une base, liste lue par l'agent) ; nil : stderr va dans Out.
+	ErrOut io.Writer
 }
 
 // RunSpec lance s ; mêmes règles que Run.
@@ -52,6 +55,9 @@ func run(ctx context.Context, s Spec) (int, error) {
 	cmd.Stdin = s.Stdin
 	cmd.Stdout = s.Out
 	cmd.Stderr = s.Out
+	if s.ErrOut != nil {
+		cmd.Stderr = s.ErrOut
+	}
 	// Après une annulation, un petit-enfant peut garder la sortie ouverte : on
 	// n'attend pas sa fin plus de WaitDelay avant de fermer les tubes.
 	cmd.WaitDelay = waitDelay

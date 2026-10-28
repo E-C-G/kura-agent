@@ -126,10 +126,37 @@ type Prepare struct {
 	Level    string   `yaml:"level"`     // deflate (défaut) | store
 	OnLocked string   `yaml:"on_locked"` // fail (défaut) | skip
 
+	// db_export
+	Engine string `yaml:"engine"` // postgresql | mysql (MySQL, MariaDB) | sqlserver
+	// Host, Port : serveur PostgreSQL ou MySQL (défaut localhost et le port du moteur).
+	// Socket les remplace pour une connexion locale sous Linux et macOS : dossier du
+	// socket pour PostgreSQL (/run/postgresql), fichier pour MySQL (/run/mysqld/mysqld.sock).
+	Host   string `yaml:"host"`
+	Port   int    `yaml:"port"`
+	Socket string `yaml:"socket"`
+	// Instance : SQL Server, instance locale (localhost, localhost\SQLEXPRESS).
+	Instance string `yaml:"instance"`
+	// User : rôle dédié en lecture seule ; vide : authentification du système (socket
+	// local, ou compte SYSTEM pour SQL Server).
+	User string `yaml:"user"`
+	// Password : credential:<nom> seulement, jamais en clair ; vide : sans mot de passe.
+	Password string `yaml:"password"`
+	// Databases : bases exportées ; vide : toutes, sauf les bases système.
+	Databases []string `yaml:"databases"`
+	// Verify : SQL Server, RESTORE VERIFYONLY après chaque sauvegarde.
+	Verify bool `yaml:"verify"`
+
 	// Unavailable : la source ne se résout pas sur cette machine (compte supprimé) ; la
 	// préparation échoue avec ce message, les autres continuent. Rempli par Expand.
 	Unavailable string `yaml:"-"`
 }
+
+// Moteurs de db_export.
+const (
+	EnginePostgreSQL = "postgresql"
+	EngineMySQL      = "mysql"
+	EngineSQLServer  = "sqlserver"
+)
 
 // Niveaux de compression et conduite devant un fichier illisible (zip).
 const (
@@ -286,6 +313,9 @@ func (c *Config) CredentialRefs() []CredentialRef {
 		add("notify.report.url", r.URL, false)
 		add("notify.report.token", r.Token, false)
 	}
+	for i, p := range c.Prepare {
+		add(fmt.Sprintf("prepare[%d].password", i), p.Password, false)
+	}
 	return refs
 }
 
@@ -394,6 +424,24 @@ func (c *Config) ApplyDefaults() {
 		p := &c.Prepare[i]
 		if p.Timeout.Duration == 0 {
 			p.Timeout.Duration = time.Hour
+		}
+		if p.Type == PrepareDBExport && p.Socket == "" {
+			switch p.Engine {
+			case EnginePostgreSQL, EngineMySQL:
+				if p.Host == "" {
+					p.Host = "localhost"
+				}
+				if p.Port == 0 && p.Engine == EnginePostgreSQL {
+					p.Port = 5432
+				}
+				if p.Port == 0 && p.Engine == EngineMySQL {
+					p.Port = 3306
+				}
+			case EngineSQLServer:
+				if p.Instance == "" {
+					p.Instance = "localhost"
+				}
+			}
 		}
 		if p.Type == PrepareZip {
 			if p.Level == "" {

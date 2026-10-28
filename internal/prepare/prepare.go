@@ -30,12 +30,33 @@ import (
 // entier, pas seulement la sauvegarde.
 const MinFree uint64 = 2 << 30
 
-// lowSpaceError : l'espace libre de la zone de préparation est passé sous MinFree.
-type lowSpaceError struct{ free uint64 }
+// lowSpaceError : l'espace libre de la zone de préparation est passé sous MinFree, ou
+// n'atteint pas ce qu'un export demande.
+type lowSpaceError struct {
+	free uint64
+	need uint64 // espace demandé avant de commencer ; 0 : seulement la réserve MinFree
+	hint string // ce qu'il faut prévoir
+}
 
 func (e *lowSpaceError) Error() string {
-	return fmt.Sprintf("espace disque insuffisant dans la zone de préparation : %s libres, %s à garder sur ce disque ; prévoir deux fois la taille de la source",
+	if e.need > 0 {
+		return fmt.Sprintf("espace disque insuffisant dans la zone de préparation : %s libres, %s demandés (%s)",
+			humanSize(e.free), humanSize(e.need), e.hint)
+	}
+	msg := fmt.Sprintf("espace disque insuffisant dans la zone de préparation : %s libres, %s à garder sur ce disque",
 		humanSize(e.free), humanSize(MinFree))
+	if e.hint != "" {
+		msg += " ; " + e.hint
+	}
+	return msg
+}
+
+// spaceHint : ce qu'une préparation demande d'espace, pour le message d'échec.
+func spaceHint(p config.Prepare) string {
+	if p.Type == config.PrepareZip {
+		return "prévoir deux fois la taille de la source"
+	}
+	return "prévoir la taille des exports"
 }
 
 // humanSize : taille lisible, à la française (1,2 Go).
@@ -76,6 +97,12 @@ type Deps struct {
 	// préparation : sous MinFree, elle s'arrête et échoue.
 	FreeSpace  func(dir string) (uint64, error)
 	SpaceCheck time.Duration
+	// LastSize : taille du dernier résultat réussi de cette préparation (0 : inconnue).
+	// Un export ne commence que si l'espace libre la dépasse de 20 %, réserve comprise.
+	LastSize int64
+
+	// Secret lit un secret du coffre (credential:<nom>) : mot de passe d'une base.
+	Secret func(ref string) (string, error)
 
 	// Copied, s'il est donné, est appelé une fois la copie de la source terminée,
 	// réussie ou non : un programme fermé pour elle (pre_tasks) peut alors être relancé
@@ -141,10 +168,10 @@ func Run(ctx context.Context, cfg *config.Config, p config.Prepare, d Deps) (ps 
 	case err != nil:
 		log.Warn("espace libre de la zone de préparation illisible : non surveillé", "err", err)
 	case free < MinFree:
-		return fail("%v", &lowSpaceError{free: free})
+		return fail("%v", &lowSpaceError{free: free, hint: spaceHint(p)})
 	default:
 		var stop func()
-		ctx, stop = watchSpace(ctx, d)
+		ctx, stop = watchSpace(ctx, d, spaceHint(p))
 		defer stop()
 	}
 	if err := os.Mkdir(tmp, 0o700); err != nil {
@@ -156,6 +183,8 @@ func Run(ctx context.Context, cfg *config.Config, p config.Prepare, d Deps) (ps 
 	switch p.Type {
 	case config.PrepareZip:
 		err = runZip(ctx, cfg, p, d, tmp, &ps, log)
+	case config.PrepareDBExport:
+		err = runDBExport(ctx, cfg, p, d, tmp, &ps, log)
 	default:
 		err = fmt.Errorf("type %q non pris en charge par cette version de l'agent", p.Type)
 	}
@@ -174,7 +203,7 @@ func Run(ctx context.Context, cfg *config.Config, p config.Prepare, d Deps) (ps 
 // contexte rendu est annulé avec lowSpaceError pour cause (la copie s'arrête, l'outil est
 // arrêté), et la préparation échoue ; ses fichiers sont effacés comme pour tout échec.
 // stop arrête la surveillance.
-func watchSpace(ctx context.Context, d Deps) (watched context.Context, stop func()) {
+func watchSpace(ctx context.Context, d Deps, hint string) (watched context.Context, stop func()) {
 	ctx, cancel := context.WithCancelCause(ctx)
 	quit, finished := make(chan struct{}), make(chan struct{})
 	go func() {
@@ -189,7 +218,7 @@ func watchSpace(ctx context.Context, d Deps) (watched context.Context, stop func
 				return
 			case <-t.C:
 				if free, err := d.FreeSpace(d.StagingDir); err == nil && free < MinFree {
-					cancel(&lowSpaceError{free: free})
+					cancel(&lowSpaceError{free: free, hint: hint})
 					return
 				}
 			}

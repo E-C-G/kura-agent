@@ -95,6 +95,8 @@ type Deps struct {
 	EnsureStaging func(dir string) error
 	// FreeSpace lit l'espace libre de la zone de préparation ; nil : diskfree.Free.
 	FreeSpace func(dir string) (uint64, error)
+	// Secret lit un secret du coffre (credential:<nom>) : mot de passe d'une base.
+	Secret func(ref string) (string, error)
 
 	Now        func() time.Time                                 // défaut : time.Now
 	Sleep      func(ctx context.Context, d time.Duration) error // défaut : attente annulable
@@ -178,6 +180,7 @@ func Run(ctx context.Context, cfg *config.Config, opt Options, d Deps) (state.St
 	} else if prev != nil {
 		r.st.LastSuccess = prev.LastSuccess
 		r.st.JobLastSuccess = prev.JobLastSuccess
+		r.st.PrepareLastSize = prev.PrepareLastSize
 	}
 	r.save()
 	r.broadcast(ipc.Msg{Type: ipc.TypeStarted, RunID: runID, Total: len(jobs), DryRun: opt.DryRun})
@@ -499,7 +502,16 @@ func (r *run) runPrepare(ctx context.Context, p config.Prepare, preOK map[string
 			Exec: r.d.PrepareExec, StagingDir: r.d.StagingDir, AgentDirs: r.d.AgentDirs,
 			CheckTool: r.d.PrepareCheckTool, Out: out, Log: r.log, Now: r.d.Now,
 			FreeSpace: r.d.FreeSpace, Copied: func() { r.releasePrepareHold(p) },
+			LastSize: r.st.PrepareLastSize[p.ID], Secret: r.d.Secret,
 		})
+		if ps.Result == state.ResultOK || ps.Result == state.ResultWarning {
+			r.update(func(st *state.Status) {
+				if st.PrepareLastSize == nil {
+					st.PrepareLastSize = map[string]int64{}
+				}
+				st.PrepareLastSize[p.ID] = ps.Size
+			})
+		}
 	}
 	r.releasePrepareHold(p) // sautée, en échec avant la copie, ou simulation
 	r.prepOK[p.ID] = ps.Result == state.ResultOK || ps.Result == state.ResultWarning

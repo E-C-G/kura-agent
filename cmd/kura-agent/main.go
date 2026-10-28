@@ -293,6 +293,7 @@ func cmdRun(args []string) int {
 		StagingDir:  paths.StagingDir(),
 		PrepareExec: execx.System{},
 		AgentDirs:   agentDirs(),
+		Secret:      vault().Resolve,
 	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -384,6 +385,16 @@ func cmdValidate(args []string) int {
 		check(t.Field+" "+t.Path, t.Err)
 		if t.Err == nil && t.Version != "" {
 			fmt.Printf("       version %s\n", t.Version)
+		}
+	}
+	for _, c := range checkDBConnections(cfg) {
+		if c.Note != "" {
+			fmt.Printf("INFO   base %s : %s\n", c.ID, c.Note)
+			continue
+		}
+		check("base "+c.ID+" : connexion", c.Err)
+		if c.Err == nil {
+			fmt.Printf("       bases exportées : %s\n", strings.Join(c.Databases, ", "))
 		}
 	}
 	aws, err := resolveAWS(cfg.Profile.AWSCLI)
@@ -583,6 +594,9 @@ func printSummary(w io.Writer, st *state.Status) {
 	}
 	for _, p := range st.Prepares {
 		fmt.Fprintf(w, "  préparation %-10s %-16s %s · %d fichier(s) · %s · %.0f s", p.ID, label(p.Result), p.Type, p.Files, humanSize(p.Size), p.DurationS)
+		if len(p.Databases) > 0 {
+			fmt.Fprintf(w, "\n             bases : %s", strings.Join(p.Databases, ", "))
+		}
 		if p.Message != "" {
 			fmt.Fprintf(w, "\n             %s", p.Message)
 		}

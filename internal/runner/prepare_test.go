@@ -75,6 +75,15 @@ func TestPrepareThenJob(t *testing.T) {
 	if left, _ := os.ReadDir(staging); len(left) != 0 {
 		t.Errorf("zone de préparation non vidée : %v", left)
 	}
+	// La taille du résultat est gardée d'une exécution à l'autre (espace libre de la
+	// suivante), même par une exécution qui ne fait pas la préparation.
+	if st.PrepareLastSize["courrier"] != st.Prepares[0].Size || st.Prepares[0].Size == 0 {
+		t.Fatalf("taille gardée : %v", st.PrepareLastSize)
+	}
+	st = b.run(context.Background(), Options{JobIDs: []string{"data"}})
+	if st.PrepareLastSize["courrier"] == 0 {
+		t.Fatalf("taille perdue : %v", st.PrepareLastSize)
+	}
 }
 
 // Une préparation en échec saute son job, sans rien envoyer ; les autres continuent.
