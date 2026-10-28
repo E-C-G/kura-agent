@@ -24,3 +24,9 @@ func hideInput() func() {
 	}
 	return func() { _ = unix.IoctlSetTermios(fd, ioctlSetTermios, old) }
 }
+
+// stdinIsTerminal : l'entrée est un terminal (une personne peut répondre).
+func stdinIsTerminal() bool {
+	_, err := unix.IoctlGetTermios(int(os.Stdin.Fd()), ioctlGetTermios)
+	return err == nil
+}

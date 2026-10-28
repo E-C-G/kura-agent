@@ -22,7 +22,7 @@ const (
 	exitUpdateOK      = 0 // à jour (ou mis à jour)
 	exitUpdateNewer   = 3 // --check : version plus récente disponible
 	exitUpdateRefused = 4 // refusé (droits, sauvegarde en cours, version inférieure…)
-	exitUpdateFailed  = 5 // recherche ou vérification en échec, rien n'a été modifié
+	exitUpdateFailed  = 5 // recherche, téléchargement ou vérification en échec, rien n'a été modifié
 )
 
 type selfUpdateOut struct {
@@ -41,6 +41,9 @@ func cmdSelfUpdate(args []string) int {
 	return runSelfUpdate(args, os.Stdout, os.Stderr, nil)
 }
 
+// newUpdater : remplaçable dans les tests.
+var newUpdater = realUpdater
+
 // runSelfUpdate : client injecté par les tests (nil : GitHub).
 func runSelfUpdate(args []string, stdout, stderr io.Writer, client *selfupdate.Client) int {
 	fs := flag.NewFlagSet("self-update", flag.ContinueOnError)
@@ -49,13 +52,18 @@ func runSelfUpdate(args []string, stdout, stderr io.Writer, client *selfupdate.C
 	tag := fs.String("version", "", "version visée (vX.Y.Z) au lieu de la dernière")
 	asJSON := fs.Bool("json", false, "résultat en JSON")
 	cfgPath := fs.String("config", paths.ConfigFile(), "fichier de configuration (pour update.proxy)")
+	yes := fs.Bool("yes", false, "sans confirmation (obligatoire hors d'un terminal)")
+	rollback := fs.Bool("rollback", false, "remet la version d'avant la dernière mise à jour")
+	finish := fs.Bool("finish", false, "étape interne : lancée par la nouvelle version juste après le remplacement")
 	if err := fs.Parse(args); err != nil || fs.NArg() > 0 {
 		return 2
 	}
-	if !*check {
-		fmt.Fprintln(stderr, "L'installation d'une nouvelle version par self-update arrive avec kura-agent 0.10.0.\n"+
-			"Pour l'instant : kura-agent self-update --check (recherche et vérification, sans rien modifier).")
-		return exitUpdateRefused
+	if *finish {
+		return finishUpdate(stdout, stderr, *cfgPath)
+	}
+	if *rollback && (*check || *tag != "") {
+		fmt.Fprintln(stderr, "--rollback ne se combine ni avec --check ni avec --version")
+		return 2
 	}
 	if client == nil {
 		proxy, err := updateProxy(*cfgPath, stderr)
@@ -69,6 +77,12 @@ func runSelfUpdate(args []string, stdout, stderr io.Writer, client *selfupdate.C
 			return exitUpdateFailed
 		}
 		client = &selfupdate.Client{HTTP: hc, UserAgent: "kura-agent/" + version}
+	}
+	if !*check {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+		defer cancel()
+		u := newUpdater(client, stdout)
+		return u.run(ctx, updateOptions{tag: *tag, yes: *yes, rollback: *rollback})
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()

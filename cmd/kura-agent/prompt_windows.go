@@ -20,3 +20,9 @@ func hideInput() func() {
 	}
 	return func() { _ = windows.SetConsoleMode(h, mode) }
 }
+
+// stdinIsTerminal : l'entrée est une console (une personne peut répondre).
+func stdinIsTerminal() bool {
+	var mode uint32
+	return windows.GetConsoleMode(windows.Handle(os.Stdin.Fd()), &mode) == nil
+}

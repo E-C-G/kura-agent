@@ -25,9 +25,6 @@ import (
 //	tous   /usr/local/bin/kura-agent exécutable copié par install, sauf si kura-agent est
 //	                         déjà dans /usr/bin (paquet deb) ou /usr/local/bin
 
-// BinDir : emplacement de l'exécutable copié par install.
-const BinDir = "/usr/local/bin"
-
 // GUIName : pas de version sans console sous Linux et macOS.
 const GUIName = ""
 
