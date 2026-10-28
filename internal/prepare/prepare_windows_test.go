@@ -63,3 +63,16 @@ func TestEnsureStagingRefusesJunction(t *testing.T) {
 		t.Fatal("jonction acceptée comme zone de préparation")
 	}
 }
+
+// « Modification » accordée aux utilisateurs authentifiés sur la racine du volume
+// (0x1301bf, vu sur des postes mis à niveau) : sans effet sur l'outil, accepté ; le même
+// droit sur un dossier au-dessus de l'outil, non.
+func TestRootModifyRight(t *testing.T) {
+	const modify = 0x1301bf
+	if modify&rootForbidden != 0 {
+		t.Fatal("la racine du volume avec « Modification » pour les utilisateurs doit être acceptée")
+	}
+	if modify&upperForbidden == 0 || modify&parentForbidden == 0 {
+		t.Fatal("« Modification » sur un dossier de l'outil doit être refusée")
+	}
+}
