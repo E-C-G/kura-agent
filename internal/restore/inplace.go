@@ -21,6 +21,10 @@ const (
 	ActSame                  // présent et identique à la version : laissé
 )
 
+// errBusyFile : un fichier actuel qu'on ne peut ni examiner ni lire ; sous Windows,
+// souvent ouvert sans partage par une application (Outlook et son .pst).
+const errBusyFile = "fichier actuel inaccessible, ouvert par une application ? Rien n'a changé"
+
 // partSize : taille des parties d'un envoi de la CLI AWS (multipart_chunksize par
 // défaut), pour recalculer l'ETag d'un gros fichier.
 const partSize = 8 << 20
@@ -34,7 +38,7 @@ func (d *Dest) Classify(it Item, replace bool) (Action, error) {
 	case errors.Is(err, fs.ErrNotExist):
 		return ActWrite, nil
 	case err != nil:
-		return 0, err
+		return 0, fmt.Errorf("%s : %w", errBusyFile, err)
 	case isLink(fi):
 		return 0, ErrLink
 	case !fi.Mode().IsRegular():
@@ -46,7 +50,7 @@ func (d *Dest) Classify(it Item, replace bool) (Action, error) {
 	}
 	same, err := d.sameContent(it.Out, it.Version)
 	if err != nil {
-		return 0, fmt.Errorf("fichier actuel illisible (ouvert par une application ?) : %w", err)
+		return 0, fmt.Errorf("%s : %w", errBusyFile, err)
 	}
 	if same {
 		return ActSame, nil

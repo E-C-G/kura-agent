@@ -164,7 +164,7 @@ func (d *Dest) Replace(ctx context.Context, g Getter, rel string, v Version, sta
 	}
 	fi, err := d.root.Lstat(rel)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("%s : %w", errBusyFile, err)
 	}
 	if isLink(fi) {
 		return "", ErrLink
@@ -192,7 +192,7 @@ func (d *Dest) Replace(ctx context.Context, g Getter, rel string, v Version, sta
 	}
 	if err := d.root.Rename(rel, backup); err != nil {
 		_ = d.root.Remove(tmp)
-		return "", fmt.Errorf("fichier actuel non déplacé (ouvert par une application ?), rien n'a changé : %w", err)
+		return "", fmt.Errorf("%s : %w", errBusyFile, err)
 	}
 	if err := d.root.Rename(tmp, rel); err != nil {
 		_ = d.root.Rename(backup, rel)

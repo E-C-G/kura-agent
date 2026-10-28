@@ -46,8 +46,10 @@ func TestReplaceLockedFile(t *testing.T) {
 	}
 	m := &memBucket{data: map[string][]byte{"v1": []byte("ancienne")}}
 	v := Version{Key: "k", VersionID: "v1", Size: 8, ETag: `"00000000000000000000000000000000"`}
-	if _, err := d.Classify(Item{File: File{Version: v}, Out: "boite.pst"}, true); err != nil {
-		t.Logf("classement : %v", err) // tailles différentes : pas de lecture nécessaire
+	// Windows refuse même d'examiner un fichier ouvert sans partage : le classement le
+	// signale, le remplacement aussi.
+	if _, err := d.Classify(Item{File: File{Version: v}, Out: "boite.pst"}, true); err == nil || !strings.Contains(err.Error(), "ouvert par une application") {
+		t.Fatalf("classement : %v", err)
 	}
 	_, err = d.Replace(context.Background(), m, "boite.pst", v, "x")
 	if err == nil || !strings.Contains(err.Error(), "ouvert par une application") {
