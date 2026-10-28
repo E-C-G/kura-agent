@@ -40,7 +40,7 @@ jobs:
             # lisible sans le journal brut) et échoue sinon.
             if ! go mod tidy -diff > tidy.diff 2>&1; then
               cat tidy.diff
-              echo "::error title=go mod tidy::$(sed ':a;N;$!ba;s/%/%25/g;s/\r//g;s/\n/%0A/g' tidy.diff)"
+              echo "::error title=go mod tidy::$(grep -v '^go: downloading' tidy.diff | sed ':a;N;$!ba;s/%/%25/g;s/\r//g;s/\n/%0A/g')"
               exit 1
             fi
           fi
