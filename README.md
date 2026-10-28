@@ -21,7 +21,7 @@ Console d'administration associée : [E-C-G/kura-ctl](https://github.com/E-C-G/k
 | 5 ter | `install --package` : poste installé en une fois depuis un paquet de la console, CLI AWS comprise | **fait** |
 | 6 | Restauration : historique, état à une date (lot 1), vers un dossier à part, journal, bilan (lot 2), en place (lot 3), depuis l'icône pour ses propres fichiers (lot 4) | **fait** |
 | 7 | `self-update` : recherche et vérification de l'attestation GitHub, installation, retour arrière, icône | **fait** |
-| 8 | Préparations avant les jobs : archive zip (lot 1) ; exports de bases (lot 2), chiffrement gpg et age (lot 3) | lot 1 **fait** |
+| 8 | Préparations avant les jobs : archive zip (lot 1) ; exports de bases (lot 2), chiffrement gpg et age (lot 3) | lots 1 et 2 **faits** |
 
 Commandes disponibles : `run`, `validate`, `status`, `credentials`, `import`, `install`, `uninstall`,
 `suspend`, `tray`, `self-update`, `restore`, `version`.
@@ -43,6 +43,7 @@ séparées, un fichier par système, et recensées dans `internal/platform` :
 | CLI AWS automatique | `awsinstall` | oui | Linux : oui (zip signé PGP) ; macOS : oui (`AWSCLIV2.pkg` signé par l'équipe Apple d'Amazon, notarisé) |
 | icône et canal vers l'icône | `tray`, `ipc` | oui | non pris en charge |
 | fermeture d'applications | `procs` (pré-tâches) | oui | non pris en charge |
+| export SQL Server | `prepare` (`db_export`, `engine: sqlserver`) | oui | non pris en charge (PostgreSQL, MySQL : oui) |
 
 Hors Windows, une commande qui a besoin d'une fonction absente s'arrête tout de suite et dit ce
 qui manque. Sous Linux, toutes les commandes fonctionnent sauf `tray` (avec `sudo` pour le coffre
@@ -672,12 +673,13 @@ toute la passe était à refaire. L'agent lance `aws.exe` avec `AWS_RETRY_MODE=s
 20 s, pendant environ 2 minutes. Au-delà, l'agent relance la commande entière (2 nouvelles
 tentatives à 5 min d'intervalle, voir plus haut).
 
-## Préparations : archive zip avant les jobs
+## Préparations : archive zip et export de bases avant les jobs
 
 Une préparation écrit, avant les jobs, un fichier que la synchronisation seule ne sait pas
 sauvegarder proprement ; un job ordinaire l'envoie ensuite en prenant `${STAGING:<id>}` pour
 source. Cette version fait les archives zip (un dossier de dizaines de milliers de petits
-fichiers, ou à sauvegarder d'un bloc) ; les exports de bases et le chiffrement suivront.
+fichiers, ou à sauvegarder d'un bloc) et les exports de bases (voir plus bas) ; le chiffrement
+suivra.
 
 ```yaml
 tools:                             # outils installés sur le poste, chemins absolus
@@ -738,8 +740,91 @@ jobs:
   jamais en simulation. Résultat, nombre de fichiers et taille : `status.json`, `kura-agent status`,
   bilan (`prepares` dans le webhook), journal `prepare-<id>.log` de l'exécution.
 - **Validation.** `${STAGING:x}` doit nommer une préparation, chaque préparation doit être envoyée par
-  un job, `tools.zip` est obligatoire pour une préparation zip. `db_export`, `gpg` et `age` sont
-  refusés par cette version.
+  un job, `tools.zip` est obligatoire pour une préparation zip. `gpg` et `age` sont refusés par
+  cette version.
+
+### Export de bases (`db_export`)
+
+L'agent lance l'outil d'export du moteur, une base après l'autre, et écrit un fichier par base.
+L'export est cohérent sans arrêter la base : une seule transaction de lecture (PostgreSQL,
+MySQL), ou la sauvegarde native de SQL Server. Recharger un export dans la base reste le
+travail de l'administrateur (`pg_restore`, `mysql`, `RESTORE DATABASE`).
+
+```yaml
+tools:
+  pg_dump: "C:/Program Files/PostgreSQL/17/bin/pg_dump.exe"   # /usr/lib/postgresql/16/bin/pg_dump
+  mysqldump: "C:/Program Files/MariaDB 11.4/bin/mariadb-dump.exe"   # ou mysqldump
+  sqlcmd: "C:/Program Files/Microsoft SQL Server/Client SDK/ODBC/170/Tools/Binn/SQLCMD.EXE"
+
+prepare:
+  - id: compta-db
+    type: db_export
+    engine: postgresql             # postgresql | mysql (MySQL, MariaDB) | sqlserver (Windows)
+    host: localhost                # défaut ; port : 5432 ou 3306 par défaut
+    user: kura_backup              # rôle en lecture seule
+    password: credential:compta-db # jamais en clair ; demandé par install
+    databases: [compta]            # absent : toutes, sauf les bases système
+    timeout: 1h
+
+  - id: gestion-db
+    type: db_export
+    engine: sqlserver
+    instance: 'localhost\SQLEXPRESS' # instance locale seulement ; défaut localhost
+    databases: [Gestion]           # sans user : authentification Windows du compte SYSTEM
+    verify: true                   # RESTORE VERIFYONLY après chaque sauvegarde
+
+jobs:
+  - id: compta
+    source: "${STAGING:compta-db}"
+    destination: BASES/COMPTA
+  - id: gestion
+    source: "${STAGING:gestion-db}"
+    destination: BASES/GESTION
+```
+
+|  | PostgreSQL | MySQL, MariaDB | SQL Server (Windows) |
+| --- | --- | --- | --- |
+| Outil (`tools`) | `pg_dump` 12 ou plus, au moins la version du serveur ; `psql`, `pg_restore`, `pg_dumpall` du même dossier | `mysqldump` ou `mariadb-dump` ; `mysql` ou `mariadb` du même dossier | `sqlcmd` (ODBC, ou go-sqlcmd avec TCP activé sur l'instance) |
+| Commande | `pg_dump --format=custom` | `--single-transaction --routines --triggers --events --hex-blob --no-tablespaces` (+ `--set-gtid-purged=OFF --column-statistics=0` pour MySQL 8) | `BACKUP DATABASE … WITH COPY_ONLY, CHECKSUM, INIT`, plus `COMPRESSION` hors éditions Express et Web |
+| Fichier | `<base>.dump`, et `globals.sql` (rôles, sans mots de passe) | `<base>.sql.gz` (compressé par l'agent) | `<base>.bak` |
+| Mot de passe | `PGPASSWORD` du seul processus lancé | fichier d'options de la zone de préparation, effacé après | `SQLCMDPASSWORD` du seul processus lancé |
+| Sans `user` | socket local (`socket: /run/postgresql`), authentification `peer` du compte `kura-agent` | socket local (`socket: /run/mysqld/mysqld.sock`), `unix_socket` | authentification Windows du compte SYSTEM |
+| Contrôle | en-tête `PGDMP`, puis relecture complète par `pg_restore` | dernière ligne `-- Dump completed` | sommes de contrôle (`CHECKSUM`) ; `RESTORE VERIFYONLY` avec `verify: true` |
+
+- **Rôle dédié, en lecture seule.**
+  PostgreSQL : `CREATE ROLE kura_backup LOGIN PASSWORD '…'; GRANT pg_read_all_data TO kura_backup;`
+  (PostgreSQL 14 ou plus). MySQL, MariaDB : `CREATE USER 'kura_backup'@'localhost' IDENTIFIED BY '…';
+  GRANT SELECT, SHOW VIEW, TRIGGER, EVENT, LOCK TABLES, PROCESS ON *.* TO 'kura_backup'@'localhost';`.
+  SQL Server : `CREATE LOGIN [NT AUTHORITY\SYSTEM] FROM WINDOWS;` puis, dans chaque base,
+  `CREATE USER [NT AUTHORITY\SYSTEM]; ALTER ROLE db_backupoperator ADD MEMBER [NT AUTHORITY\SYSTEM];`
+  (ou une connexion SQL dédiée, avec `user` et `password`).
+- **Mot de passe** : `password: credential:<nom>` seulement ; `install` le demande s'il manque au
+  coffre, `kura-agent credentials set <nom>` le change. Jamais en argument, jamais au journal.
+- **Noms de fichiers** : le nom de la base ; un caractère qu'un système de fichiers refuserait
+  est codé `%XX` (`L'Atelier` → `L%27Atelier.bak`). Deux bases qui ne différeraient que par la casse
+  sont refusées. Le nom reste le même à chaque exécution : l'historique vient des versions du bucket.
+- **SQL Server** écrit lui-même la sauvegarde : le temps de l'export, son compte de service
+  (`NT SERVICE\MSSQL$<instance>`, et son compte de connexion s'il en a un propre) reçoit le droit
+  d'écrire dans le seul dossier temporaire de la préparation ; ensuite l'agent reprend la propriété
+  des fichiers (Administrateurs) et rétablit les droits de la zone. `COPY_ONLY` laisse intacte la
+  chaîne de sauvegardes du client. Une base hors ligne (ou dans un autre état qu'`ONLINE`) est
+  signalée en échec. Les commandes passent par `sqlcmd -b -x` : aucune substitution de variables,
+  arrêt au premier échec ; noms de bases et chemins échappés.
+- **PostgreSQL** : le nom de la base passe toujours entre apostrophes dans la chaîne de connexion
+  (un nom contenant `=` ne peut pas désigner un autre serveur). `globals.sql` porte les rôles et
+  tablespaces, à recréer avant de recharger un export sur un serveur neuf ; s'il ne peut pas être
+  écrit, avertissement.
+- **MySQL, MariaDB** : `--single-transaction` ne fige que les tables InnoDB ; les bases qui ont des
+  tables MyISAM ou Aria sont signalées au journal. Utiliser l'outil du même éditeur que le serveur
+  (`mariadb-dump` pour MariaDB).
+- **Espace disque** : en plus de la réserve de 2 Go, l'espace libre doit dépasser de 20 % la taille
+  du dernier export réussi (`prepare_last_size` dans `status.json`), sinon rien n'est lancé.
+- **Échec** : une base en échec fait échouer la préparation (job sauté, aucun export ancien ou
+  partiel envoyé) ; la sortie d'erreur de l'outil va au journal `prepare-<id>.log`. Les bases
+  exportées s'affichent dans `kura-agent status` et `status.json` (`databases`).
+- **`validate`** vérifie les outils et, pour une préparation avec `user`, se connecte et liste les
+  bases qui seront exportées ; sans `user` (authentification du système), la connexion n'est
+  vérifiée qu'à la première exécution, sous le compte de la tâche.
 
 ## Nouvelles versions : `kura-agent self-update`
 

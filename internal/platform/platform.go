@@ -12,6 +12,7 @@
 //	CLI AWS automatique           awsinstall                      oui       Linux (zip, PGP) ; macOS à venir
 //	icône et canal vers l'icône   tray, ipc                       oui       non (à venir)
 //	fermeture d'applications      procs (pré-tâches)              oui       non (à venir)
+//	export SQL Server             prepare (db_export sqlserver)   oui       non (à venir)
 //
 // Hors Windows, une fonction non encore écrite renvoie une NotImplementedError, et les
 // commandes qui en ont besoin s'arrêtent dès le départ avec un message clair. Les
@@ -31,24 +32,26 @@ type Feature int
 
 // Fonctions dépendantes du système.
 const (
-	Scheduling  Feature = iota + 1 // tâche planifiée (Windows : \Kura\Sync)
-	Vault                          // coffre des secrets (Windows : DPAPI)
-	Install                        // installation, désinstallation
-	AWSCLISetup                    // installation automatique de la CLI AWS
-	Tray                           // icône par session et canal vers elle
-	AppControl                     // fermeture et relance d'applications (pré-tâches)
+	Scheduling      Feature = iota + 1 // tâche planifiée (Windows : \Kura\Sync)
+	Vault                              // coffre des secrets (Windows : DPAPI)
+	Install                            // installation, désinstallation
+	AWSCLISetup                        // installation automatique de la CLI AWS
+	Tray                               // icône par session et canal vers elle
+	AppControl                         // fermeture et relance d'applications (pré-tâches)
+	SQLServerExport                    // export SQL Server par sqlcmd (préparation db_export)
 )
 
 // All : toutes les fonctions, dans l'ordre d'affichage.
-var All = []Feature{Scheduling, Vault, Install, AWSCLISetup, Tray, AppControl}
+var All = []Feature{Scheduling, Vault, Install, AWSCLISetup, Tray, AppControl, SQLServerExport}
 
 var labels = map[Feature]string{
-	Scheduling:  "planification",
-	Vault:       "coffre des secrets",
-	Install:     "installation",
-	AWSCLISetup: "installation de la CLI AWS",
-	Tray:        "icône",
-	AppControl:  "fermeture d'applications",
+	Scheduling:      "planification",
+	Vault:           "coffre des secrets",
+	Install:         "installation",
+	AWSCLISetup:     "installation de la CLI AWS",
+	Tray:            "icône",
+	AppControl:      "fermeture d'applications",
+	SQLServerExport: "export SQL Server",
 }
 
 func (f Feature) String() string {

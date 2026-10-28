@@ -79,7 +79,7 @@ func TestPrepareValidation(t *testing.T) {
 		{"tools.zip absent", "  zip: \"C:/Program Files/7-Zip/7z.exe\"\n", "", "prepare[0].type"},
 		{"tools.zip relatif", "C:/Program Files/7-Zip/7z.exe", "7z.exe", "tools.zip"},
 		{"tools.zip inconnu", "C:/Program Files/7-Zip/7z.exe", "C:/Outils/winrar.exe", "tools.zip"},
-		{"type à venir", "type: zip", "type: db_export", "prepare[0].type"},
+		{"type à venir", "type: zip", "type: gpg", "prepare[0].type"},
 		{"type inconnu", "type: zip", "type: rar", "prepare[0].type"},
 		{"niveau", "exclude:", "level: max\n    exclude:", "prepare[0].level"},
 		{"on_locked", "exclude:", "on_locked: ignore\n    exclude:", "prepare[0].on_locked"},

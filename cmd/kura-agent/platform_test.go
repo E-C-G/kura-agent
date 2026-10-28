@@ -62,4 +62,12 @@ func TestConfigMissing(t *testing.T) {
 	if err := configMissing(cfg, func(platform.Feature) bool { return true }, false); err != nil {
 		t.Fatalf("tout pris en charge : %v", err)
 	}
+	db := &config.Config{Prepare: []config.Prepare{
+		{ID: "compta-db", Type: config.PrepareDBExport, Engine: config.EnginePostgreSQL},
+		{ID: "gestion-db", Type: config.PrepareDBExport, Engine: config.EngineSQLServer},
+	}}
+	err = configMissing(db, none, false)
+	if err == nil || !strings.Contains(err.Error(), "prepare[1] (gestion-db)") || strings.Contains(err.Error(), "compta-db") {
+		t.Fatalf("export SQL Server hors Windows : %v", err)
+	}
 }

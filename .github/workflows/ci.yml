@@ -178,6 +178,128 @@ jobs:
           ./kura-agent.exe version
           ./kura-agent.exe help
 
+  # Préparations db_export contre de vraies bases (services) avec les vrais outils :
+  # PostgreSQL 16 et MySQL 8.0 (clients du runner), puis MariaDB 10.11 avec mariadb-dump.
+  # Chaque export est rechargé et comparé.
+  bases-linux:
+    name: Linux · exports de bases (PostgreSQL, MySQL, MariaDB)
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: kura-ci-pg
+        ports: ["5432:5432"]
+        options: --health-cmd "pg_isready -U postgres" --health-interval 5s --health-retries 20
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: kura-ci-my
+        ports: ["3306:3306"]
+        options: --health-cmd "mysqladmin ping -pkura-ci-my" --health-interval 5s --health-retries 30
+      mariadb:
+        image: mariadb:10.11
+        env:
+          MARIADB_ROOT_PASSWORD: kura-ci-my
+        ports: ["3307:3306"]
+        options: --health-cmd "healthcheck.sh --connect --innodb_initialized" --health-interval 5s --health-retries 30
+    env:
+      KURA_TEST_DB: "1"
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.mod
+
+      - name: Modules
+        run: go mod download
+
+      - name: PostgreSQL et MySQL
+        env:
+          KURA_TEST_PG_DUMP: /usr/lib/postgresql/16/bin/pg_dump
+          KURA_TEST_PG_HOST: 127.0.0.1
+          KURA_TEST_PG_PORT: "5432"
+          KURA_TEST_PG_PASSWORD: kura-ci-pg
+          KURA_TEST_MYSQLDUMP: /usr/bin/mysqldump
+          KURA_TEST_MYSQL_TARGETS: 127.0.0.1:3306
+          KURA_TEST_MYSQL_ROOT_PASSWORD: kura-ci-my
+        run: |
+          # Échec : la fin de la sortie en une annotation (lisible sans le journal brut).
+          annotate() { tail -n 150 "$1" | sed ':a;N;$!ba;s/%/%25/g;s/\r//g;s/\n/%0A/g' | sed 's/^/::error title=go test::/'; }
+          ls -l "$KURA_TEST_PG_DUMP" "$KURA_TEST_MYSQLDUMP" || true
+          set -o pipefail
+          go test -count=1 -v -run 'TestPostgresRealExport|TestMySQLRealExport' ./internal/prepare/ 2>&1 | tee test.log || { annotate test.log; exit 1; }
+
+      # mariadb-dump hors des paquets MySQL du runner (qui l'excluent) : client MariaDB
+      # extrait dans /usr/lib/kura-mariadb, dossier de root (/opt du runner est ouvert à
+      # tous : l'agent y refuserait l'outil, à juste titre) ; sa bibliothèque libmariadb3
+      # s'installe à côté de MySQL sans conflit.
+      - name: Client MariaDB
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q libmariadb3
+          cd "$RUNNER_TEMP"
+          apt-get download mariadb-client mariadb-client-core
+          for d in mariadb-client*.deb; do sudo dpkg-deb -x "$d" /usr/lib/kura-mariadb; done
+          sudo setfacl -Rb /usr/lib/kura-mariadb
+          ls -l /usr/lib/kura-mariadb/usr/bin/ | grep -E 'mariadb|mysql'
+          /usr/lib/kura-mariadb/usr/bin/mariadb-dump --version
+
+      - name: MariaDB
+        env:
+          KURA_TEST_MYSQLDUMP: /usr/lib/kura-mariadb/usr/bin/mariadb-dump
+          KURA_TEST_MYSQL_TARGETS: 127.0.0.1:3307
+          KURA_TEST_MYSQL_ROOT_PASSWORD: kura-ci-my
+        run: |
+          # Échec : la fin de la sortie en une annotation (lisible sans le journal brut).
+          annotate() { tail -n 150 "$1" | sed ':a;N;$!ba;s/%/%25/g;s/\r//g;s/\n/%0A/g' | sed 's/^/::error title=go test::/'; }
+          set -o pipefail
+          go test -count=1 -v -run 'TestMySQLRealExport' ./internal/prepare/ 2>&1 | tee test.log || { annotate test.log; exit 1; }
+
+  # Export SQL Server : SQL Server 2022 Express (instance SQLEXPRESS) installé sur le
+  # runner, sqlcmd ODBC fourni avec ; droit d'écriture du compte du service accordé puis
+  # retiré, propriété des sauvegardes reprise.
+  bases-windows:
+    name: Windows · export SQL Server
+    runs-on: windows-latest
+    env:
+      KURA_TEST_DB: "1"
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.mod
+
+      - name: Modules
+        shell: bash
+        run: go mod download
+
+      - name: SQL Server Express
+        shell: pwsh
+        run: |
+          choco install sql-server-express -y --no-progress
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Get-Service 'MSSQL$SQLEXPRESS'
+          $sqlcmd = Get-ChildItem 'C:\Program Files\Microsoft SQL Server\Client SDK\ODBC\*\Tools\Binn\SQLCMD.EXE' |
+            Sort-Object FullName -Descending | Select-Object -First 1 -ExpandProperty FullName
+          if (-not $sqlcmd) { Write-Error "sqlcmd ODBC introuvable"; exit 1 }
+          & $sqlcmd -S 'localhost\SQLEXPRESS' -E -b -C -Q "SELECT @@VERSION"
+          "KURA_TEST_SQLCMD=$sqlcmd" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Export SQL Server
+        shell: bash
+        env:
+          KURA_TEST_SQL_INSTANCE: localhost\SQLEXPRESS
+        run: |
+          # Échec : la fin de la sortie en une annotation (lisible sans le journal brut).
+          annotate() { tail -n 150 "$1" | sed ':a;N;$!ba;s/%/%25/g;s/\r//g;s/\n/%0A/g' | sed 's/^/::error title=go test::/'; }
+          set -o pipefail
+          go test -count=1 -v -run 'TestSQLServerRealExport|TestMSServiceName' ./internal/prepare/ 2>&1 | tee test.log || { annotate test.log; exit 1; }
+
   # macOS (Apple silicon) : tests sur un vrai macOS, plists relues par plutil.
   macos:
     name: macOS · tests

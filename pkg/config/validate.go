@@ -201,10 +201,16 @@ func (c *Config) Validate(opt ValidateOptions) error {
 			if pr.OnLocked != OnLockedFail && pr.OnLocked != OnLockedSkip {
 				add(f+".on_locked", "valeur %q inconnue (fail, skip)", pr.OnLocked)
 			}
-		case PrepareDBExport, PrepareGPG, PrepareAge:
-			add(f+".type", "type %q pas encore disponible dans cette version de l'agent (zip seulement)", pr.Type)
+			if pr.Engine != "" || pr.Host != "" || pr.Port != 0 || pr.Socket != "" || pr.Instance != "" ||
+				pr.User != "" || pr.Password != "" || len(pr.Databases) > 0 || pr.Verify {
+				add(f, "engine, host, port, socket, instance, user, password, databases et verify sont réservés à db_export")
+			}
+		case PrepareDBExport:
+			validateDBExport(c, pr, f, add)
+		case PrepareGPG, PrepareAge:
+			add(f+".type", "type %q pas encore disponible dans cette version de l'agent (zip, db_export)", pr.Type)
 		case "":
-			add(f+".type", "obligatoire (zip)")
+			add(f+".type", "obligatoire (zip, db_export)")
 		default:
 			add(f+".type", "type %q inconnu (zip, db_export, gpg, age)", pr.Type)
 		}
@@ -368,6 +374,99 @@ func (c *Config) Validate(opt ValidateOptions) error {
 		return errs
 	}
 	return nil
+}
+
+var (
+	// hostPattern : nom d'hôte, adresse IPv4 ou IPv6 ; jamais d'option (« -… ») ni d'espace.
+	hostPattern = regexp.MustCompile(`^[A-Za-z0-9_\[][A-Za-z0-9_.:\[\]-]*$`)
+	// instancePattern : instance SQL Server locale, nommée ou non, port facultatif. Une
+	// instance distante écrirait la sauvegarde sur son propre disque.
+	instancePattern = regexp.MustCompile(`(?i)^(localhost|\.|\(local\)|127\.0\.0\.1)(\\[A-Za-z_][A-Za-z0-9_$]{0,15})?(,[0-9]{1,5})?$`)
+)
+
+// validateDBExport vérifie une préparation db_export (moteur, connexion, secret, bases).
+func validateDBExport(c *Config, pr Prepare, f string, add func(field, format string, a ...any)) {
+	tools := map[string]struct{ field, path string }{
+		EnginePostgreSQL: {"tools.pg_dump", c.Tools.PgDump},
+		EngineMySQL:      {"tools.mysqldump", c.Tools.MySQLDump},
+		EngineSQLServer:  {"tools.sqlcmd", c.Tools.SQLCmd},
+	}
+	t, known := tools[pr.Engine]
+	switch {
+	case pr.Engine == "":
+		add(f+".engine", "obligatoire (postgresql, mysql, sqlserver)")
+	case !known:
+		add(f+".engine", "moteur %q inconnu (postgresql, mysql pour MySQL et MariaDB, sqlserver)", pr.Engine)
+	case t.path == "":
+		add(f+".engine", "%s demande %s : chemin absolu de l'outil d'export, installé sur le poste", pr.Engine, t.field)
+	}
+	if pr.Source != "" || len(pr.Exclude) > 0 || pr.Level != "" || pr.OnLocked != "" {
+		add(f, "source, exclude, level et on_locked sont réservés à zip")
+	}
+	if pr.Engine == EngineSQLServer {
+		if pr.Host != "" || pr.Port != 0 || pr.Socket != "" {
+			add(f, "SQL Server se désigne par instance (ex. localhost\\SQLEXPRESS), pas par host, port ni socket")
+		}
+		if !instancePattern.MatchString(pr.Instance) {
+			add(f+".instance", "%q : instance locale attendue (localhost, localhost\\SQLEXPRESS, localhost,1433) ; une instance distante écrirait la sauvegarde sur son propre disque", pr.Instance)
+		}
+	} else {
+		if pr.Instance != "" {
+			add(f+".instance", "réservé à sqlserver")
+		}
+		if pr.Verify {
+			add(f+".verify", "réservé à sqlserver (RESTORE VERIFYONLY)")
+		}
+		switch {
+		case pr.Socket != "" && (pr.Host != "" || pr.Port != 0):
+			add(f+".socket", "socket remplace host et port : garder l'un ou l'autre")
+		case pr.Socket != "" && !strings.HasPrefix(pr.Socket, "/"):
+			add(f+".socket", "chemin absolu attendu (Linux, macOS), reçu %q", pr.Socket)
+		case pr.Socket == "" && !hostPattern.MatchString(pr.Host):
+			add(f+".host", "nom d'hôte ou adresse attendu, reçu %q", pr.Host)
+		}
+		if pr.Port < 0 || pr.Port > 65535 {
+			add(f+".port", "port entre 1 et 65535 attendu, reçu %d", pr.Port)
+		}
+	}
+	switch {
+	case pr.User == "" && pr.Password != "":
+		add(f+".user", "obligatoire avec un mot de passe")
+	case pr.User == "" && pr.Engine != EngineSQLServer && pr.Socket == "":
+		add(f+".user", "obligatoire, sauf connexion locale par socket (authentification du système)")
+	case pr.User != "" && !safeName(pr.User):
+		add(f+".user", "%q : caractères de contrôle ou tiret initial interdits", pr.User)
+	}
+	if pr.Password != "" {
+		if name, ok := strings.CutPrefix(pr.Password, CredentialPrefix); !ok || !idPattern.MatchString(name) {
+			add(f+".password", "référence attendue sous la forme credential:<nom> ; ne mettez jamais de mot de passe en clair ici")
+		}
+	}
+	seen := map[string]bool{}
+	for i, db := range pr.Databases {
+		switch {
+		case !safeName(db):
+			add(fmt.Sprintf("%s.databases[%d]", f, i), "%q : nom vide, caractères de contrôle ou tiret initial interdits", db)
+		case seen[strings.ToLower(db)]:
+			add(fmt.Sprintf("%s.databases[%d]", f, i), "%q déjà listée (les fichiers d'export ne distinguent pas la casse sous Windows)", db)
+		}
+		seen[strings.ToLower(db)] = true
+	}
+}
+
+// safeName : nom de base ou de rôle passé aux outils d'export : 1 à 128 caractères, sans
+// caractère de contrôle, ne commençant pas par « - » (pris pour une option). Guillemets
+// et crochets sont permis : l'agent les échappe partout où il les écrit.
+func safeName(s string) bool {
+	if s == "" || len(s) > 128 || strings.HasPrefix(s, "-") {
+		return false
+	}
+	for _, r := range s {
+		if r < 0x20 || r == 0x7f {
+			return false
+		}
+	}
+	return true
 }
 
 // absPath : chemin absolu Windows (C:\… ou C:/…) ou Unix (/…), quel que soit le système

@@ -48,11 +48,14 @@ type Status struct {
 	LastSuccess *time.Time `json:"last_success,omitempty"` // tous les jobs configurés réussis
 	// JobLastSuccess : dernière synchronisation réussie (ok ou avertissement) de chaque job.
 	JobLastSuccess map[string]time.Time `json:"job_last_success,omitempty"`
-	ExitCode       int                  `json:"exit_code"`
-	Message        string               `json:"message,omitempty"`
-	PreTasks       []PreTaskStatus      `json:"pre_tasks,omitempty"`
-	Prepares       []PrepareStatus      `json:"prepares,omitempty"`
-	Jobs           []JobStatus          `json:"jobs"`
+	// PrepareLastSize : taille du dernier résultat réussi de chaque préparation, pour
+	// vérifier l'espace libre avant la suivante (export de base : +20 %).
+	PrepareLastSize map[string]int64 `json:"prepare_last_size,omitempty"`
+	ExitCode        int              `json:"exit_code"`
+	Message         string           `json:"message,omitempty"`
+	PreTasks        []PreTaskStatus  `json:"pre_tasks,omitempty"`
+	Prepares        []PrepareStatus  `json:"prepares,omitempty"`
+	Jobs            []JobStatus      `json:"jobs"`
 	// Current est le job en cours pendant une exécution (info-bulle de l'icône).
 	Current *Progress `json:"current,omitempty"`
 }
@@ -78,14 +81,16 @@ type PreTaskStatus struct {
 
 // PrepareStatus résume une préparation (archive, export) faite avant les jobs.
 type PrepareStatus struct {
-	ID        string  `json:"id"`
-	Type      string  `json:"type"`
-	Result    string  `json:"result"`
-	Files     int     `json:"files,omitempty"`   // fichiers archivés
-	Missing   int     `json:"missing,omitempty"` // fichiers illisibles laissés de côté (on_locked: skip)
-	Size      int64   `json:"size,omitempty"`    // octets produits
-	DurationS float64 `json:"duration_s"`
-	Message   string  `json:"message,omitempty"`
+	ID      string `json:"id"`
+	Type    string `json:"type"`
+	Result  string `json:"result"`
+	Files   int    `json:"files,omitempty"`   // fichiers archivés
+	Missing int    `json:"missing,omitempty"` // fichiers illisibles laissés de côté (on_locked: skip)
+	Size    int64  `json:"size,omitempty"`    // octets produits
+	// Databases : bases exportées (db_export), dans l'ordre.
+	Databases []string `json:"databases,omitempty"`
+	DurationS float64  `json:"duration_s"`
+	Message   string   `json:"message,omitempty"`
 }
 
 // JobStatus résume un job.
