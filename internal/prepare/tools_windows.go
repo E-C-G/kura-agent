@@ -26,6 +26,10 @@ const (
 	exeForbidden    = takeOver | fileWriteData | fileAppendData | fileWriteEA
 	parentForbidden = takeOver | fileDeleteChild | fileWriteData | fileAppendData // DLL posée à côté
 	upperForbidden  = takeOver | fileDeleteChild                                  // dossier renommé ou remplacé
+	// Racine du volume : elle ne peut être ni supprimée ni renommée, DELETE sur elle ne
+	// donne rien (certains postes l'accordent aux utilisateurs authentifiés, avec
+	// « Modification ») ; seuls comptent ses droits et ce qu'elle contient.
+	rootForbidden = takeOver&^windows.DELETE | fileDeleteChild
 )
 
 // adminOnly vérifie l'outil, ses dossiers parents, puis tout ce que contient son dossier
@@ -97,6 +101,10 @@ func chainAdminOnly(path string) error {
 				return fmt.Errorf("%s : outil posé à la racine du volume ; l'installer dans son propre dossier (ex. C:\\Program Files)", path)
 			}
 			forbidden = parentForbidden
+		default:
+			if root {
+				forbidden = rootForbidden
+			}
 		}
 		if err := checkACL(p, forbidden); err != nil {
 			return err
