@@ -9,12 +9,12 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
 
 	"github.com/E-C-G/kura-agent/internal/execx"
-	"github.com/E-C-G/kura-agent/internal/guard"
 	"github.com/E-C-G/kura-agent/internal/state"
 	"github.com/E-C-G/kura-agent/pkg/config"
 )
@@ -27,10 +27,11 @@ const (
 
 // runZip archive p.Source dans <tmp>/<id>.zip avec tools.zip (Info-ZIP ou 7-Zip).
 //
-// L'agent parcourt lui-même la source avec les règles du garde-fou (liens et jonctions
-// jamais suivis, exclusions, dossiers de l'agent laissés de côté) et ne passe à l'outil
-// que la liste des fichiers retenus, avec l'option qui garde un lien comme lien. Puis il
-// relit l'archive en entier (sommes CRC) et vérifie qu'elle ne contient rien d'autre.
+// L'agent copie d'abord les fichiers retenus dans la zone de préparation (copySource :
+// liens et jonctions jamais suivis, exclusions, dossiers de l'agent laissés de côté,
+// chaque fichier ouvert sous la source). L'outil archive cette copie, que nul autre que
+// l'agent ne peut modifier, d'après la liste des fichiers copiés. Puis l'agent relit
+// l'archive en entier (sommes CRC) et vérifie qu'elle ne contient rien d'autre.
 func runZip(ctx context.Context, cfg *config.Config, p config.Prepare, d Deps, tmp string, ps *state.PrepareStatus, log *slog.Logger) error {
 	tool := cfg.Tools.Zip
 	check := d.CheckTool
@@ -43,39 +44,44 @@ func runZip(ctx context.Context, cfg *config.Config, p config.Prepare, d Deps, t
 	}
 	log.Info("outil zip", "chemin", tool, "version", version)
 
-	if err := guard.CheckSourceNotLink(p.Source); err != nil {
+	flavor := config.ZipFlavor(tool)
+	copyDir := filepath.Join(d.StagingDir, p.ID+".src")
+	if err := os.RemoveAll(copyDir); err != nil {
 		return err
 	}
-	census, err := guard.List(p.Source, p.Exclude, d.AgentDirs)
+	if err := os.Mkdir(copyDir, 0o700); err != nil {
+		return fmt.Errorf("copie de la source : %w", err)
+	}
+	defer os.RemoveAll(copyDir)
+	c, err := copySource(ctx, p.Source, p, d.AgentDirs, flavor, copyDir)
 	if err != nil {
 		return err
 	}
-	if len(census.Links) > 0 {
-		log.Warn("liens et jonctions non suivis, laissés hors de l'archive", "liens", census.Links)
+	if len(c.links) > 0 {
+		log.Warn("liens et jonctions non suivis, laissés hors de l'archive", "liens", c.links)
 	}
-	if len(census.Skipped) > 0 {
-		log.Warn("dossiers de l'agent laissés hors de l'archive", "dossiers", census.Skipped)
+	if len(c.agent) > 0 {
+		log.Warn("dossiers de l'agent laissés hors de l'archive", "chemins", c.agent)
 	}
-	var names, refused []string
-	for _, rel := range census.Paths {
-		// Une ligne par nom pour l'outil : un nom à retour à la ligne ne peut pas passer.
-		if strings.ContainsAny(rel, "\r\n") {
-			refused = append(refused, strconv.Quote(rel))
-			continue
-		}
-		names = append(names, rel)
+	if len(c.ignored) > 0 {
+		log.Info("ni fichiers ni dossiers (tubes, périphériques), laissés de côté", "chemins", c.ignored)
 	}
-	if len(refused) > 0 && p.OnLocked == config.OnLockedFail {
-		return fmt.Errorf("nom(s) de fichier à retour à la ligne, impossibles à archiver : %s", strings.Join(refused, ", "))
+	lost := append(append([]string(nil), c.missing...), c.refused...)
+	if len(lost) > 0 && p.OnLocked == config.OnLockedFail {
+		return fmt.Errorf("%d fichier(s) ou dossier(s) illisible(s) ou au nom impossible à archiver (%s)", len(lost), sample(lost))
 	}
+	names := c.names
 	if len(names) == 0 {
 		return fmt.Errorf("rien à archiver dans %s : source vide ou entièrement exclue", p.Source)
 	}
+	log.Info("source copiée dans la zone de préparation", "fichiers", len(names), "octets", c.bytes)
 
 	archive := filepath.Join(tmp, p.ID+".zip")
-	spec := execx.Spec{Name: tool, Env: toolEnv(tmp), Dir: p.Source, Out: d.Out}
+	// L'outil travaille sur la copie, que seul l'agent peut modifier : dossier de travail
+	// (premier lieu où Windows cherche une DLL après le sien) et fichiers lus.
+	spec := execx.Spec{Name: tool, Env: toolEnv(tmp), Dir: copyDir, Out: d.Out}
 	warnCode := infoZipWarning
-	switch config.ZipFlavor(tool) {
+	switch flavor {
 	case config.ZipInfoZIP:
 		level := "-6"
 		if p.Level == config.LevelStore {
@@ -129,13 +135,13 @@ func runZip(ctx context.Context, cfg *config.Config, p config.Prepare, d Deps, t
 		return fmt.Errorf("l'archive contient %d entrée(s) non demandée(s) (%s) : refusée", len(extra), sample(extra))
 	}
 	if len(missing) > 0 && p.OnLocked == config.OnLockedFail {
-		return fmt.Errorf("%d fichier(s) absent(s) de l'archive, souvent verrouillés (%s)", len(missing), sample(missing))
+		return fmt.Errorf("%d fichier(s) absent(s) de l'archive (%s)", len(missing), sample(missing))
 	}
 	ps.Files, ps.Size = len(entries), size
-	if n := len(missing) + len(refused); n > 0 {
-		ps.Missing = n
+	if lost = append(lost, missing...); len(lost) > 0 {
+		ps.Missing = len(lost)
 		ps.Result = state.ResultWarning
-		ps.Message = fmt.Sprintf("%d fichier(s) illisible(s) laissé(s) de côté (%s)", n, sample(append(missing, refused...)))
+		ps.Message = fmt.Sprintf("%d fichier(s) illisible(s) laissé(s) de côté (%s)", len(lost), sample(lost))
 	}
 	return nil
 }
@@ -150,7 +156,11 @@ func verifyZip(path string) ([]string, int64, error) {
 	defer r.Close()
 	var names []string
 	for _, f := range r.File {
-		name := strings.TrimPrefix(strings.ReplaceAll(f.Name, `\`, "/"), "./")
+		name := f.Name
+		if runtime.GOOS == "windows" { // un « \ » n'est un séparateur que sous Windows
+			name = strings.ReplaceAll(name, `\`, "/")
+		}
+		name = strings.TrimPrefix(name, "./")
 		if strings.HasSuffix(name, "/") {
 			continue
 		}
@@ -220,6 +230,11 @@ func CheckZip(ctx context.Context, r Runner, path string) (string, error) {
 	re, minMajor, minMinor, minText := infoZipVersion, 3, 0, "3.0"
 	switch flavor {
 	case config.ZipInfoZIP:
+		if runtime.GOOS == "windows" {
+			// Info-ZIP pour Windows n'est plus maintenu : noms lus dans la page de code
+			// ANSI, liens non gérés.
+			return "", fmt.Errorf("%s : sous Windows, utiliser 7-Zip (7z.exe)", path)
+		}
 		args = []string{"-v"}
 	case config.Zip7Zip:
 		re, minMajor, minMinor, minText = sevenZipVersion, 16, 2, "16.02"

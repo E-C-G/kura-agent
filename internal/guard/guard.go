@@ -22,10 +22,6 @@ type Census struct {
 	// relatifs à la source en séparateurs /. Jamais suivis par le comptage ; à exclure
 	// de aws s3 sync, qui suit les jonctions sous Windows malgré --no-follow-symlinks.
 	Links []string
-	// Paths : fichiers retenus (chemins relatifs, séparateurs /), seulement avec List.
-	Paths []string
-	// Skipped : dossiers laissés de côté parce qu'ils appartiennent à l'agent (List).
-	Skipped []string
 }
 
 // CountFiles compte les fichiers de root en appliquant les mêmes exclusions que
@@ -36,16 +32,7 @@ func CountFiles(root string, excludes []string) (Census, error) { return Scan(ro
 
 // Scan parcourt la source sans suivre aucun lien : fichiers comptés (garde-fou) et liens
 // ou jonctions relevés (Census.Links).
-func Scan(root string, excludes []string) (Census, error) { return walk(root, excludes, false, nil) }
-
-// List parcourt la source comme Scan et relève en plus chaque fichier retenu
-// (Census.Paths), pour le confier à un outil (archive zip) qui ne doit lire qu'eux. Les
-// dossiers de skip (ceux de l'agent : données, coffre…) ne sont jamais parcourus.
-func List(root string, excludes, skip []string) (Census, error) {
-	return walk(root, excludes, true, skip)
-}
-
-func walk(root string, excludes []string, collect bool, skip []string) (Census, error) {
+func Scan(root string, excludes []string) (Census, error) {
 	var c Census
 	st, err := os.Stat(root)
 	if err != nil {
@@ -54,28 +41,7 @@ func walk(root string, excludes []string, collect bool, skip []string) (Census, 
 	if !st.IsDir() {
 		return c, fmt.Errorf("source %q : ce n'est pas un dossier", root)
 	}
-	matchers := make([]*regexp.Regexp, 0, len(excludes))
-	for _, e := range excludes {
-		matchers = append(matchers, globToRegexp(e))
-	}
-	excluded := func(rel string, dir bool) bool {
-		// La CLI compare le motif au chemin complet (ex. E:\$RECYCLE.BIN\x) : on essaie le
-		// chemin relatif avec et sans séparateur initial, en '/' et en '\', et pour un
-		// dossier avec séparateur final, pour couvrir les motifs « *\$RECYCLE.BIN\* ».
-		win := strings.ReplaceAll(rel, "/", `\`)
-		cands := []string{rel, "/" + rel, win, `\` + win}
-		if dir {
-			cands = append(cands, rel+"/", "/"+rel+"/", win+`\`, `\`+win+`\`)
-		}
-		for _, m := range matchers {
-			for _, cand := range cands {
-				if m.MatchString(cand) {
-					return true
-				}
-			}
-		}
-		return false
-	}
+	excluded := Excluder(excludes)
 	rootErr := errors.New("racine")
 	err = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -93,10 +59,6 @@ func walk(root string, excludes []string, collect bool, skip []string) (Census, 
 		}
 		rel, _ := filepath.Rel(root, p)
 		rel = filepath.ToSlash(rel)
-		if d.IsDir() && underAny(p, skip) {
-			c.Skipped = append(c.Skipped, rel)
-			return fs.SkipDir
-		}
 		if excluded(rel, d.IsDir()) {
 			if d.IsDir() {
 				return fs.SkipDir
@@ -117,9 +79,6 @@ func walk(root string, excludes []string, collect bool, skip []string) (Census, 
 		}
 		if !d.IsDir() { // fichiers, fichiers de substitution cloud…
 			c.Files++
-			if collect {
-				c.Paths = append(c.Paths, rel)
-			}
 		}
 		return nil
 	})
@@ -129,19 +88,31 @@ func walk(root string, excludes []string, collect bool, skip []string) (Census, 
 	return c, err
 }
 
-// underAny : p est l'un des dossiers dirs ou se trouve dessous (casse ignorée sous
-// Windows : filepath.Rel y compare les noms sans tenir compte de la casse).
-func underAny(p string, dirs []string) bool {
-	for _, d := range dirs {
-		if d == "" {
-			continue
-		}
-		rel, err := filepath.Rel(filepath.Clean(d), filepath.Clean(p))
-		if err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel) {
-			return true
-		}
+// Excluder renvoie le test d'exclusion des motifs d'un job (ceux de aws s3 sync
+// --exclude) : rel est le chemin relatif à la source, en séparateurs /.
+func Excluder(excludes []string) func(rel string, dir bool) bool {
+	matchers := make([]*regexp.Regexp, 0, len(excludes))
+	for _, e := range excludes {
+		matchers = append(matchers, globToRegexp(e))
 	}
-	return false
+	return func(rel string, dir bool) bool {
+		// La CLI compare le motif au chemin complet (ex. E:\$RECYCLE.BIN\x) : on essaie le
+		// chemin relatif avec et sans séparateur initial, en '/' et en '\', et pour un
+		// dossier avec séparateur final, pour couvrir les motifs « *\$RECYCLE.BIN\* ».
+		win := strings.ReplaceAll(rel, "/", `\`)
+		cands := []string{rel, "/" + rel, win, `\` + win}
+		if dir {
+			cands = append(cands, rel+"/", "/"+rel+"/", win+`\`, `\`+win+`\`)
+		}
+		for _, m := range matchers {
+			for _, cand := range cands {
+				if m.MatchString(cand) {
+					return true
+				}
+			}
+		}
+		return false
+	}
 }
 
 // globToRegexp traduit un motif fnmatch (celui de --exclude) en expression régulière :

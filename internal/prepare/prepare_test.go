@@ -118,7 +118,8 @@ func TestZipWithFakeTool(t *testing.T) {
 		t.Fatalf("entrées %v, attendu %v", got, want)
 	}
 	s := tool.specs[0]
-	if s.Dir != f.src || !slices.Contains(s.Args, "-y") || !slices.Contains(s.Args, "-nw") {
+	// L'outil travaille sur la copie de la zone de préparation, jamais dans la source.
+	if s.Dir != filepath.Join(f.staging, "courrier.src") || !slices.Contains(s.Args, "-y") || !slices.Contains(s.Args, "-nw") {
 		t.Errorf("lancement : %+v", s)
 	}
 	for _, e := range s.Env {
@@ -126,8 +127,10 @@ func TestZipWithFakeTool(t *testing.T) {
 			t.Errorf("variable de l'agent passée à l'outil : %s", e)
 		}
 	}
-	if _, err := os.Stat(filepath.Join(f.staging, "courrier.tmp")); !errors.Is(err, os.ErrNotExist) {
-		t.Error("dossier de travail resté")
+	for _, left := range []string{"courrier.tmp", "courrier.src", "courrier.list"} {
+		if _, err := os.Stat(filepath.Join(f.staging, left)); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("%s resté", left)
+		}
 	}
 }
 
@@ -318,4 +321,45 @@ type versionRunner struct{ out string }
 func (v versionRunner) RunSpec(_ context.Context, s execx.Spec) (int, error) {
 	io.WriteString(s.Out, v.out)
 	return 0, nil
+}
+
+// Une source qui est (ou se trouve sous) un dossier de l'agent est refusée, quel que soit
+// le chemin employé pour le désigner.
+func TestZipRefusesAgentDirSource(t *testing.T) {
+	f := newFixture(t, filepath.Join(t.TempDir(), "zip"))
+	ps := Run(context.Background(), f.cfg, f.cfg.Prepare[0], Deps{
+		Exec: &fakeZip{}, StagingDir: f.staging, CheckTool: okTool, AgentDirs: []string{filepath.Dir(f.src)},
+	})
+	if ps.Result != state.ResultError || !strings.Contains(ps.Message, "dossier de l'agent") {
+		t.Fatalf("%+v", ps)
+	}
+}
+
+// Un dossier remplacé par un lien vers l'extérieur entre le parcours et la copie : le
+// fichier n'est jamais lu hors de la source.
+func TestCopyOneNeverLeavesSource(t *testing.T) {
+	dir := t.TempDir()
+	src, outside, dst := filepath.Join(dir, "src"), filepath.Join(dir, "dehors"), filepath.Join(dir, "copie")
+	os.MkdirAll(filepath.Join(src, "a"), 0o755)
+	os.WriteFile(filepath.Join(src, "a", "f.txt"), []byte("ordinaire"), 0o644)
+	os.MkdirAll(outside, 0o755)
+	os.WriteFile(filepath.Join(outside, "f.txt"), []byte("SECRET"), 0o644)
+	root, err := os.OpenRoot(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	// Le parcours a vu a/f.txt ; « a » devient un lien vers l'extérieur avant la copie.
+	os.RemoveAll(filepath.Join(src, "a"))
+	if runtime.GOOS == "windows" {
+		if out, err := exec.Command("cmd", "/c", "mklink", "/J", filepath.Join(src, "a"), outside).CombinedOutput(); err != nil {
+			t.Fatalf("mklink : %v %s", err, out)
+		}
+	} else if err := os.Symlink(outside, filepath.Join(src, "a")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := copyOne(context.Background(), root, "a/f.txt", dst); err == nil {
+		data, _ := os.ReadFile(filepath.Join(dst, "a", "f.txt"))
+		t.Fatalf("fichier lu à travers le lien : %q", data)
+	}
 }

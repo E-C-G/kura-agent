@@ -161,6 +161,8 @@ func (c *Config) Validate(opt ValidateOptions) error {
 			add(f+".id", "obligatoire")
 		case !idPattern.MatchString(pr.ID):
 			add(f+".id", "%q : minuscules, chiffres et '-' uniquement", pr.ID)
+		case reservedName(pr.ID):
+			add(f+".id", "%q : nom réservé par Windows (périphérique)", pr.ID)
 		case dup:
 			add(f+".id", "%q déjà utilisé", pr.ID)
 		default:
@@ -225,6 +227,8 @@ func (c *Config) Validate(opt ValidateOptions) error {
 			add(f+".id", "obligatoire")
 		case !idPattern.MatchString(j.ID):
 			add(f+".id", "%q : minuscules, chiffres et '-' uniquement", j.ID)
+		case reservedName(j.ID):
+			add(f+".id", "%q : nom réservé par Windows (périphérique)", j.ID)
 		case ids[j.ID]:
 			add(f+".id", "%q déjà utilisé", j.ID)
 		}
@@ -373,6 +377,19 @@ func absPath(p string) bool {
 }
 
 var drivePath = regexp.MustCompile(`^[A-Za-z]:[\\/]`)
+
+// reservedName : nom de périphérique Windows (con, nul, com1…), inutilisable comme nom de
+// fichier ou de dossier (journal du job, dossier de la préparation).
+func reservedName(id string) bool {
+	switch id {
+	case "con", "prn", "aux", "nul":
+		return true
+	}
+	if len(id) == 4 && (strings.HasPrefix(id, "com") || strings.HasPrefix(id, "lpt")) && id[3] >= '0' && id[3] <= '9' {
+		return true
+	}
+	return false
+}
 
 // Saveurs d'outil zip.
 const (

@@ -87,6 +87,8 @@ func TestPrepareValidation(t *testing.T) {
 		{"id invalide", "- id: courrier\n    type", "- id: Courrier\n    type", "prepare[0].id"},
 		{"STAGING ailleurs", "destination: COURRIER", "destination: \"${STAGING:courrier}\"", "jobs[0].destination"},
 		{"source relative", "${PROFILE:alice}/Courrier", "Courrier", "prepare[0].source"},
+		{"id réservé", "- id: courrier\n    type", "- id: nul\n    type", "prepare[0].id"},
+		{"id de job réservé", "- id: courrier\n    source", "- id: com1\n    source", "jobs[0].id"},
 	}
 	for _, c := range cases {
 		yaml := strings.Replace(withPrepare, c.from, c.to, 1)

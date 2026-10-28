@@ -213,7 +213,12 @@ func Run(ctx context.Context, cfg *config.Config, opt Options, d Deps) (state.St
 
 	// Préparations (archives…) : celles dont dépend un job choisi, avant lui. Celles qui
 	// attendent une pré-tâche passent après elle, avec les jobs qui en dépendent.
-	r.prepOK = map[string]bool{}
+	r.prepOK, r.prepSkipped, r.prepUsers = map[string]bool{}, map[string]bool{}, map[string]int{}
+	for _, j := range jobs {
+		if j.Prepare != "" {
+			r.prepUsers[j.Prepare]++
+		}
+	}
 	r.stagingReady = r.openStaging(jobs)
 	for _, id := range r.neededPrepares(jobs) {
 		if p, _ := cfg.PrepareByID(id); p.DependsOnPreTask == "" {
@@ -342,6 +347,8 @@ type run struct {
 	// prepOK : préparations faites (id → réussie) ; stagingReady : zone de préparation
 	// prête (créée ou vérifiée, vidée des restes), sinon la raison.
 	prepOK       map[string]bool
+	prepSkipped  map[string]bool
+	prepUsers    map[string]int // jobs choisis qui n'ont pas encore envoyé chaque résultat
 	stagingReady error
 }
 
@@ -405,14 +412,20 @@ func (r *run) neededPrepares(jobs []config.Job) []string {
 	return out
 }
 
-// openStaging prépare la zone de préparation si un job choisi en a besoin : créée ou
-// vérifiée, puis vidée des restes d'une exécution interrompue. Rien en simulation.
+// openStaging prépare la zone de préparation : créée ou vérifiée si un job choisi en a
+// besoin, puis vidée des restes d'une exécution interrompue (même sans préparation à
+// faire, pour qu'aucun export ne reste sur le disque). Rien en simulation.
 func (r *run) openStaging(jobs []config.Job) error {
-	if len(r.neededPrepares(jobs)) == 0 || r.opt.DryRun {
+	if r.opt.DryRun || r.d.StagingDir == "" && len(r.neededPrepares(jobs)) == 0 {
 		return nil
 	}
 	if r.d.StagingDir == "" {
 		return errors.New("zone de préparation inconnue")
+	}
+	if len(r.neededPrepares(jobs)) == 0 {
+		if _, err := os.Lstat(r.d.StagingDir); err != nil {
+			return nil // rien à vider
+		}
 	}
 	if err := r.d.EnsureStaging(r.d.StagingDir); err != nil {
 		return err
@@ -431,6 +444,17 @@ func (r *run) closeStaging() {
 	}
 	if err := prepare.Clear(r.d.StagingDir); err != nil {
 		r.log.Warn("zone de préparation non vidée", "err", err)
+	}
+}
+
+// releasePrepare : un job a fini avec le résultat de la préparation id ; après le
+// dernier, le résultat est effacé.
+func (r *run) releasePrepare(id string) {
+	if r.prepUsers[id]--; r.prepUsers[id] > 0 || r.d.StagingDir == "" {
+		return
+	}
+	if err := os.RemoveAll(filepath.Join(r.d.StagingDir, id)); err != nil {
+		r.log.Warn("résultat de préparation non effacé", "id", id, "err", err)
 	}
 }
 
@@ -463,6 +487,7 @@ func (r *run) runPrepare(ctx context.Context, p config.Prepare, preOK map[string
 		})
 	}
 	r.prepOK[p.ID] = ps.Result == state.ResultOK || ps.Result == state.ResultWarning
+	r.prepSkipped[p.ID] = ps.Result == state.ResultSkipped
 	if ps.Result != state.ResultOK {
 		r.log.Warn("préparation", "id", p.ID, "résultat", ps.Result, "message", ps.Message)
 	}
@@ -771,12 +796,19 @@ func (r *run) job(ctx context.Context, j config.Job, preOK map[string]bool) (js 
 		case r.opt.DryRun:
 			js.Message = "simulation : envoie le résultat de la préparation " + j.Prepare + ", non exécutée"
 			return js
+		case r.prepSkipped[j.Prepare]:
+			// Pré-tâche non faite (Outlook resté ouvert) : sauté, comme un job qui en dépend.
+			js.Result, js.Message = state.ResultSkipped, "préparation "+j.Prepare+" sautée : job sauté"
+			log.Warn("job sauté", "raison", js.Message)
+			return js
 		case !r.prepOK[j.Prepare]:
 			// Rien d'ancien ni de partiel ne part : la zone ne contient que ce qui a réussi.
 			js.Result, js.Message = state.ResultError, "préparation "+j.Prepare+" en échec : job sauté"
 			log.Error("job sauté", "raison", js.Message)
 			return js
 		}
+		// Le résultat ne reste pas plus que nécessaire : effacé après son dernier job.
+		defer r.releasePrepare(j.Prepare)
 	}
 
 	jobLog, err := os.OpenFile(filepath.Join(r.runDir, j.ID+".log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)

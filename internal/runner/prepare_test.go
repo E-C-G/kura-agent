@@ -123,10 +123,44 @@ func TestPrepareWaitsForPreTask(t *testing.T) {
 	if z.calls != 0 || st.Prepares[0].Result != state.ResultSkipped {
 		t.Fatalf("préparation lancée malgré Outlook ouvert : %d, %+v", z.calls, st.Prepares)
 	}
-	if j := b.job(st, "courrier"); j.Result != state.ResultError {
+	if j := b.job(st, "courrier"); j.Result != state.ResultSkipped {
 		t.Fatalf("job : %+v", j)
 	}
 	if len(st.PreTasks) != 1 {
 		t.Fatalf("la pré-tâche dont dépend la préparation doit tourner : %+v", st.PreTasks)
+	}
+}
+
+// Les restes d'une exécution interrompue sont effacés, même quand aucune préparation ne
+// tourne ; le résultat d'une préparation disparaît après le dernier job qui l'envoie.
+func TestStagingCleanup(t *testing.T) {
+	b := newBench(t)
+	withPrepare(b, "")
+	staging := filepath.Join(b.dir, "staging")
+	os.MkdirAll(filepath.Join(staging, "ancien"), 0o700)
+	os.WriteFile(filepath.Join(staging, "ancien", "export.dump"), []byte("x"), 0o600)
+	b.run(context.Background(), Options{JobIDs: []string{"data"}})
+	if left, _ := os.ReadDir(staging); len(left) != 0 {
+		t.Fatalf("restes non effacés : %v", left)
+	}
+
+	b.cfg.Jobs = append(b.cfg.Jobs, config.Job{ID: "copie", Source: filepath.Join(staging, "courrier"), Destination: "COPIE", Prepare: "courrier"})
+	seen := map[string]bool{}
+	for _, dest := range []string{"COURRIER", "COPIE"} {
+		b.aws.behave[dest] = func(bool, int) (string, int) {
+			_, err := os.Stat(filepath.Join(staging, "courrier", "courrier.zip"))
+			seen[dest] = err == nil
+			return "", 0
+		}
+	}
+	b.aws.behave["DATA"] = func(bool, int) (string, int) {
+		_, err := os.Stat(filepath.Join(staging, "courrier"))
+		seen["DATA après"] = err == nil
+		return "", 0
+	}
+	b.cfg.Jobs[0], b.cfg.Jobs[len(b.cfg.Jobs)-1] = b.cfg.Jobs[len(b.cfg.Jobs)-1], b.cfg.Jobs[0] // data en dernier
+	st := b.run(context.Background(), Options{JobIDs: []string{"courrier", "copie", "data"}})
+	if !seen["COURRIER"] || !seen["COPIE"] || seen["DATA après"] {
+		t.Fatalf("archive vue : %v (%+v)", seen, st.Jobs)
 	}
 }

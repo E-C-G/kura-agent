@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"runtime"
 	"time"
 
 	"github.com/E-C-G/kura-agent/internal/execx"
@@ -37,5 +38,10 @@ var checkPrepareTools = func(cfg *config.Config) []toolCheck {
 // agentDirs : dossiers de l'agent, jamais archivés par une préparation ni servis depuis
 // l'icône.
 func agentDirs() []string {
-	return []string{paths.DataDir(), paths.ConfigDir(), paths.LogsDir(), paths.CredentialsDir(), setup.ProgramDir()}
+	dirs := []string{paths.DataDir(), paths.ConfigDir(), paths.LogsDir(), paths.CredentialsDir(), setup.ProgramDir()}
+	if runtime.GOOS == "linux" {
+		// Secrets déchiffrés par systemd pour le service, et clé de l'hôte qui les chiffre.
+		dirs = append(dirs, "/run/credentials", "/var/lib/systemd/credential.secret")
+	}
+	return dirs
 }

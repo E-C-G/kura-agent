@@ -699,22 +699,30 @@ jobs:
 ```
 
 - **Outils.** L'agent n'installe ni ne cherche aucun outil : `tools.zip` donne le chemin absolu
-  d'Info-ZIP `zip` (3.0 ou plus) ou de 7-Zip `7z` (16.02 ou plus). À l'installation, dans
-  `validate` puis à chaque exécution, l'outil doit exister, donner une version reconnue, et ni lui
-  ni ses dossiers parents ne doivent être modifiables par un autre compte que les administrateurs
-  (Windows : propriétaire et droits de chaque dossier, jonctions refusées ; Linux, macOS : root,
-  sans écriture pour les autres). Sinon un utilisateur ferait exécuter son code par l'agent.
-  L'outil tourne avec un environnement réduit (aucune variable de l'agent).
-- **Archive.** L'agent parcourt la source lui-même, avec les règles du garde-fou : liens et
-  jonctions jamais suivis, exclusions appliquées, dossiers de l'agent laissés de côté. L'outil ne
-  reçoit que la liste des fichiers retenus (`zip -y -nw -@`, `7z a -tzip -snl -spd @liste`). L'archive
-  est relue en entière (sommes CRC) et ne doit contenir rien d'autre que cette liste ; avec
-  `on_locked: fail`, aucun fichier ne doit manquer.
+  d'Info-ZIP `zip` 3.0 ou plus (Linux, macOS) ou de 7-Zip `7z` 16.02 ou plus (seul accepté sous
+  Windows). À l'installation, dans `validate` puis à chaque exécution, l'outil doit exister, donner
+  une version reconnue, et ni lui ni ses dossiers parents ne doivent être modifiables par un autre
+  compte que les administrateurs. Windows : propriétaire et droits de chaque dossier, tout le
+  dossier de l'outil compris (7-Zip y charge `7z.dll`, `Codecs`, `Formats`), jonctions et entrées
+  de droits non standard refusées, outil posé à la racine du volume refusé. Linux, macOS : root,
+  sans écriture pour le groupe ni les autres, sans ACL étendue (Linux). Sinon un utilisateur ferait
+  exécuter son code par l'agent. L'outil tourne avec un environnement réduit (aucune variable de
+  l'agent).
+- **Archive.** L'agent copie d'abord les fichiers retenus dans la zone de préparation : liens et
+  jonctions jamais suivis, exclusions appliquées, dossiers de l'agent laissés de côté (comparés
+  par identité de fichier), chaque fichier ouvert sous la source (`os.Root`) : un dossier remplacé
+  par un lien pendant la copie ne mène jamais hors d'elle. L'outil archive cette copie, que seul
+  l'agent peut modifier (`zip -y -nw -@`, `7z a -tzip -snl -spd @liste`) : il ne suit donc aucun lien
+  posé par un utilisateur et ne charge rien d'un dossier qu'un utilisateur contrôle. L'archive est
+  relue en entier (sommes CRC) et ne doit rien contenir d'autre ; avec `on_locked: fail`, aucun
+  fichier ne doit manquer (fichier ou dossier illisible, nom impossible à passer à l'outil). Prévoir
+  dans le dossier de données deux fois la taille de la source le temps de l'archive.
 - **Nom stable.** Le résultat s'appelle toujours `<id>.zip` : l'historique vient des versions du
   bucket (90 jours) et `restore --at` s'y applique tel quel.
 - **Zone de préparation.** `C:\ProgramData\Kura\staging` (SYSTEM et Administrateurs seuls),
   `/var/lib/kura/staging` (compte kura-agent, 0700) ; une préparation écrit dans `<id>.tmp`, renommé
-  `<id>` une fois réussie ; la zone est vidée à la fin de chaque exécution, réussie ou non.
+  `<id>` une fois réussie ; chaque résultat est effacé après le dernier job qui l'envoie, et la
+  zone est vidée au début et à la fin de chaque exécution, réussie ou non.
 - **Échec.** Le job qui en dépend est sauté (code 2) : rien de partiel ni d'ancien n'est envoyé ;
   les autres jobs continuent. Une préparation ne tourne que si un job choisi en dépend (`run --job`),
   jamais en simulation. Résultat, nombre de fichiers et taille : `status.json`, `kura-agent status`,
