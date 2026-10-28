@@ -2,6 +2,7 @@ package prepare
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -109,6 +110,9 @@ func (e *pgEngine) list(ctx context.Context) ([]string, error) {
 }
 
 func (e *pgEngine) export(ctx context.Context, name, path string) (int64, error) {
+	if e.seal != nil {
+		return e.exportSealed(ctx, name, path)
+	}
 	args := []string{"--format=custom", "--no-password", "--file=" + path, "--dbname=" + e.conninfo(name)}
 	code, err := e.d.Exec.RunSpec(ctx, e.toolSpec(e.dump, args, e.env()...))
 	if err != nil {
@@ -133,6 +137,47 @@ func (e *pgEngine) export(ctx context.Context, name, path string) (int64, error)
 	return size, nil
 }
 
+// exportSealed : la sortie de pg_dump passe directement dans le chiffrement ; l'export
+// n'existe jamais en clair. Contrôle en route : code de sortie et en-tête PGDMP (la
+// relecture par pg_restore demanderait le clair).
+func (e *pgEngine) exportSealed(ctx context.Context, name, path string) (int64, error) {
+	w, err := e.sealedFile(path)
+	if err != nil {
+		return 0, err
+	}
+	head := &headBuffer{max: 5}
+	s := e.toolSpec(e.dump, []string{"--format=custom", "--no-password", "--dbname=" + e.conninfo(name)}, e.env()...)
+	s.Out, s.ErrOut = io.MultiWriter(w, head), e.d.Out
+	code, runErr := e.d.Exec.RunSpec(ctx, s)
+	if err := errors.Join(runErr, w.Close()); err != nil {
+		return 0, err
+	}
+	if code != 0 {
+		return 0, fmt.Errorf("pg_dump a échoué (code %d)", code)
+	}
+	if string(head.buf) != "PGDMP" {
+		return 0, errors.New("export illisible : en-tête PGDMP attendu")
+	}
+	st, err := os.Stat(path)
+	if err != nil {
+		return 0, err
+	}
+	return st.Size(), nil
+}
+
+// headBuffer garde les premiers octets écrits.
+type headBuffer struct {
+	buf []byte
+	max int
+}
+
+func (h *headBuffer) Write(p []byte) (int, error) {
+	if n := h.max - len(h.buf); n > 0 {
+		h.buf = append(h.buf, p[:min(n, len(p))]...)
+	}
+	return len(p), nil
+}
+
 // after exporte les rôles et tablespaces (sans mots de passe) dans globals.sql : sans
 // eux, recharger un export sur un serveur neuf échoue sur ses OWNER et GRANT.
 func (e *pgEngine) after(ctx context.Context, dir string) string {
@@ -141,8 +186,22 @@ func (e *pgEngine) after(ctx context.Context, dir string) string {
 		return "rôles non exportés : pg_dumpall absent du dossier de pg_dump ; " + hint
 	}
 	path := filepath.Join(dir, "globals.sql")
-	args := []string{"--globals-only", "--no-role-passwords", "--no-password", "--file=" + path, "--dbname=" + e.conninfo("postgres")}
-	code, err := e.d.Exec.RunSpec(ctx, e.toolSpec(e.dumpall, args, e.env()...))
+	args := []string{"--globals-only", "--no-role-passwords", "--no-password", "--dbname=" + e.conninfo("postgres")}
+	var code int
+	var err error
+	if e.seal != nil {
+		path += sealExt
+		var w io.WriteCloser
+		if w, err = e.sealedFile(path); err == nil {
+			s := e.toolSpec(e.dumpall, args, e.env()...)
+			s.Out, s.ErrOut = w, e.d.Out
+			var runErr error
+			code, runErr = e.d.Exec.RunSpec(ctx, s)
+			err = errors.Join(runErr, w.Close())
+		}
+	} else {
+		code, err = e.d.Exec.RunSpec(ctx, e.toolSpec(e.dumpall, append(args, "--file="+path), e.env()...))
+	}
 	if err == nil && code != 0 {
 		err = fmt.Errorf("code %d", code)
 	}

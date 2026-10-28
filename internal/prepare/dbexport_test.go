@@ -69,10 +69,17 @@ func (f *fakeDB) RunSpec(ctx context.Context, s execx.Spec) (int, error) {
 				return f.fail[name], nil
 			}
 		}
-		return 0, os.WriteFile(argValue(s.Args, "--file="), []byte("PGDMP\x01données de "+db), 0o600)
+		data := "PGDMP\x01données de " + db
+		if file := argValue(s.Args, "--file="); file != "" {
+			return 0, os.WriteFile(file, []byte(data), 0o600)
+		}
+		io.WriteString(s.Out, data) // export chiffré au fil de l'eau : sortie standard
 	case "pg_restore":
 	case "pg_dumpall":
-		return 0, os.WriteFile(argValue(s.Args, "--file="), []byte("CREATE ROLE kura_backup;\n"), 0o600)
+		if file := argValue(s.Args, "--file="); file != "" {
+			return 0, os.WriteFile(file, []byte("CREATE ROLE kura_backup;\n"), 0o600)
+		}
+		io.WriteString(s.Out, "CREATE ROLE kura_backup;\n")
 	case "mysql", "mariadb":
 		for _, n := range f.databases {
 			fmt.Fprintf(s.Out, "D:%s\n", strings.ReplaceAll(n, "\n", `\n`))

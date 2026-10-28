@@ -227,7 +227,7 @@ func Run(ctx context.Context, cfg *config.Config, opt Options, d Deps) (state.St
 	r.initHolds(jobs)
 	r.stagingReady = r.openStaging(jobs)
 	for _, id := range r.neededPrepares(jobs) {
-		if p, _ := cfg.PrepareByID(id); p.DependsOnPreTask == "" {
+		if p, _ := cfg.PrepareByID(id); r.prepareDep(p) == "" {
 			r.runPrepare(runCtx, p, nil)
 		}
 	}
@@ -237,7 +237,7 @@ func Run(ctx context.Context, cfg *config.Config, opt Options, d Deps) (state.St
 			<-preDone
 		}
 		if j.Prepare != "" {
-			if p, ok := cfg.PrepareByID(j.Prepare); ok && p.DependsOnPreTask != "" {
+			if p, ok := cfg.PrepareByID(j.Prepare); ok && r.prepareDep(p) != "" {
 				r.runPrepare(runCtx, p, preOK)
 			}
 		}
@@ -409,15 +409,47 @@ func (r *run) waitsForPreTask(j config.Job) bool {
 		return true
 	}
 	p, ok := r.cfg.PrepareByID(j.Prepare)
-	return ok && p.DependsOnPreTask != ""
+	return ok && r.prepareDep(p) != ""
 }
 
-// neededPrepares : préparations dont dépend au moins un job choisi, dans l'ordre du fichier.
+// prepareDep : pré-tâche que la préparation attend, elle ou l'entrée qu'elle chiffre.
+func (r *run) prepareDep(p config.Prepare) string {
+	if p.DependsOnPreTask != "" || p.Input == "" {
+		return p.DependsOnPreTask
+	}
+	in, _ := r.cfg.PrepareByID(p.Input)
+	return in.DependsOnPreTask
+}
+
+// streams : p (age) fait lui-même l'export de son entrée, chiffré au fil de l'eau ;
+// l'entrée ne tourne pas à part.
+func (r *run) streams(p config.Prepare) bool {
+	in, ok := r.cfg.PrepareByID(p.Input)
+	return ok && p.Type == config.PrepareAge && in.Type == config.PrepareDBExport
+}
+
+// holdDep : pré-tâche dont le programme doit rester fermé pendant p (la sienne, ou celle
+// de l'export qu'elle fait elle-même).
+func (r *run) holdDep(p config.Prepare) string {
+	if r.streams(p) {
+		return r.prepareDep(p)
+	}
+	return p.DependsOnPreTask
+}
+
+// neededPrepares : préparations dont dépend au moins un job choisi, directement ou par le
+// chiffrement de leur résultat, dans l'ordre du fichier (une entrée précède toujours ce
+// qui la chiffre). L'export qu'un age chiffre au fil de l'eau ne tourne pas à part.
 func (r *run) neededPrepares(jobs []config.Job) []string {
 	used := map[string]bool{}
 	for _, j := range jobs {
 		if j.Prepare != "" {
 			used[j.Prepare] = true
+		}
+	}
+	for i := len(r.cfg.Prepare) - 1; i >= 0; i-- {
+		if p := r.cfg.Prepare[i]; used[p.ID] && p.Input != "" && !r.streams(p) {
+			used[p.Input] = true
 		}
 	}
 	var out []string
@@ -481,7 +513,16 @@ func (r *run) runPrepare(ctx context.Context, p config.Prepare, preOK map[string
 	if _, done := r.prepOK[p.ID]; done {
 		return
 	}
+	// L'entrée d'un chiffrement passe avant lui (sauf l'export chiffré au fil de l'eau).
+	inputFailed := ""
+	if in, ok := r.cfg.PrepareByID(p.Input); ok && !r.streams(p) {
+		r.runPrepare(ctx, in, preOK)
+		if !r.prepOK[in.ID] {
+			inputFailed = in.ID
+		}
+	}
 	ps := state.PrepareStatus{ID: p.ID, Type: p.Type, Result: state.ResultOK}
+	dep := r.prepareDep(p)
 	switch {
 	case r.opt.DryRun:
 		ps.Message = "simulation : préparation non exécutée"
@@ -489,8 +530,12 @@ func (r *run) runPrepare(ctx context.Context, p config.Prepare, preOK map[string
 		ps.Result, ps.Message = r.interrupted(ctx), "non exécutée : "+r.interruptReason(ctx)
 	case r.stagingReady != nil:
 		ps.Result, ps.Message = state.ResultError, r.stagingReady.Error()
-	case p.DependsOnPreTask != "" && !preOK[strings.ToLower(p.DependsOnPreTask)]:
-		ps.Result, ps.Message = state.ResultSkipped, p.DependsOnPreTask+" n'a pas pu être fermé : préparation sautée"
+	case dep != "" && !preOK[strings.ToLower(dep)]:
+		ps.Result, ps.Message = state.ResultSkipped, dep+" n'a pas pu être fermé : préparation sautée"
+	case inputFailed != "" && r.prepSkipped[inputFailed]:
+		ps.Result, ps.Message = state.ResultSkipped, "préparation "+inputFailed+" sautée : rien à chiffrer"
+	case inputFailed != "":
+		ps.Result, ps.Message = state.ResultError, "préparation "+inputFailed+" en échec : rien à chiffrer"
 	default:
 		r.update(func(st *state.Status) { st.Current = &state.Progress{Job: "préparation " + p.ID} })
 		out := io.Discard
@@ -554,7 +599,7 @@ func (r *run) preTaskNeeded(p config.PreTask, selected []config.Job) bool {
 			return true
 		}
 		pr, ok := r.cfg.PrepareByID(j.Prepare)
-		return ok && strings.EqualFold(pr.DependsOnPreTask, p.Process)
+		return ok && strings.EqualFold(r.prepareDep(pr), p.Process)
 	}
 	declared := false
 	for _, j := range r.cfg.Jobs {
@@ -1099,8 +1144,8 @@ func (r *run) initHolds(jobs []config.Job) {
 		}
 	}
 	for _, id := range r.neededPrepares(jobs) {
-		if p, _ := r.cfg.PrepareByID(id); p.DependsOnPreTask != "" {
-			r.holds[strings.ToLower(p.DependsOnPreTask)]++
+		if p, _ := r.cfg.PrepareByID(id); r.holdDep(p) != "" {
+			r.holds[strings.ToLower(r.holdDep(p))]++
 		}
 	}
 }
@@ -1108,11 +1153,11 @@ func (r *run) initHolds(jobs []config.Job) {
 // releasePrepareHold : la préparation p n'a plus besoin de son programme fermé (copie
 // faite, ou préparation finie sans copie). Sans effet la seconde fois.
 func (r *run) releasePrepareHold(p config.Prepare) {
-	if p.DependsOnPreTask == "" || r.holdReleased[p.ID] {
+	if r.holdDep(p) == "" || r.holdReleased[p.ID] {
 		return
 	}
 	r.holdReleased[p.ID] = true
-	r.releaseHold(p.DependsOnPreTask)
+	r.releaseHold(r.holdDep(p))
 }
 
 // releaseHold : une chose de moins attend que process reste fermé ; la dernière levée,

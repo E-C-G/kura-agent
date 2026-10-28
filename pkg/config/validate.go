@@ -152,8 +152,13 @@ func (c *Config) Validate(opt ValidateOptions) error {
 		add("tools.zip", "%q : zip (Info-ZIP) ou 7z, 7za, 7zz (7-Zip) attendu", c.Tools.Zip)
 	}
 
+	// encryption
+	validateRecipients(PrepareGPG, "encryption.gpg.recipients", c.Encryption.GPG.Recipients, add)
+	validateRecipients(PrepareAge, "encryption.age.recipients", c.Encryption.Age.Recipients, add)
+
 	// prepare
 	prepares := map[string]int{}
+	consumed := map[string]string{} // préparation chiffrée → préparation qui la chiffre
 	for i, pr := range c.Prepare {
 		f := fmt.Sprintf("prepare[%d]", i)
 		switch _, dup := prepares[pr.ID]; {
@@ -205,12 +210,18 @@ func (c *Config) Validate(opt ValidateOptions) error {
 				pr.User != "" || pr.Password != "" || len(pr.Databases) > 0 || pr.Verify {
 				add(f, "engine, host, port, socket, instance, user, password, databases et verify sont réservés à db_export")
 			}
+			if pr.Input != "" || len(pr.Recipients) > 0 {
+				add(f, "input et recipients sont réservés à gpg et age")
+			}
 		case PrepareDBExport:
 			validateDBExport(c, pr, f, add)
+			if pr.Input != "" || len(pr.Recipients) > 0 {
+				add(f, "input et recipients sont réservés à gpg et age")
+			}
 		case PrepareGPG, PrepareAge:
-			add(f+".type", "type %q pas encore disponible dans cette version de l'agent (zip, db_export)", pr.Type)
+			validateEncrypt(c, pr, f, prepares, consumed, opt, add)
 		case "":
-			add(f+".type", "obligatoire (zip, db_export)")
+			add(f+".type", "obligatoire (zip, db_export, gpg, age)")
 		default:
 			add(f+".type", "type %q inconnu (zip, db_export, gpg, age)", pr.Type)
 		}
@@ -245,6 +256,10 @@ func (c *Config) Validate(opt ValidateOptions) error {
 			// Zone de préparation : remplie à chaque exécution, absente avant.
 			if _, ok := prepares[j.Prepare]; !ok {
 				add(f+".source", "${STAGING:%s} : aucune préparation n'a cet id", j.Prepare)
+			}
+			if by, ok := consumed[j.Prepare]; ok {
+				// Le clair ne part jamais : seul le chiffré est envoyé.
+				add(f+".source", "${STAGING:%s} : chiffrée par %s, son clair ne part jamais ; envoyer ${STAGING:%s}", j.Prepare, by, by)
 			}
 			usedPrepares[j.Prepare] = true
 		case j.Source == "":
@@ -289,6 +304,12 @@ func (c *Config) Validate(opt ValidateOptions) error {
 		}
 	}
 
+	// Une préparation chiffrée sert par son chiffrement.
+	for i := len(c.Prepare) - 1; i >= 0; i-- {
+		if pr := c.Prepare[i]; usedPrepares[pr.ID] && pr.Input != "" {
+			usedPrepares[pr.Input] = true
+		}
+	}
 	for i, pr := range c.Prepare {
 		if pr.ID != "" && !usedPrepares[pr.ID] {
 			add(fmt.Sprintf("prepare[%d].id", i), "%q : aucun job ne l'envoie (source: ${STAGING:%s})", pr.ID, pr.ID)
@@ -451,6 +472,56 @@ func validateDBExport(c *Config, pr Prepare, f string, add func(field, format st
 			add(fmt.Sprintf("%s.databases[%d]", f, i), "%q déjà listée (les fichiers d'export ne distinguent pas la casse sous Windows)", db)
 		}
 		seen[strings.ToLower(db)] = true
+	}
+}
+
+// validateEncrypt vérifie une préparation gpg ou age : une entrée (préparation zip ou
+// db_export qui la précède, chiffrée par elle seule) ou une source du poste, des
+// destinataires, l'outil gpg.
+func validateEncrypt(c *Config, pr Prepare, f string, prepares map[string]int, consumed map[string]string,
+	opt ValidateOptions, add func(field, format string, a ...any)) {
+	if pr.Engine != "" || pr.Host != "" || pr.Port != 0 || pr.Socket != "" || pr.Instance != "" ||
+		pr.User != "" || pr.Password != "" || len(pr.Databases) > 0 || pr.Verify ||
+		len(pr.Exclude) > 0 || pr.Level != "" || pr.OnLocked != "" {
+		add(f, "%s chiffre une entrée (input) ou une source : les autres clés des préparations n'y ont pas cours", pr.Type)
+	}
+	switch {
+	case pr.Input != "" && pr.Source != "":
+		add(f, "input ou source, pas les deux")
+	case pr.Input != "":
+		i, ok := prepares[pr.Input]
+		switch {
+		case !ok:
+			add(f+".input", "%q : aucune préparation de ce nom avant celle-ci (l'entrée doit la précéder)", pr.Input)
+		case c.Prepare[i].Type != PrepareZip && c.Prepare[i].Type != PrepareDBExport:
+			add(f+".input", "%q : seul le résultat d'un zip ou d'un db_export se chiffre (pas de double chiffrement)", pr.Input)
+		case consumed[pr.Input] != "":
+			add(f+".input", "%q est déjà chiffrée par %s", pr.Input, consumed[pr.Input])
+		default:
+			consumed[pr.Input] = pr.ID
+		}
+	case pr.Source == "":
+		add(f, "input (préparation à chiffrer) ou source (fichier ou dossier du poste) obligatoire")
+	case pr.Unavailable != "":
+		if opt.CheckSystem {
+			add(f+".source", "%s", pr.Unavailable)
+		}
+	case !absPath(pr.Source):
+		add(f+".source", "chemin absolu attendu, reçu %q", pr.Source)
+	case opt.CheckSystem:
+		if _, err := os.Stat(pr.Source); err != nil {
+			add(f+".source", "%q inaccessible : %v", pr.Source, err)
+		}
+	}
+	recips := c.RecipientsOf(pr)
+	switch {
+	case len(recips) == 0:
+		add(f+".recipients", "aucun destinataire : ni recipients ici, ni encryption.%s.recipients", pr.Type)
+	case len(pr.Recipients) > 0:
+		validateRecipients(pr.Type, f+".recipients", pr.Recipients, add)
+	}
+	if pr.Type == PrepareGPG && c.Tools.GPG == "" {
+		add(f+".type", "gpg demande tools.gpg : chemin absolu de gpg (GnuPG 2.2 ou plus récent), installé sur le poste")
 	}
 }
 

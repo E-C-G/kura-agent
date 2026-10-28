@@ -6,8 +6,11 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+
+	"filippo.io/age"
 
 	"github.com/E-C-G/kura-agent/internal/execx"
 	"github.com/E-C-G/kura-agent/internal/procs"
@@ -172,4 +175,92 @@ func TestStagingCleanup(t *testing.T) {
 	if !seen["COURRIER"] || !seen["COPIE"] || seen["DATA après"] {
 		t.Fatalf("archive vue : %v (%+v)", seen, st.Jobs)
 	}
+}
+
+// Une archive chiffrée : le zip tourne d'abord, son clair est chiffré puis effacé, seul
+// le chiffré part au bucket.
+func TestEncryptedPrepare(t *testing.T) {
+	b := newBench(t)
+	withPrepare(b, "")
+	id, err := age.GenerateX25519Identity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.cfg.Prepare = append(b.cfg.Prepare, config.Prepare{ID: "courrier-chiffre", Type: config.PrepareAge, Input: "courrier",
+		Recipients: []config.Recipient{{Age: id.Recipient().String()}}})
+	j := &b.cfg.Jobs[len(b.cfg.Jobs)-1]
+	j.Source, j.Prepare = "${STAGING:courrier-chiffre}", "courrier-chiffre"
+	b.cfg.ApplyDefaults()
+	staging := filepath.Join(b.dir, "staging")
+	b.cfg.ResolveStaging(staging)
+	if err := b.cfg.Validate(config.ValidateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	var sent []string
+	b.aws.behave["COURRIER"] = func(dry bool, n int) (string, int) {
+		if !dry {
+			sent = listDir(staging)
+		}
+		return "", 0
+	}
+	st := b.run(context.Background(), Options{JobIDs: []string{"courrier"}})
+	if st.ExitCode != ExitOK || len(st.Prepares) != 2 || st.Prepares[0].ID != "courrier" || st.Prepares[1].ID != "courrier-chiffre" {
+		t.Fatalf("code %d, préparations %+v", st.ExitCode, st.Prepares)
+	}
+	if !slices.Equal(sent, []string{"courrier-chiffre/courrier.zip.age"}) {
+		t.Fatalf("zone pendant l'envoi : %v", sent)
+	}
+}
+
+// Préparation chiffrée dont l'entrée échoue : sautée en erreur, rien n'est envoyé.
+func TestEncryptedPrepareInputFails(t *testing.T) {
+	b := newBench(t)
+	z := withPrepare(b, "")
+	z.code = 2
+	id, _ := age.GenerateX25519Identity()
+	b.cfg.Prepare = append(b.cfg.Prepare, config.Prepare{ID: "courrier-chiffre", Type: config.PrepareAge, Input: "courrier",
+		Recipients: []config.Recipient{{Age: id.Recipient().String()}}})
+	j := &b.cfg.Jobs[len(b.cfg.Jobs)-1]
+	j.Source, j.Prepare = "${STAGING:courrier-chiffre}", "courrier-chiffre"
+	b.cfg.ApplyDefaults()
+	st := b.run(context.Background(), Options{JobIDs: []string{"courrier"}})
+	if st.ExitCode != ExitError || len(st.Prepares) != 2 || !strings.Contains(st.Prepares[1].Message, "préparation courrier en échec") {
+		t.Fatalf("code %d, préparations %+v", st.ExitCode, st.Prepares)
+	}
+	if b.aws.real("COURRIER") != 0 {
+		t.Fatal("rien ne doit partir")
+	}
+}
+
+// L'export chiffré par age au fil de l'eau ne tourne pas à part.
+func TestStreamedExportNotRunAlone(t *testing.T) {
+	cfg := &config.Config{Prepare: []config.Prepare{
+		{ID: "compta-db", Type: config.PrepareDBExport, DependsOnPreTask: "compta.exe"},
+		{ID: "compta-chiffre", Type: config.PrepareAge, Input: "compta-db"},
+		{ID: "courrier", Type: config.PrepareZip},
+		{ID: "courrier-chiffre", Type: config.PrepareGPG, Input: "courrier"},
+	}}
+	r := &run{cfg: cfg}
+	jobs := []config.Job{{ID: "a", Prepare: "compta-chiffre"}, {ID: "b", Prepare: "courrier-chiffre"}}
+	if got := r.neededPrepares(jobs); !slices.Equal(got, []string{"compta-chiffre", "courrier", "courrier-chiffre"}) {
+		t.Fatalf("%v", got)
+	}
+	if dep := r.prepareDep(cfg.Prepare[1]); dep != "compta.exe" {
+		t.Fatalf("pré-tâche de l'entrée : %q", dep)
+	}
+	if !r.waitsForPreTask(jobs[0]) || r.waitsForPreTask(jobs[1]) {
+		t.Fatal("attente de la pré-tâche")
+	}
+}
+
+func listDir(dir string) []string {
+	var out []string
+	filepath.Walk(dir, func(p string, fi os.FileInfo, err error) error {
+		if err == nil && !fi.IsDir() {
+			rel, _ := filepath.Rel(dir, p)
+			out = append(out, filepath.ToSlash(rel))
+		}
+		return nil
+	})
+	return out
 }

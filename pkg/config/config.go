@@ -21,18 +21,19 @@ const CurrentVersion = 1
 
 // Config est le contenu de config.yaml.
 type Config struct {
-	Version   int        `yaml:"version"`
-	Profile   Profile    `yaml:"profile"`
-	Schedule  Schedule   `yaml:"schedule"`
-	PreTasks  []PreTask  `yaml:"pre_tasks"`
-	PostTasks []PostTask `yaml:"post_tasks"`
-	Tools     Tools      `yaml:"tools"`
-	Prepare   []Prepare  `yaml:"prepare"`
-	Jobs      []Job      `yaml:"jobs"`
-	Tray      Tray       `yaml:"tray"`
-	Notify    Notify     `yaml:"notify"`
-	Logging   Logging    `yaml:"logging"`
-	Update    Update     `yaml:"update"`
+	Version    int        `yaml:"version"`
+	Profile    Profile    `yaml:"profile"`
+	Schedule   Schedule   `yaml:"schedule"`
+	PreTasks   []PreTask  `yaml:"pre_tasks"`
+	PostTasks  []PostTask `yaml:"post_tasks"`
+	Tools      Tools      `yaml:"tools"`
+	Encryption Encryption `yaml:"encryption"`
+	Prepare    []Prepare  `yaml:"prepare"`
+	Jobs       []Job      `yaml:"jobs"`
+	Tray       Tray       `yaml:"tray"`
+	Notify     Notify     `yaml:"notify"`
+	Logging    Logging    `yaml:"logging"`
+	Update     Update     `yaml:"update"`
 }
 
 // Update règle la recherche des nouvelles versions de l'agent (kura-agent self-update).
@@ -145,6 +146,12 @@ type Prepare struct {
 	Databases []string `yaml:"databases"`
 	// Verify : SQL Server, RESTORE VERIFYONLY après chaque sauvegarde.
 	Verify bool `yaml:"verify"`
+
+	// gpg, age : chiffrent le résultat d'une préparation qui les précède (Input), ou un
+	// fichier ou dossier du poste (Source). Recipients remplace, pour cette préparation
+	// seulement, les destinataires de la section encryption.
+	Input      string      `yaml:"input"`
+	Recipients []Recipient `yaml:"recipients"`
 
 	// Unavailable : la source ne se résout pas sur cette machine (compte supprimé) ; la
 	// préparation échoue avec ce message, les autres continuent. Rempli par Expand.

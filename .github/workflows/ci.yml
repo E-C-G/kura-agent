@@ -36,8 +36,13 @@ jobs:
             # Contenu généré, affiché en annotation pour pouvoir le commiter tel quel.
             echo "::notice title=go.sum généré::$(sed ':a;N;$!ba;s/%/%25/g;s/\n/%0A/g' go.sum)"
           else
-            # go.mod et go.sum doivent être à jour : affiche l'écart et échoue sinon.
-            go mod tidy -diff
+            # go.mod et go.sum doivent être à jour : affiche l'écart (aussi en annotation,
+            # lisible sans le journal brut) et échoue sinon.
+            if ! go mod tidy -diff > tidy.diff 2>&1; then
+              cat tidy.diff
+              echo "::error title=go mod tidy::$(sed ':a;N;$!ba;s/%/%25/g;s/\r//g;s/\n/%0A/g' tidy.diff)"
+              exit 1
+            fi
           fi
           go mod verify
 
@@ -182,7 +187,7 @@ jobs:
   # PostgreSQL 16 et MySQL 8.0 (clients du runner), puis MariaDB 10.11 avec mariadb-dump.
   # Chaque export est rechargé et comparé.
   bases-linux:
-    name: Linux · exports de bases (PostgreSQL, MySQL, MariaDB)
+    name: Linux · exports de bases et chiffrement
     runs-on: ubuntu-24.04
     services:
       postgres:
@@ -232,6 +237,19 @@ jobs:
           set -o pipefail
           go test -count=1 -v -run 'TestPostgresRealExport|TestMySQLRealExport' ./internal/prepare/ 2>&1 | tee test.log || { annotate test.log; exit 1; }
 
+      # Chiffrement : GnuPG du runner, outil age officiel (déchiffre ce que l'agent chiffre).
+      - name: Chiffrement (gpg, age)
+        env:
+          KURA_TEST_GPG: /usr/bin/gpg
+          KURA_TEST_AGE: /usr/bin/age
+        run: |
+          # Échec : la fin de la sortie en une annotation (lisible sans le journal brut).
+          annotate() { tail -n 150 "$1" | sed ':a;N;$!ba;s/%/%25/g;s/\r//g;s/\n/%0A/g' | sed 's/^/::error title=go test::/'; }
+          sudo apt-get install -y -q age
+          gpg --version | head -1 && age --version
+          set -o pipefail
+          go test -count=1 -v -run 'TestGPGRealEncrypt|TestAgeRealDecrypt' ./internal/prepare/ 2>&1 | tee test.log || { annotate test.log; exit 1; }
+
       # mariadb-dump hors des paquets MySQL du runner (qui l'excluent) : client MariaDB
       # extrait dans /usr/lib/kura-mariadb, dossier de root (/opt du runner est ouvert à
       # tous : l'agent y refuserait l'outil, à juste titre) ; sa bibliothèque libmariadb3
@@ -262,7 +280,7 @@ jobs:
   # runner, sqlcmd ODBC fourni avec ; droit d'écriture du compte du service accordé puis
   # retiré, propriété des sauvegardes reprise.
   bases-windows:
-    name: Windows · export SQL Server
+    name: Windows · export SQL Server et gpg
     runs-on: windows-latest
     env:
       KURA_TEST_DB: "1"
@@ -290,6 +308,17 @@ jobs:
           & $sqlcmd -S 'localhost\SQLEXPRESS' -E -b -C -Q "SELECT @@VERSION"
           "KURA_TEST_SQLCMD=$sqlcmd" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
+      - name: GnuPG
+        shell: pwsh
+        run: |
+          choco install gnupg -y --no-progress
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $gpg = Get-ChildItem 'C:\Program Files*\GnuPG\bin\gpg.exe' -ErrorAction SilentlyContinue |
+            Select-Object -First 1 -ExpandProperty FullName
+          if (-not $gpg) { Write-Error "gpg introuvable"; exit 1 }
+          & $gpg --version
+          "KURA_TEST_GPG=$gpg" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
       - name: Export SQL Server
         shell: bash
         env:
@@ -298,7 +327,7 @@ jobs:
           # Échec : la fin de la sortie en une annotation (lisible sans le journal brut).
           annotate() { tail -n 150 "$1" | sed ':a;N;$!ba;s/%/%25/g;s/\r//g;s/\n/%0A/g' | sed 's/^/::error title=go test::/'; }
           set -o pipefail
-          go test -count=1 -v -run 'TestSQLServerRealExport|TestMSServiceName' ./internal/prepare/ 2>&1 | tee test.log || { annotate test.log; exit 1; }
+          go test -count=1 -v -run 'TestSQLServerRealExport|TestMSServiceName|TestGPGRealEncrypt' ./internal/prepare/ 2>&1 | tee test.log || { annotate test.log; exit 1; }
 
   # macOS (Apple silicon) : tests sur un vrai macOS, plists relues par plutil.
   macos:

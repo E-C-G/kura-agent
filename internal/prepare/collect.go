@@ -38,13 +38,8 @@ func copySource(ctx context.Context, src string, p config.Prepare, agentPaths []
 		return c, err
 	}
 	agent, agentNames := agentFiles(agentPaths)
-	for dir := filepath.Clean(src); ; dir = filepath.Dir(dir) {
-		if fi, err := os.Stat(dir); err == nil && sameAny(fi, agent) {
-			return c, fmt.Errorf("%s : la source est un dossier de l'agent ou se trouve dessous", src)
-		}
-		if filepath.Dir(dir) == dir {
-			break
-		}
+	if err := refuseAgentSource(src, agent); err != nil {
+		return c, err
 	}
 	before, err := os.Lstat(src)
 	if err != nil {
@@ -230,6 +225,19 @@ func agentFiles(paths []string) ([]os.FileInfo, map[string]bool) {
 		}
 	}
 	return infos, names
+}
+
+// refuseAgentSource : une source qui est un dossier de l'agent (comparé par identité de
+// fichier), ou se trouve dessous, est refusée.
+func refuseAgentSource(src string, agent []os.FileInfo) error {
+	for dir := filepath.Clean(src); ; dir = filepath.Dir(dir) {
+		if fi, err := os.Stat(dir); err == nil && sameAny(fi, agent) {
+			return fmt.Errorf("%s : la source est un dossier de l'agent ou se trouve dessous", src)
+		}
+		if filepath.Dir(dir) == dir {
+			return nil
+		}
+	}
 }
 
 func sameAny(fi os.FileInfo, list []os.FileInfo) bool {

@@ -35,6 +35,9 @@ var checkPrepareTools = func(cfg *config.Config) []toolCheck {
 		case p.Type == config.PrepareDBExport:
 			field, path = dbToolField(p.Engine, cfg)
 			check = func(ctx context.Context) (string, error) { return prepare.CheckDBTools(ctx, execx.System{}, cfg, p) }
+		case p.Type == config.PrepareGPG:
+			field, path = "tools.gpg", cfg.Tools.GPG
+			check = func(ctx context.Context) (string, error) { return prepare.CheckGPG(ctx, execx.System{}, path) }
 		default:
 			continue
 		}
@@ -46,6 +49,37 @@ var checkPrepareTools = func(cfg *config.Config) []toolCheck {
 		v, err := check(ctx)
 		cancel()
 		out = append(out, toolCheck{Field: field, Path: path, Version: v, Err: err})
+	}
+	return out
+}
+
+// keyCheck : clés gpg d'une préparation, vérifiées par validate.
+type keyCheck struct {
+	ID           string
+	Fingerprints []string
+	Warnings     []string
+	Err          error
+}
+
+// checkGPGKeys monte le trousseau de chaque préparation gpg dans un dossier temporaire
+// et vérifie ses clés (empreinte, clé publique seule, ni révoquée ni expirée).
+// Remplaçable en test.
+var checkGPGKeys = func(cfg *config.Config) []keyCheck {
+	var out []keyCheck
+	for _, p := range cfg.Prepare {
+		if p.Type != config.PrepareGPG {
+			continue
+		}
+		dir, err := os.MkdirTemp("", "kura-validate-")
+		if err != nil {
+			out = append(out, keyCheck{ID: p.ID, Err: err})
+			continue
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		fprs, warns, err := prepare.CheckGPGKeys(ctx, execx.System{}, cfg, p, dir)
+		cancel()
+		os.RemoveAll(dir)
+		out = append(out, keyCheck{ID: p.ID, Fingerprints: fprs, Warnings: warns, Err: err})
 	}
 	return out
 }

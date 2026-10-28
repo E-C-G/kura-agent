@@ -21,7 +21,7 @@ Console d'administration associée : [E-C-G/kura-ctl](https://github.com/E-C-G/k
 | 5 ter | `install --package` : poste installé en une fois depuis un paquet de la console, CLI AWS comprise | **fait** |
 | 6 | Restauration : historique, état à une date (lot 1), vers un dossier à part, journal, bilan (lot 2), en place (lot 3), depuis l'icône pour ses propres fichiers (lot 4) | **fait** |
 | 7 | `self-update` : recherche et vérification de l'attestation GitHub, installation, retour arrière, icône | **fait** |
-| 8 | Préparations avant les jobs : archive zip (lot 1) ; exports de bases (lot 2), chiffrement gpg et age (lot 3) | lots 1 et 2 **faits** |
+| 8 | Préparations avant les jobs : archive zip (lot 1) ; exports de bases (lot 2), chiffrement gpg et age (lot 3) | **fait** |
 
 Commandes disponibles : `run`, `validate`, `status`, `credentials`, `import`, `install`, `uninstall`,
 `suspend`, `tray`, `self-update`, `restore`, `version`.
@@ -673,13 +673,12 @@ toute la passe était à refaire. L'agent lance `aws.exe` avec `AWS_RETRY_MODE=s
 20 s, pendant environ 2 minutes. Au-delà, l'agent relance la commande entière (2 nouvelles
 tentatives à 5 min d'intervalle, voir plus haut).
 
-## Préparations : archive zip et export de bases avant les jobs
+## Préparations : archive zip, export de bases et chiffrement avant les jobs
 
 Une préparation écrit, avant les jobs, un fichier que la synchronisation seule ne sait pas
 sauvegarder proprement ; un job ordinaire l'envoie ensuite en prenant `${STAGING:<id>}` pour
-source. Cette version fait les archives zip (un dossier de dizaines de milliers de petits
-fichiers, ou à sauvegarder d'un bloc) et les exports de bases (voir plus bas) ; le chiffrement
-suivra.
+source : archive zip (un dossier de dizaines de milliers de petits fichiers, ou à sauvegarder
+d'un bloc), export de bases, chiffrement gpg ou age (voir plus bas).
 
 ```yaml
 tools:                             # outils installés sur le poste, chemins absolus
@@ -740,8 +739,8 @@ jobs:
   jamais en simulation. Résultat, nombre de fichiers et taille : `status.json`, `kura-agent status`,
   bilan (`prepares` dans le webhook), journal `prepare-<id>.log` de l'exécution.
 - **Validation.** `${STAGING:x}` doit nommer une préparation, chaque préparation doit être envoyée par
-  un job, `tools.zip` est obligatoire pour une préparation zip. `gpg` et `age` sont refusés par
-  cette version.
+  un job (directement, ou par le chiffrement de son résultat), `tools.zip` est obligatoire pour
+  une préparation zip.
 
 ### Export de bases (`db_export`)
 
@@ -825,6 +824,102 @@ jobs:
 - **`validate`** vérifie les outils et, pour une préparation avec `user`, se connecte et liste les
   bases qui seront exportées ; sans `user` (authentification du système), la connexion n'est
   vérifiée qu'à la première exécution, sous le compte de la tâche.
+
+### Chiffrement (`gpg`, `age`)
+
+Une préparation `gpg` ou `age` chiffre, pour une ou plusieurs clés publiques, le résultat d'une
+préparation qui la précède (`input` : export ou archive) ou un fichier ou dossier du poste
+(`source`). Le bucket ne reçoit que le chiffré : le bucket et sa clé, même volés ensemble, ne
+suffisent plus à lire les données. L'agent ne détient jamais de clé privée et ne déchiffre rien.
+
+```yaml
+tools:
+  gpg: "C:/Program Files (x86)/GnuPG/bin/gpg.exe"   # /usr/bin/gpg ; age : intégré, rien à déclarer
+
+encryption:                        # destinataires par défaut
+  gpg:
+    recipients:
+      - fingerprint: 0123456789ABCDEF0123456789ABCDEF01234567
+        key: |
+          -----BEGIN PGP PUBLIC KEY BLOCK-----
+          …
+          -----END PGP PUBLIC KEY BLOCK-----
+  age:
+    recipients:
+      - age1ql3z7hjy54pw3hyww5ayyfg7zqgvc7w3j2elw8zmrj2kg5sfn9aqmcac8p
+
+prepare:
+  - id: compta-db
+    type: db_export
+    engine: postgresql
+    user: kura_backup
+    password: credential:compta-db
+  - id: compta-chiffre
+    type: age                      # destinataires de encryption.age
+    input: compta-db               # export chiffré au fil de l'eau, jamais en clair
+  - id: courrier
+    type: zip
+    source: "D:/Courrier"
+  - id: courrier-chiffre
+    type: gpg
+    input: courrier
+    recipients:                    # remplacent ceux de encryption.gpg, ici seulement
+      - fingerprint: 89ABCDEF0123456789ABCDEF0123456789ABCDEF
+        key: |
+          -----BEGIN PGP PUBLIC KEY BLOCK-----
+          …
+          -----END PGP PUBLIC KEY BLOCK-----
+  - id: contrats
+    type: age
+    source: "D:/Contrats"          # fichier ou dossier du poste, chiffré fichier par fichier
+
+jobs:
+  - id: compta
+    source: "${STAGING:compta-chiffre}"
+    destination: BASES/COMPTA
+  - id: courrier
+    source: "${STAGING:courrier-chiffre}"
+    destination: COURRIER
+  - id: contrats
+    source: "${STAGING:contrats}"
+    destination: CONTRATS
+```
+
+- **Clair jamais envoyé.** Une préparation chiffrée (`input` d'un `gpg` ou d'un `age`) ne peut pas
+  être la source d'un job, ni être chiffrée deux fois ; l'entrée précède toujours son chiffrement.
+  Le clair est effacé dès qu'il est chiffré, ou si le chiffrement échoue. Un chiffrement dont
+  l'entrée a échoué est en échec (ou sauté si elle a été sautée) ; le job qui l'envoie est sauté.
+- **Destinataires.** Sans `recipients`, ceux de `encryption.gpg` ou `encryption.age` ; avec, les
+  siens seulement (sans fusion). Aucun destinataire nulle part : refusé. Une clé de `encryption`
+  qu'aucune préparation n'utilise : avertissement de `validate`. Chaque fichier est lisible par
+  chacune des clés : en prévoir deux (éditeur et client), dont une copie hors ligne ; perdre toutes
+  les clés privées rend les sauvegardes illisibles.
+- **age**, intégré à l'agent (`filippo.io/age`, rien à installer) : clés `age1…`, hybrides
+  post-quantiques `age1pq1…` (pas mêlées à des clés classiques), ou SSH (`ssh-ed25519`, `ssh-rsa`).
+  Une identité privée (`AGE-SECRET-KEY-…`) ou une clé matérielle (plugin) est refusée à la lecture
+  de la configuration. Un export de base passe directement dans le chiffrement (compressé avant pour
+  MySQL) : seul `<base>.dump.age` ou `<base>.sql.gz.age` est écrit ; le contrôle se fait en route
+  (code de sortie, en-tête `PGDMP` ou dernière ligne `-- Dump completed`), la relecture par
+  `pg_restore` demandant le clair. SQL Server écrit sa sauvegarde lui-même : elle est chiffrée puis
+  effacée aussitôt. Déchiffrer : `age --decrypt -i identite.txt compta.dump.age > compta.dump`.
+- **gpg** (GnuPG 2.2 ou plus, Gpg4win sous Windows ; outil vérifié comme les autres) : trousseau
+  propre à la préparation, dans la zone de préparation, recréé à chaque exécution depuis la
+  configuration, sans démon (`--no-autostart`) ; aucun trousseau d'utilisateur n'est lu ni modifié.
+  Chaque clé importée doit avoir l'empreinte déclarée (une clé non déclarée dans le bloc fourni est
+  refusée), n'être ni révoquée ni expirée et avoir une sous-clé de chiffrement valide ; une clé qui
+  expire dans les 30 jours donne un avertissement. Chiffrement par `--trust-model always` (seules les
+  clés déclarées sont dans ce trousseau), `--compress-algo none` pour un fichier déjà compressé ;
+  puis `gpg --list-packets` doit montrer un paquet de chiffrement pour chaque clé déclarée et aucun
+  autre. Déchiffrer : `gpg --decrypt courrier.zip.gpg > courrier.zip`, ou Kleopatra.
+- **Source** : fichier ou dossier, chiffré fichier par fichier sous le même nom suivi de `.age` ou
+  `.gpg`, arborescence gardée ; chaque fichier ouvert sous la source (`os.Root`), liens et jonctions
+  jamais suivis, dossiers de l'agent refusés ou laissés de côté. Un fichier illisible fait échouer
+  la préparation.
+- **Bilan** : destinataires (empreintes gpg, clés age) dans `status.json` (`recipients`),
+  `kura-agent status` et le journal. `validate` monte le trousseau gpg dans un dossier temporaire et
+  vérifie chaque clé.
+- **Restaurer** un fichier chiffré rend le `.gpg` ou le `.age` : le déchiffrement se fait hors du
+  poste, ou sur le poste par celui qui détient la clé privée.
 
 ## Nouvelles versions : `kura-agent self-update`
 

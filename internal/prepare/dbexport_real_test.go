@@ -107,6 +107,28 @@ func TestPostgresRealExport(t *testing.T) {
 		t.Fatalf("export rechargé : %s lignes", n)
 	}
 
+	// Export chiffré par age au fil de l'eau, déchiffré puis rechargé.
+	id := newAgeIdentity(t)
+	cfg.Prepare = append(cfg.Prepare, config.Prepare{ID: "bases-chiffre", Type: config.PrepareAge, Input: "bases",
+		Recipients: []config.Recipient{{Age: id.Recipient().String()}}})
+	cfg.ApplyDefaults()
+	staging := filepath.Join(t.TempDir(), "staging")
+	os.MkdirAll(staging, 0o700)
+	ps = Run(context.Background(), cfg, cfg.Prepare[1], Deps{Exec: execx.System{}, StagingDir: staging,
+		Secret: func(string) (string, error) { return "kura-test", nil }})
+	if ps.Result != state.ResultOK {
+		t.Fatalf("export chiffré : %+v", ps)
+	}
+	clear := filepath.Join(t.TempDir(), "compta.dump")
+	os.WriteFile(clear, []byte(decryptAge(t, filepath.Join(staging, "bases-chiffre", "compta.dump.age"), id)), 0o600)
+	sql("postgres", "DROP DATABASE IF EXISTS compta_copie")
+	sql("postgres", "CREATE DATABASE compta_copie")
+	admin(t, env, nil, restore, "--no-owner", "--exit-on-error", "--dbname="+conn("compta_copie"), clear)
+	if n := strings.TrimSpace(sql("compta_copie", "SELECT count(*) FROM ecritures")); n != "1000" {
+		t.Fatalf("export chiffré rechargé : %s lignes", n)
+	}
+	cfg.Prepare = cfg.Prepare[:1]
+
 	// Mauvais mot de passe : échec, rien de gardé.
 	ps, dir, _ = realRun(t, cfg, "faux")
 	if ps.Result != state.ResultError {
