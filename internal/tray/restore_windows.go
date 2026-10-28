@@ -943,18 +943,36 @@ func (w *restoreWin) run() {
 	for i, k := range picked {
 		rels[i] = w.files[k].Rel
 	}
-	for _, chunk := range ipc.ChunkStrings(rels) {
-		if err := p.Send(ipc.Msg{Type: ipc.TypeRestorePick, Restore: &ipc.RestoreData{Rels: chunk}}); err != nil {
-			w.status("Envoi impossible : " + err.Error())
-			return
-		}
-	}
 	w.running = true
 	w.enable(false)
 	procShowWindow.Call(w.ctl[idOpenDir], swHide)
 	procSendMessageW.Call(w.ctl[idProgress], pbmSetRange32, 0, uintptr(len(picked)))
 	procSendMessageW.Call(w.ctl[idProgress], pbmSetPos, 0, 0)
 	w.status("Restauration en cours…")
+	// Envoi de la sélection hors du thread de l'interface : la tâche peut être occupée.
+	go func() {
+		for _, chunk := range ipc.ChunkStrings(rels) {
+			if err := p.Send(ipc.Msg{Type: ipc.TypeRestorePick, Restore: &ipc.RestoreData{Rels: chunk}}); err != nil {
+				w.a.invoke(func() {
+					if rw == w {
+						w.running = false
+						w.enable(true)
+						w.status("Envoi impossible : " + err.Error())
+					}
+				})
+				return
+			}
+		}
+		w.a.invoke(func() {
+			if rw == w {
+				w.runRequest(mode)
+			}
+		})
+	}()
+}
+
+// runRequest demande la restauration des fichiers envoyés et attend la fin.
+func (w *restoreWin) runRequest(mode string) {
 	w.request(ipc.Msg{Type: ipc.TypeRestoreRun, Restore: &ipc.RestoreData{Mode: mode}}, 0, func(r ipc.Msg, err error) {
 		w.running = false
 		w.enable(true)

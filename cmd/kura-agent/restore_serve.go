@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
@@ -27,11 +26,14 @@ import (
 type trayUser interface {
 	Account() string // DOMAINE\nom
 	Home() string    // dossier de profil
-	// CanWrite : le compte peut créer des fichiers dans dir (contrôle fait par le
-	// système avec le jeton du compte).
+	// CanWrite : le compte peut lister dir et y créer des fichiers (contrôle fait par
+	// le système avec le jeton du compte).
 	CanWrite(dir string) error
 	// CanWriteAll : CanWrite pour chaque dossier, en un seul passage au nom du compte.
 	CanWriteAll(dirs []string) []error
+	// CanReadAll : le compte peut lire chaque fichier (un fichier ouvert sans partage
+	// par une application compte comme lisible : Windows contrôle les droits avant).
+	CanReadAll(files []string) []error
 	// Do exécute f sur un thread verrouillé, au nom du compte.
 	Do(f func() error) error
 	// Impersonate prend l'identité du compte sur le thread courant (verrouillé par
@@ -45,10 +47,12 @@ type serveDeps struct {
 	restoreDeps
 	sessions func() ([]int, error)
 	dial     func(session int) (io.ReadWriteCloser, trayUser, error)
-	poll     time.Duration // recherche des fenêtres ouvertes
-	idle     time.Duration // connexion sans demande : fermée
-	linger   time.Duration // plus aucune fenêtre : fin du processus
-	logw     io.Writer
+	// created : date de création d'un dossier (NTFS) ; false si inconnue.
+	created func(dir string) (time.Time, bool)
+	poll    time.Duration // recherche des fenêtres ouvertes
+	idle    time.Duration // connexion sans demande : fermée
+	linger  time.Duration // plus aucune fenêtre : fin du processus
+	logw    io.Writer
 }
 
 const (
@@ -314,7 +318,13 @@ func (ts *traySession) list(ctx context.Context, peer *ipc.Peer, m ipc.Msg, rd *
 	t, _ := restore.Resolve(ts.cfg, dir, ts.sd.windows)
 	lctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer cancel()
-	vs, err := listTarget(lctx, ts.b, t, ts.sd.windows)
+	var vs []restore.Version
+	if _, statErr := os.Lstat(dir); statErr == nil {
+		vs, err = listTarget(lctx, ts.b, t, ts.sd.windows)
+	} else {
+		// Dossier disparu : préfixe exact seulement (pas de relecture du job entier).
+		vs, err = ts.b.ListVersions(lctx, t.Prefix())
+	}
 	if err != nil {
 		ts.logf("%s : liste de %s : %v", ts.u.Account(), dir, err)
 		fail("Bucket injoignable : %v", err)
@@ -334,14 +344,15 @@ func (ts *traySession) list(ctx context.Context, peer *ipc.Peer, m ipc.Msg, rd *
 		return
 	}
 	files, hidden := ts.visible(dir, files)
-	msg := ""
+	var notes []string
 	if hidden {
-		msg = "Certains dossiers ne vous sont pas accessibles : leurs fichiers ne sont pas listés."
+		notes = append(notes, "Certains fichiers ou dossiers ne vous sont pas accessibles : ils ne sont pas listés.")
 	}
 	if len(files) > trayMaxFiles {
 		files = files[:trayMaxFiles]
-		msg = fmt.Sprintf("Plus de %d fichiers : seuls les %d premiers sont listés ; choisir un sous-dossier.", trayMaxFiles, trayMaxFiles)
+		notes = append(notes, fmt.Sprintf("Plus de %d fichiers : seuls les %d premiers sont listés ; choisir un sous-dossier.", trayMaxFiles, trayMaxFiles))
 	}
+	msg := strings.Join(notes, " ")
 	l := &trayListing{path: dir, target: t, at: at, versions: mine, files: files, names: map[string]bool{}}
 	var out []ipc.RestoreFile
 	var total int64
@@ -389,11 +400,17 @@ func (ts *traySession) reach(dir string) (string, bool) {
 	return ne, true
 }
 
-// visible garde les fichiers que le compte peut restaurer : ceux dont le dossier (ou,
-// disparu dans son profil, le plus proche parent existant) lui est ouvert en écriture.
-// Les droits sont vérifiés par Windows, avec le jeton du compte, dossier par dossier :
-// un sous-dossier privé d'un dossier commun n'apparaît pas.
+// visible garde les fichiers que le compte peut restaurer, vérifiés par Windows avec son
+// jeton :
+//   - leur dossier (ou, disparu dans son profil, le plus proche parent existant) lui est
+//     ouvert en liste et en écriture : le sous-dossier privé d'un dossier commun
+//     n'apparaît pas ;
+//   - un fichier encore présent lui est lisible ;
+//   - hors de son profil, un fichier supprimé n'apparaît que si son dossier existait
+//     déjà quand cette version a été sauvegardée : un dossier supprimé puis recréé par
+//     un autre compte ne rend pas visibles les fichiers d'avant.
 func (ts *traySession) visible(base string, files []restore.File) ([]restore.File, bool) {
+	home := ts.u.Home()
 	parentOf := func(f restore.File) string {
 		p := filepath.Join(base, filepath.FromSlash(path.Dir(f.Rel)))
 		if !within(base, p, ts.sd.windows) {
@@ -402,7 +419,7 @@ func (ts *traySession) visible(base string, files []restore.File) ([]restore.Fil
 		return p
 	}
 	reachOf := map[string]string{} // dossier du fichier → dossier à vérifier ("" : refusé)
-	var check []string
+	var dirs []string
 	seen := map[string]bool{}
 	for _, f := range files {
 		p := parentOf(f)
@@ -417,17 +434,44 @@ func (ts *traySession) visible(base string, files []restore.File) ([]restore.Fil
 		reachOf[p] = ne
 		if !seen[ne] {
 			seen[ne] = true
-			check = append(check, ne)
+			dirs = append(dirs, ne)
 		}
 	}
-	allowed := map[string]bool{}
-	for i, err := range ts.u.CanWriteAll(check) {
-		allowed[check[i]] = err == nil
+	dirOK := map[string]bool{}
+	for i, err := range ts.u.CanWriteAll(dirs) {
+		dirOK[dirs[i]] = err == nil
+	}
+	// Fichiers encore présents : lisibles par le compte ?
+	present := map[int]string{}
+	var paths []string
+	for i, f := range files {
+		if f.Problem != "" {
+			continue
+		}
+		lp := filepath.Join(base, filepath.FromSlash(f.Rel))
+		if fi, err := os.Lstat(lp); err == nil && fi.Mode().IsRegular() {
+			present[i] = lp
+			paths = append(paths, lp)
+		}
+	}
+	readOK := map[string]bool{}
+	for i, err := range ts.u.CanReadAll(paths) {
+		readOK[paths[i]] = err == nil
 	}
 	var out []restore.File
 	hidden := false
-	for _, f := range files {
-		if ne := reachOf[parentOf(f)]; ne != "" && allowed[ne] {
+	for i, f := range files {
+		p := parentOf(f)
+		ok := reachOf[p] != "" && dirOK[reachOf[p]]
+		if lp, isPresent := present[i]; ok && isPresent {
+			ok = readOK[lp]
+		} else if ok && !within(home, p, ts.sd.windows) && ts.sd.created != nil {
+			// Supprimé, hors du profil : le dossier doit être plus ancien que la version.
+			if c, known := ts.sd.created(p); known && c.After(f.Version.LastModified) {
+				ok = false
+			}
+		}
+		if ok {
 			out = append(out, f)
 		} else {
 			hidden = true
@@ -527,8 +571,8 @@ func (ts *traySession) run(ctx context.Context, peer *ipc.Peer, m ipc.Msg, rd *i
 		name := "Restauration Kura " + stamp
 		_ = ts.u.Do(func() error { // nom libre, vu par le compte
 			for i := 2; i < 100; i++ {
-				if _, err := os.Lstat(filepath.Join(parent, name)); errors.Is(err, fs.ErrNotExist) {
-					return nil
+				if _, err := os.Lstat(filepath.Join(parent, name)); err != nil {
+					return nil // libre (ou invisible pour le compte : l'écriture le dira)
 				}
 				name = fmt.Sprintf("Restauration Kura %s (%d)", stamp, i)
 			}

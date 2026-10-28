@@ -158,6 +158,8 @@ func (d *Dest) place(tmp, rel string) error {
 		return nil
 	case errors.Is(err, fs.ErrExist):
 		return ErrExists
+	case !linkUnsupported(err):
+		return err
 	}
 	if _, err := d.root.Lstat(rel); err == nil {
 		return ErrExists

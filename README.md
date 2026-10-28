@@ -369,11 +369,14 @@ L'icône ouvre pour cela un second canal (`\\.\pipe\KuraRestore-<session>-…`, 
 sessions). La tâche (`kura-agent restore --serve`) joint la fenêtre (exécutable et session vérifiés
 comme pour `run`) ; la fenêtre n'accepte qu'un client SYSTEM. Tout est vérifié par la tâche, avec le
 jeton du processus de l'icône (pris lors de sa vérification) : le compte doit figurer dans
-`tray.users` ; un fichier n'est listé que si le compte peut écrire dans **son** dossier (contrôle
-d'accès de Windows fait avec son jeton, dossier par dossier : le sous-dossier privé d'un dossier
-commun n'apparaît pas, ni le profil d'un autre compte) ; un dossier disparu n'est restaurable depuis
-l'icône que dans le profil du compte (ailleurs, il a pu appartenir à un autre compte : restauration
-par l'administrateur, en ligne de commande) ; les fichiers sont écrits **en son nom** (emprunt
+`tray.users` ; un fichier n'est listé que si le compte peut lister **son** dossier et y écrire
+(contrôle d'accès de Windows fait avec son jeton, dossier par dossier : le sous-dossier privé d'un
+dossier commun n'apparaît pas, ni le profil d'un autre compte), et, s'il est encore présent, le lire ;
+un dossier disparu n'est restaurable depuis l'icône que dans le profil du compte (ailleurs, il a pu
+appartenir à un autre compte : restauration par l'administrateur, en ligne de commande) ; hors du
+profil, un fichier supprimé n'apparaît que si son dossier existait déjà lors de sa sauvegarde (un
+dossier supprimé puis recréé ne rend pas visibles les fichiers d'avant) ; seuls les dossiers des
+disques du poste sont proposés (pas de partage réseau) ; les fichiers sont écrits **en son nom** (emprunt
 d'identité), donc à lui et seulement là où il pourrait écrire lui-même, et jamais à la place d'un
 fichier existant, même apparu pendant la restauration. Le compte ne voit jamais la clé. La date est
 bornée à 90 jours par la tâche elle-même. Pas de verrou de la sauvegarde depuis l'icône (rien n'y

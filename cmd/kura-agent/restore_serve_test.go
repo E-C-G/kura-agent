@@ -17,13 +17,14 @@ import (
 )
 
 type fakeTrayUser struct {
-	account string
-	home    string
-	allowed []string
-	denied  []string
-	mu      sync.Mutex
-	imp     int // emprunts d'identité
-	closed  bool
+	account    string
+	home       string
+	allowed    []string
+	denied     []string
+	unreadable []string
+	mu         sync.Mutex
+	imp        int // emprunts d'identité
+	closed     bool
 }
 
 func (u *fakeTrayUser) Account() string { return u.account }
@@ -39,6 +40,17 @@ func (u *fakeTrayUser) Impersonate() (func(), error) {
 	u.imp++
 	u.mu.Unlock()
 	return func() {}, nil
+}
+func (u *fakeTrayUser) CanReadAll(files []string) []error {
+	out := make([]error, len(files))
+	for i, f := range files {
+		for _, x := range u.unreadable {
+			if f == x {
+				out[i] = errors.New("accès refusé")
+			}
+		}
+	}
+	return out
 }
 func (u *fakeTrayUser) CanWriteAll(dirs []string) []error {
 	out := make([]error, len(dirs))
@@ -81,7 +93,7 @@ func (w *window) request(t *testing.T, m ipc.Msg) ipc.Msg {
 	return r
 }
 
-func startServe(t *testing.T, b *toBench, u *fakeTrayUser) (*window, chan int) {
+func startServe(t *testing.T, b *toBench, u *fakeTrayUser, opts ...func(*serveDeps)) (*window, chan int) {
 	t.Helper()
 	server, client := net.Pipe()
 	w := &window{hello: make(chan ipc.Msg, 1), files: map[int][]ipc.RestoreFile{}}
@@ -110,6 +122,9 @@ func startServe(t *testing.T, b *toBench, u *fakeTrayUser) (*window, chan int) {
 			return c, u, nil
 		},
 		poll: 10 * time.Millisecond, idle: time.Minute, linger: 50 * time.Millisecond, logw: io.Discard,
+	}
+	for _, o := range opts {
+		o(&sd)
 	}
 	code := make(chan int, 1)
 	go func() { code <- serveRestore(context.Background(), sd, "") }()
@@ -276,6 +291,50 @@ func TestServeScopeSharedFolder(t *testing.T) {
 	n := len(b.l.prefixes)
 	if r = w.request(t, ipc.Msg{Type: ipc.TypeRestoreList, Path: filepath.Join(b.src, "Disparu"), Restore: &ipc.RestoreData{}}); !strings.Contains(r.Message, "n'existe plus") || len(b.l.prefixes) != n {
 		t.Fatalf("dossier disparu : %q", r.Message)
+	}
+	w.peer.Close()
+	<-code
+}
+
+// Fichier présent illisible pour le compte, dossier recréé après la sauvegarde : masqués.
+func TestServeScopeReadAndRecreated(t *testing.T) {
+	b := newToBench(t)
+	cfg, _ := b.d.loadConfig("")
+	cfg.Tray.Users = []string{"alice"}
+	docs := filepath.Join(b.src, "Documents")
+	sub := filepath.Join(docs, "sous dossier")
+	os.MkdirAll(sub, 0o755)
+	a := filepath.Join(docs, "a.txt")
+	os.WriteFile(a, []byte("actuel"), 0o644)
+	u := &fakeTrayUser{account: `ACME\alice`, allowed: []string{b.src}, unreadable: []string{a}}
+	// « sous dossier » recréé hier : b.txt, sauvegardé il y a 10 jours, ne doit pas apparaître.
+	created := func(d string) (time.Time, bool) {
+		if d == sub {
+			return restoreNow.AddDate(0, 0, -1), true
+		}
+		return restoreNow.AddDate(-1, 0, 0), true
+	}
+	w, code := startServe(t, b, u, func(sd *serveDeps) { sd.created = created })
+	<-w.hello
+	r := w.request(t, ipc.Msg{Type: ipc.TypeRestoreList, Path: docs, Restore: &ipc.RestoreData{Req: 3}})
+	w.mu.Lock()
+	var rels []string
+	for _, f := range w.files[3] {
+		rels = append(rels, f.Rel)
+	}
+	w.mu.Unlock()
+	if r.Restore.Total != 1 || len(rels) != 1 || rels[0] != "../évasion.txt" {
+		t.Fatalf("visibles : %v (%q)", rels, r.Message)
+	}
+	// dans le profil du compte, la règle du dossier recréé ne s'applique pas
+	w.peer.Close()
+	<-code
+	u2 := &fakeTrayUser{account: `ACME\alice`, home: b.src, allowed: []string{b.src}, unreadable: []string{a}}
+	w, code = startServe(t, b, u2, func(sd *serveDeps) { sd.created = created })
+	<-w.hello
+	r = w.request(t, ipc.Msg{Type: ipc.TypeRestoreList, Path: docs, Restore: &ipc.RestoreData{Req: 4}})
+	if r.Restore.Total != 2 {
+		t.Fatalf("profil : %d (%q)", r.Restore.Total, r.Message)
 	}
 	w.peer.Close()
 	<-code

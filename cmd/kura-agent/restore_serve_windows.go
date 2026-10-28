@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"syscall"
 	"time"
 
 	"golang.org/x/sys/windows"
@@ -68,6 +69,7 @@ func (u *winTrayUser) Do(f func() error) error {
 }
 
 const (
+	fileListDirectory   = 0x0001 // aussi FILE_READ_DATA pour un fichier
 	fileAddFile         = 0x0002
 	fileAddSubdirectory = 0x0004
 )
@@ -94,6 +96,50 @@ func (u *winTrayUser) CanWriteAll(dirs []string) []error {
 	return out
 }
 
+// CanReadAll ouvre chaque fichier en lecture au nom du compte. Un fichier ouvert sans
+// partage par une application (ERROR_SHARING_VIOLATION) a passé le contrôle des droits,
+// fait avant celui du partage : il compte comme lisible.
+func (u *winTrayUser) CanReadAll(files []string) []error {
+	out := make([]error, len(files))
+	if err := u.Do(func() error {
+		for i, f := range files {
+			p, err := windows.UTF16PtrFromString(f)
+			if err != nil {
+				out[i] = err
+				continue
+			}
+			h, err := windows.CreateFile(p, fileListDirectory, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+				nil, windows.OPEN_EXISTING, windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+			switch {
+			case err == nil:
+				windows.CloseHandle(h)
+			case errors.Is(err, windows.ERROR_SHARING_VIOLATION):
+			default:
+				out[i] = err
+			}
+		}
+		return nil
+	}); err != nil {
+		for i := range out {
+			out[i] = err
+		}
+	}
+	return out
+}
+
+// dirCreated : date de création d'un dossier (NTFS).
+func dirCreated(dir string) (time.Time, bool) {
+	fi, err := os.Lstat(dir)
+	if err != nil {
+		return time.Time{}, false
+	}
+	a, ok := fi.Sys().(*syscall.Win32FileAttributeData)
+	if !ok {
+		return time.Time{}, false
+	}
+	return time.Unix(0, a.CreationTime.Nanoseconds()), true
+}
+
 // canWriteHere : contrôle sur le thread courant, qui porte déjà l'identité du compte.
 func canWriteHere(dir string) error {
 	{
@@ -101,7 +147,7 @@ func canWriteHere(dir string) error {
 		if err != nil {
 			return err
 		}
-		h, err := windows.CreateFile(p, fileAddFile|fileAddSubdirectory,
+		h, err := windows.CreateFile(p, fileListDirectory|fileAddFile|fileAddSubdirectory,
 			windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil,
 			windows.OPEN_EXISTING, windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
 		if err != nil {
@@ -160,9 +206,10 @@ func realServeDeps() (serveDeps, func()) {
 			}
 			return conn, u, nil
 		},
-		poll:   2 * time.Second,
-		idle:   30 * time.Minute,
-		linger: 90 * time.Second,
-		logw:   logw,
+		created: dirCreated,
+		poll:    2 * time.Second,
+		idle:    30 * time.Minute,
+		linger:  90 * time.Second,
+		logw:    logw,
 	}, closeLog
 }
