@@ -51,6 +51,8 @@ func newToBench(t *testing.T) *toBench {
 		loadConfig:  func(string) (*config.Config, error) { return cfg, nil },
 		bucket:      func(*config.Config) (restoreBucket, error) { return b.l, nil },
 		now:         func() time.Time { return restoreNow },
+		windows:     runtime.GOOS == "windows",
+		foldCase:    runtime.GOOS == "windows" || runtime.GOOS == "darwin",
 		interactive: true,
 		confirm:     func(string) (bool, error) { return b.answer, nil },
 		freeSpace:   func(string) (uint64, error) { return b.free, nil },
@@ -118,7 +120,7 @@ func TestRestoreToFolder(t *testing.T) {
 		t.Fatalf("journaux : %v", logs)
 	}
 	lj, _ := os.ReadFile(logs[0])
-	for _, s := range []string{"OK\tDocuments/a.txt\tversion a2", "REFUSÉ\t", "Compte : admin", "Commande : kura-agent restore", "Résumé : 2 restauré(s)"} {
+	for _, s := range []string{"OK\t" + filepath.FromSlash("Documents/a.txt") + "\tversion a2", "REFUSÉ\t", "Compte : admin", "Commande : kura-agent restore", "Résumé : 2 restauré(s)"} {
 		if !strings.Contains(string(lj), s) {
 			t.Errorf("journal sans %q :\n%s", s, lj)
 		}
