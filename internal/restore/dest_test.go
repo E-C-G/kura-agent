@@ -250,3 +250,89 @@ func TestMarker(t *testing.T) {
 		t.Fatalf("restes : %v", n)
 	}
 }
+
+func TestClassifyAndReplace(t *testing.T) {
+	d := newDest(t)
+	v := []byte("version sauvegardée")
+	sum := md5.Sum(v)
+	m := &memBucket{data: map[string][]byte{"v1": v}}
+	ver := Version{Key: "k", VersionID: "v1", Size: int64(len(v)), ETag: `"` + hex.EncodeToString(sum[:]) + `"`}
+	write := func(rel, content string) {
+		p := filepath.Join(d.Dir, filepath.FromSlash(rel))
+		os.MkdirAll(filepath.Dir(p), 0o755)
+		os.WriteFile(p, []byte(content), 0o644)
+	}
+	write("pareil.txt", string(v))
+	write("autre-taille.txt", "court")
+	write("meme-taille.txt", strings.Repeat("x", len(v)))
+	os.MkdirAll(filepath.Join(d.Dir, "dossier.txt"), 0o755)
+	cases := map[string]Action{"absent.txt": ActWrite, "pareil.txt": ActSame, "autre-taille.txt": ActReplace, "meme-taille.txt": ActReplace}
+	for rel, want := range cases {
+		got, err := d.Classify(Item{File: File{Version: ver}, Out: rel}, true)
+		if err != nil || got != want {
+			t.Errorf("%s : %v %v, attendu %v", rel, got, err, want)
+		}
+	}
+	if got, _ := d.Classify(Item{File: File{Version: ver}, Out: "autre-taille.txt"}, false); got != ActKeep {
+		t.Error("sans --replace : laissé")
+	}
+	if _, err := d.Classify(Item{File: File{Version: ver}, Out: "dossier.txt"}, true); err == nil {
+		t.Error("dossier à la place du fichier")
+	}
+
+	backup, err := d.Replace(context.Background(), m, "autre-taille.txt", ver, "20261028-1130")
+	if err != nil || backup != "autre-taille.txt.avant-restauration-20261028-1130" {
+		t.Fatalf("%q %v", backup, err)
+	}
+	if got, _ := os.ReadFile(filepath.Join(d.Dir, "autre-taille.txt")); string(got) != string(v) {
+		t.Errorf("remplacé : %q", got)
+	}
+	if got, _ := os.ReadFile(filepath.Join(d.Dir, backup)); string(got) != "court" {
+		t.Errorf("gardé : %q", got)
+	}
+	// second remplacement le même jour : nom suivant
+	write("autre-taille.txt", "encore")
+	backup, err = d.Replace(context.Background(), m, "autre-taille.txt", ver, "20261028-1130")
+	if err != nil || backup != "autre-taille.txt.avant-restauration-20261028-1130-2" {
+		t.Fatalf("%q %v", backup, err)
+	}
+	// lecture en échec : le fichier actuel ne bouge pas
+	m.badMD5 = map[string]bool{"v1": true}
+	write("meme-taille.txt", "intact")
+	if _, err := d.Replace(context.Background(), m, "meme-taille.txt", ver, "x"); err == nil {
+		t.Fatal("version altérée acceptée")
+	}
+	if got, _ := os.ReadFile(filepath.Join(d.Dir, "meme-taille.txt")); string(got) != "intact" {
+		t.Errorf("fichier actuel touché : %q", got)
+	}
+	if _, err := os.Stat(filepath.Join(d.Dir, "meme-taille.txt.avant-restauration-x")); err == nil {
+		t.Error("copie laissée")
+	}
+}
+
+// ETag d'un envoi en plusieurs parties de 8 Mio (CLI AWS).
+func TestSameContentMultipart(t *testing.T) {
+	d := newDest(t)
+	data := bytes.Repeat([]byte("0123456789abcdef"), (9<<20)/16) // 9 Mio : 2 parties
+	os.WriteFile(filepath.Join(d.Dir, "gros.bin"), data, 0o644)
+	all := md5.New()
+	for _, part := range [][]byte{data[:8<<20], data[8<<20:]} {
+		s := md5.Sum(part)
+		all.Write(s[:])
+	}
+	etag := hex.EncodeToString(all.Sum(nil))
+	v := Version{Size: int64(len(data)), ETag: `"` + etag + `-2"`}
+	if ok, err := d.sameContent("gros.bin", v); !ok || err != nil {
+		t.Fatalf("identique : %v %v", ok, err)
+	}
+	v.ETag = `"` + etag + `-3"` // autre taille de partie : différent
+	if ok, _ := d.sameContent("gros.bin", v); ok {
+		t.Fatal("nombre de parties incohérent accepté")
+	}
+	data[len(data)-1] ^= 1
+	os.WriteFile(filepath.Join(d.Dir, "gros.bin"), data, 0o644)
+	v.ETag = `"` + etag + `-2"`
+	if ok, _ := d.sameContent("gros.bin", v); ok {
+		t.Fatal("contenu modifié jugé identique")
+	}
+}

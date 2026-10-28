@@ -56,7 +56,8 @@ func (b *Bucket) ListVersions(ctx context.Context, prefix string) ([]Version, er
 		}
 		for _, v := range res.Versions {
 			out = append(out, Version{Key: aws.ToString(v.Key), VersionID: aws.ToString(v.VersionId),
-				LastModified: aws.ToTime(v.LastModified), Size: aws.ToInt64(v.Size), Latest: aws.ToBool(v.IsLatest)})
+				LastModified: aws.ToTime(v.LastModified), Size: aws.ToInt64(v.Size), Latest: aws.ToBool(v.IsLatest),
+				ETag: aws.ToString(v.ETag)})
 		}
 		for _, d := range res.DeleteMarkers {
 			out = append(out, Version{Key: aws.ToString(d.Key), VersionID: aws.ToString(d.VersionId),

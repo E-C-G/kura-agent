@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/E-C-G/kura-agent/internal/lock"
 	"github.com/E-C-G/kura-agent/internal/report"
 	"github.com/E-C-G/kura-agent/internal/restore"
 	"github.com/E-C-G/kura-agent/pkg/config"
@@ -25,6 +26,9 @@ type toBench struct {
 	reports []report.RestoreInfo
 	free    uint64
 	answer  bool
+	busy    bool // sauvegarde en cours : verrou refusé
+	locked  int  // verrou pris
+	held    bool // verrou tenu en ce moment
 }
 
 func newToBench(t *testing.T) *toBench {
@@ -66,6 +70,15 @@ func newToBench(t *testing.T) *toBench {
 		},
 		workers: 3,
 		version: "test",
+		lock: func() (func(), error) {
+			if b.busy {
+				return nil, lock.ErrBusy
+			}
+			b.locked++
+			b.held = true
+			return func() { b.held = false }, nil
+		},
+		inPlaceOwner: inPlaceOwner,
 	}
 	return b
 }

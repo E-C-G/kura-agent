@@ -62,6 +62,7 @@ Usage :
   kura-agent restore  CHEMIN --versions [--json] [--config FICHIER]
   kura-agent restore  CHEMIN | --all  --list [--at DATE] [--json] [--config FICHIER]
   kura-agent restore  CHEMIN | --all  --to DOSSIER [--at DATE] [--yes] [--json] [--config FICHIER]
+  kura-agent restore  CHEMIN | --all  --in-place [--replace] [--at DATE] [--list] [--yes] [--json]
   kura-agent version
 
 Commandes :
@@ -83,8 +84,10 @@ Commandes :
                d'administration. --check : recherche seule, sans droits (code 3 : disponible)
   restore      restaure des fichiers depuis le bucket, tels qu'à la dernière sauvegarde
                ou à la date --at (AAAA-MM-JJ ou "AAAA-MM-JJ HH:MM", 90 jours au plus),
-               dans un dossier --to absent ou vide ; --versions : historique d'un
-               fichier ; --list : ce qui serait restauré ; console d'administration
+               dans un dossier --to absent ou vide, ou à leur place (--in-place : les
+               absents ; --replace : aussi ceux qui diffèrent, l'actuel gardé à côté) ;
+               --versions : historique d'un fichier ; --list : ce qui serait restauré ;
+               console d'administration
   version      affiche la version
 
 Codes de sortie de run : 0 OK · 1 avertissement · 2 erreur · 3 configuration invalide

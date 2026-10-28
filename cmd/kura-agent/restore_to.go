@@ -186,10 +186,7 @@ func restoreTo(ctx context.Context, stdout, stderr io.Writer, d restoreDeps, cfg
 			need += it.Version.Size
 		}
 	}
-	when := "dernière sauvegarde"
-	if !at.IsZero() {
-		when = at.Local().Format("02/01/2006 15:04")
-	}
+	when := stateLabel(at)
 	if count == 0 {
 		fmt.Fprintf(stdout, "Rien à restaurer : aucun fichier à la date demandée (%s).\n", when)
 		for _, it := range items {
@@ -217,14 +214,8 @@ func restoreTo(ctx context.Context, stdout, stderr io.Writer, d restoreDeps, cfg
 	if problems > 0 {
 		fmt.Fprintf(stdout, "%d fichier(s) ne seront pas restaurés (noms refusés, détail au journal).\n", problems)
 	}
-	if !yes {
-		if !d.interactive {
-			return refuse("pas de confirmation possible sans terminal : ajouter --yes")
-		}
-		ok, err := d.confirm("Restaurer ? [o/N] ")
-		if err != nil || !ok {
-			return refuse("restauration non confirmée")
-		}
+	if code := confirmRestore(stderr, d, yes); code != 0 {
+		return code
 	}
 
 	// Écriture.
@@ -244,8 +235,71 @@ func restoreTo(ctx context.Context, stdout, stderr io.Writer, d restoreDeps, cfg
 	if err != nil {
 		return refuse("%s : %v", disp(dc.dir), err)
 	}
+	return execute(ctx, stdout, stderr, d, cfg, b, &restorePlan{
+		mode: "to", where: disp(dc.dir), at: at, reports: reports,
+		batches: []batch{{dest: dest, items: items, resumed: dc.resumed, prog: prog, show: disp}},
+	}, asJSON, args)
+}
 
+// stateLabel : date de l'état, pour les messages.
+func stateLabel(at time.Time) string {
+	if at.IsZero() {
+		return "dernière sauvegarde"
+	}
+	return at.Local().Format("02/01/2006 15:04")
+}
+
+// confirmRestore demande confirmation, sauf --yes ; 0 si l'on continue.
+func confirmRestore(stderr io.Writer, d restoreDeps, yes bool) int {
+	if yes {
+		return 0
+	}
+	if !d.interactive {
+		fmt.Fprintln(stderr, "Refusé : pas de confirmation possible sans terminal : ajouter --yes")
+		return exitRestoreRefused
+	}
+	ok, err := d.confirm("Restaurer ? [o/N] ")
+	if err != nil || !ok {
+		fmt.Fprintln(stderr, "Refusé : restauration non confirmée")
+		return exitRestoreRefused
+	}
+	return 0
+}
+
+// batch : fichiers à écrire sous une même destination.
+type batch struct {
+	dest    *restore.Dest
+	items   []restore.Item
+	resumed map[string]string
+	prog    *restore.Progress // --to : reprise ; nil en place
+	show    func(out string) string
+}
+
+// keptItem : fichier laissé tel quel en place (présent, ou identique à la version), ou
+// en échec avant toute lecture (fichier actuel illisible, lien).
+type keptItem struct {
+	show, label string
+	item        restore.Item
+	err         error
+}
+
+// restorePlan : restauration confirmée, prête à écrire.
+type restorePlan struct {
+	mode      string // to | in_place | replace
+	where     string // destination affichée
+	at        time.Time
+	reports   []listReport
+	batches   []batch
+	kept      []keptItem
+	preFailed []keptItem
+}
+
+// execute écrit les fichiers, tient le journal, l'état et le bilan, et résume.
+func execute(ctx context.Context, stdout, stderr io.Writer, d restoreDeps, cfg *config.Config, b restoreBucket,
+	p *restorePlan, asJSON bool, args []string) int {
+	disp := func(s string) string { return dispPath(s, d.windows) }
 	started := d.now()
+	stamp := started.Format("20060102-1504")
 	logPath := ""
 	var logw io.Writer = io.Discard
 	if err := os.MkdirAll(d.logsDir, 0o755); err == nil {
@@ -259,54 +313,86 @@ func restoreTo(ctx context.Context, stdout, stderr io.Writer, d restoreDeps, cfg
 	}
 	fmt.Fprintf(logw, "kura-agent %s restore — %s\n", d.version, started.Local().Format("02/01/2006 15:04:05"))
 	fmt.Fprintf(logw, "Commande : kura-agent restore %s\n", quoteArgs(args))
-	fmt.Fprintf(logw, "Compte : %s\nÉtat : %s\nDestination : %s\n", d.account(), when, disp(dc.dir))
-	for _, r := range reports {
+	fmt.Fprintf(logw, "Compte : %s\nÉtat : %s\nDestination : %s\n", d.account(), stateLabel(p.at), p.where)
+	for _, r := range p.reports {
 		fmt.Fprintf(logw, "Chemin : %s (job %s, préfixe %s)\n", disp(r.target.Local), r.target.Job.ID, r.target.Key)
 	}
-
-	var restored, skipped, ignored, failed int
+	line := func(show string, it restore.Item) string {
+		return fmt.Sprintf("%s\tversion %s\tsauvegardé le %s\t%d", show, it.Version.VersionID,
+			it.Version.LastModified.Local().Format("02/01/2006 15:04"), it.Version.Size)
+	}
+	for _, k := range p.kept {
+		fmt.Fprintf(logw, "%s\t%s\n", k.label, line(k.show, k.item))
+	}
+	var restored, replaced, skipped, ignored, failed int
 	var bytes int64
 	var failures []string
+	for _, k := range p.preFailed {
+		failed++
+		fmt.Fprintf(logw, "ÉCHEC\t%s\t%v\n", line(k.show, k.item), k.err)
+		if len(failures) < 20 {
+			failures = append(failures, fmt.Sprintf("  %s : %v", k.show, k.err))
+		}
+	}
+	total := len(p.kept) + len(p.preFailed)
+	for _, bt := range p.batches {
+		total += len(bt.items)
+	}
+	done := len(p.kept) + len(p.preFailed)
 	last := time.Now()
-	restore.Restore(ctx, b, dest, items, d.workers, dc.resumed, func(o restore.Outcome) {
-		it := o.Item
-		line := fmt.Sprintf("%s\tversion %s\tsauvegardé le %s\t%d", disp(it.Out), it.Version.VersionID,
-			it.Version.LastModified.Local().Format("02/01/2006 15:04"), it.Version.Size)
-		switch {
-		case o.Skipped:
-			skipped++
-			fmt.Fprintf(logw, "DÉJÀ\t%s\n", line)
-		case o.Refused:
-			ignored++
-			fmt.Fprintf(logw, "REFUSÉ\t%s\t%v\n", line, o.Err)
-		case o.Err != nil:
-			failed++
-			fmt.Fprintf(logw, "ÉCHEC\t%s\t%v\n", line, o.Err)
-			if len(failures) < 20 {
-				failures = append(failures, fmt.Sprintf("  %s : %v", disp(it.Out), o.Err))
+	for _, bt := range p.batches {
+		bt.dest.Stamp = stamp
+		restore.Restore(ctx, b, bt.dest, bt.items, d.workers, bt.resumed, func(o restore.Outcome) {
+			it := o.Item
+			l := line(bt.show(it.Out), it)
+			done++
+			switch {
+			case o.Skipped:
+				skipped++
+				fmt.Fprintf(logw, "DÉJÀ\t%s\n", l)
+			case o.Refused:
+				ignored++
+				fmt.Fprintf(logw, "REFUSÉ\t%s\t%v\n", l, o.Err)
+			case o.Err != nil:
+				failed++
+				fmt.Fprintf(logw, "ÉCHEC\t%s\t%v\n", l, o.Err)
+				if len(failures) < 20 {
+					failures = append(failures, fmt.Sprintf("  %s : %v", bt.show(it.Out), o.Err))
+				}
+			case o.Backup != "":
+				replaced++
+				bytes += it.Version.Size
+				fmt.Fprintf(logw, "REMPLACÉ\t%s\tactuel gardé : %s\n", l, bt.show(o.Backup))
+			default:
+				restored++
+				bytes += it.Version.Size
+				if bt.prog != nil {
+					bt.prog.Done(it)
+				}
+				fmt.Fprintf(logw, "OK\t%s\n", l)
 			}
-		default:
-			restored++
-			bytes += it.Version.Size
-			prog.Done(it)
-			fmt.Fprintf(logw, "OK\t%s\n", line)
-		}
-		if !asJSON && time.Since(last) >= 10*time.Second {
-			last = time.Now()
-			fmt.Fprintf(stdout, "  … %d/%d fichier(s), %s\n", restored+skipped+ignored+failed, len(items), humanSize(bytes))
-		}
-	})
+			if !asJSON && time.Since(last) >= 10*time.Second {
+				last = time.Now()
+				fmt.Fprintf(stdout, "  … %d/%d fichier(s), %s\n", done, total, humanSize(bytes))
+			}
+		})
+	}
 	interrupted := ctx.Err() != nil
-	prog.Finish(failed == 0 && !interrupted)
+	for _, bt := range p.batches {
+		if bt.prog != nil {
+			bt.prog.Finish(failed == 0 && !interrupted)
+		}
+	}
 
 	ended := d.now()
-	info := report.RestoreInfo{Account: d.account(), To: disp(dc.dir), Files: restored, Bytes: bytes,
-		Skipped: skipped, Ignored: ignored, Failed: failed, Result: "ok", ExitCode: exitRestoreOK, Log: logPath, Started: started, Ended: ended}
-	for _, r := range reports {
+	info := report.RestoreInfo{Account: d.account(), Mode: p.mode, To: p.where, Files: restored + replaced, Replaced: replaced,
+		Bytes: bytes, Skipped: skipped + len(p.kept), Ignored: ignored, Failed: failed, Result: "ok", ExitCode: exitRestoreOK,
+		Log: logPath, Started: started, Ended: ended}
+	for _, r := range p.reports {
 		info.Paths = append(info.Paths, disp(r.target.Local))
 	}
-	if !at.IsZero() {
-		a := at
+	if !p.at.IsZero() {
+		a := p.at
 		info.At = &a
 	}
 	switch {
@@ -317,7 +403,8 @@ func restoreTo(ctx context.Context, stdout, stderr io.Writer, d restoreDeps, cfg
 		info.Result, info.ExitCode = "partial", exitRestorePartial
 		info.Message = "Des fichiers sont en échec (détail au journal) : relancer la même commande réessaie seulement ceux-là."
 	}
-	fmt.Fprintf(logw, "Résumé : %d restauré(s) (%d octets), %d déjà restauré(s), %d nom(s) refusé(s), %d en échec — %s\n", restored, bytes, skipped, ignored, failed, info.Result)
+	fmt.Fprintf(logw, "Résumé : %d restauré(s) dont %d remplacé(s) (%d octets), %d laissé(s) ou déjà restauré(s), %d nom(s) refusé(s), %d en échec — %s\n",
+		info.Files, replaced, bytes, info.Skipped, ignored, failed, info.Result)
 	if err := state.WriteAtomic(d.statusFile, info); err != nil {
 		fmt.Fprintf(stderr, "État de la restauration non enregistré : %v\n", err)
 	}
@@ -333,7 +420,10 @@ func restoreTo(ctx context.Context, stdout, stderr io.Writer, d restoreDeps, cfg
 		_ = enc.Encode(info)
 		return info.ExitCode
 	}
-	fmt.Fprintf(stdout, "%d fichier(s) restauré(s), %s", restored, humanSize(bytes))
+	fmt.Fprintf(stdout, "%d fichier(s) restauré(s), %s", info.Files, humanSize(bytes))
+	if replaced > 0 {
+		fmt.Fprintf(stdout, " (dont %d remplacé(s), l'actuel gardé à côté en .avant-restauration-%s)", replaced, stamp)
+	}
 	if skipped > 0 {
 		fmt.Fprintf(stdout, ", %d déjà restauré(s)", skipped)
 	}
@@ -343,7 +433,11 @@ func restoreTo(ctx context.Context, stdout, stderr io.Writer, d restoreDeps, cfg
 	if failed > 0 {
 		fmt.Fprintf(stdout, ", %d en échec", failed)
 	}
-	fmt.Fprintf(stdout, " — dans %s\n", disp(dc.dir))
+	if p.mode == "to" {
+		fmt.Fprintf(stdout, " — dans %s\n", p.where)
+	} else {
+		fmt.Fprintln(stdout, " — en place")
+	}
 	for _, f := range failures {
 		fmt.Fprintln(stdout, f)
 	}
