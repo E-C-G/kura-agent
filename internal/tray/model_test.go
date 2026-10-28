@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/E-C-G/kura-agent/internal/selfupdate"
 	"github.com/E-C-G/kura-agent/internal/state"
 	"github.com/E-C-G/kura-agent/pkg/config"
 )
@@ -135,5 +136,64 @@ func TestLateToast(t *testing.T) {
 	}
 	if LateToast(v, now.Add(-time.Hour), now) != nil || LateToast(v, now.Add(-25*time.Hour), now) == nil {
 		t.Fatal("retard : une fois par jour")
+	}
+}
+
+func TestUpdateEntries(t *testing.T) {
+	yesterday := now.Add(-11 * time.Hour)
+	avail := selfupdate.Status{Available: &selfupdate.Available{Version: "0.11.0"}}
+	base := Input{Status: okStatus(yesterday), Config: cfg(), User: "alice", Now: now, Version: "0.10.0"}
+
+	// Compte standard : rien sur la mise à jour, même disponible.
+	in := base
+	in.Update = avail
+	if v := Compute(in); v.UpdateLabel != "" || v.ShowCheckUpdate {
+		t.Fatalf("compte standard : %+v", v)
+	}
+	// Administrateur, version plus récente notée : entrée active.
+	in.Admin = true
+	v := Compute(in)
+	if v.UpdateTo != "0.11.0" || v.UpdateLabel != "Mettre à jour vers 0.11.0…" || !v.UpdateEnabled || v.ShowCheckUpdate {
+		t.Fatalf("disponible : %+v", v)
+	}
+	// Pendant une sauvegarde : grisée.
+	running := okStatus(yesterday)
+	running.State = "running"
+	in.Status = running
+	if v := Compute(in); v.UpdateEnabled || !strings.Contains(v.UpdateLabel, "après la sauvegarde en cours") {
+		t.Fatalf("pendant une sauvegarde : %+v", v)
+	}
+	// Version notée déjà installée (mise à jour faite entre-temps) : recherche proposée.
+	in = base
+	in.Admin, in.Update, in.Version = true, avail, "0.11.0"
+	if v := Compute(in); v.UpdateLabel != "" || !v.ShowCheckUpdate {
+		t.Fatalf("déjà installée : %+v", v)
+	}
+	// Mise à jour en cours : icône animée, infobulle, rien à lancer.
+	in = base
+	in.Admin, in.Update, in.Updating = true, avail, "téléchargement de la version 0.11.0"
+	v = Compute(in)
+	if v.Icon != IconRunning || !strings.Contains(v.Tooltip, "Mise à jour de l'agent : téléchargement") || v.UpdateEnabled || v.ShowCheckUpdate || v.RunNowEnabled {
+		t.Fatalf("en cours : %+v", v)
+	}
+}
+
+func TestUpdatedToast(t *testing.T) {
+	last := &selfupdate.Record{From: "0.10.0", To: "0.11.0", At: now.Add(-time.Minute), Result: "ok"}
+	if tt := UpdatedToast(selfupdate.Status{Last: last}, "0.11.0", now); tt == nil || !strings.Contains(tt.Text, "0.11.0") {
+		t.Fatalf("après mise à jour : %+v", tt)
+	}
+	for name, c := range map[string]struct {
+		rec     selfupdate.Record
+		version string
+	}{
+		"ancienne":       {selfupdate.Record{To: "0.11.0", At: now.Add(-time.Hour), Result: "ok"}, "0.11.0"},
+		"autre version":  {selfupdate.Record{To: "0.11.0", At: now, Result: "ok"}, "0.10.0"},
+		"retour arrière": {selfupdate.Record{To: "0.10.0", At: now, Result: "rollback"}, "0.10.0"},
+	} {
+		r := c.rec
+		if tt := UpdatedToast(selfupdate.Status{Last: &r}, c.version, now); tt != nil {
+			t.Errorf("%s : %+v", name, tt)
+		}
 	}
 }

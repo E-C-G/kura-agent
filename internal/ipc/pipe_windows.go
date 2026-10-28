@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -29,6 +30,8 @@ var (
 	procWaitNamedPipeW              = kernel32.NewProc("WaitNamedPipeW")
 	wtsapi32                        = windows.NewLazySystemDLL("wtsapi32.dll")
 	procWTSQuerySessionInformationW = wtsapi32.NewProc("WTSQuerySessionInformationW")
+	advapi32                        = windows.NewLazySystemDLL("advapi32.dll")
+	procImpersonateNamedPipeClient  = advapi32.NewProc("ImpersonateNamedPipeClient")
 )
 
 const (
@@ -148,6 +151,28 @@ func (c *conn) Close() error {
 	}
 	c.closed = true
 	return c.close(c.h)
+}
+
+// ClientPrivileged (côté icône) : le client du canal est SYSTEM ou un processus élevé
+// (administrateur). Le jeton du client est lu par emprunt d'identité au niveau
+// « identification » (celui que demande Dial) : rien n'est fait en son nom.
+func (c *conn) ClientPrivileged() bool {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	if r, _, _ := procImpersonateNamedPipeClient.Call(uintptr(c.h)); r == 0 {
+		return false
+	}
+	defer windows.RevertToSelf()
+	var tok windows.Token
+	if err := windows.OpenThreadToken(windows.CurrentThread(), windows.TOKEN_QUERY, true, &tok); err != nil {
+		return false
+	}
+	defer tok.Close()
+	if tok.IsElevated() {
+		return true
+	}
+	u, err := tok.GetTokenUser()
+	return err == nil && u.User.Sid.IsWellKnown(windows.WinLocalSystemSid)
 }
 
 // Listener est le canal de l'icône, accessible au seul utilisateur de la session,

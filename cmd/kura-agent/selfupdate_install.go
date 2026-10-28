@@ -14,8 +14,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/E-C-G/kura-agent/internal/ipc"
 	"github.com/E-C-G/kura-agent/internal/lock"
 	"github.com/E-C-G/kura-agent/internal/paths"
+	"github.com/E-C-G/kura-agent/internal/procs"
 	"github.com/E-C-G/kura-agent/internal/selfupdate"
 	"github.com/E-C-G/kura-agent/internal/setup"
 	"github.com/E-C-G/kura-agent/internal/state"
@@ -98,6 +100,24 @@ type updater struct {
 	goos        string
 	goarch      string
 	now         func() time.Time
+
+	// trays reçoit l'avancement et la fin (icônes Windows) ; nil : personne.
+	trays   updateNotifier
+	last    string // dernière ligne affichée, reprise dans la notification de fin
+	changed bool   // exécutables remplacés (mise à jour ou retour arrière réussis)
+}
+
+// updateNotifier : icônes des sessions ouvertes (Windows), prévenues de l'avancement,
+// de la fin et, après une mise à jour réussie, invitées à se relancer.
+type updateNotifier interface {
+	Broadcast(ipc.Msg)
+	Close()
+}
+
+func (u *updater) progress(step string) {
+	if u.trays != nil {
+		u.trays.Broadcast(ipc.Msg{Type: ipc.TypeUpdateProgress, Message: step})
+	}
 }
 
 func realUpdater(client *selfupdate.Client, out io.Writer) *updater {
@@ -130,10 +150,36 @@ func realUpdater(client *selfupdate.Client, out io.Writer) *updater {
 	if client != nil {
 		u.check, u.download = client.Check, client.Download
 	}
+	if runtime.GOOS == "windows" {
+		u.trays = trayHub()
+	}
 	return u
 }
 
-func updateStatusFile() string { return filepath.Join(paths.DataDir(), "update.json") }
+// trayHub joint les icônes des sessions ouvertes, comme run : seules celles lancées
+// depuis le dossier de cet exécutable répondent (celui de l'agent installé).
+func trayHub() *ipc.Hub {
+	_ = procs.EnableDebugPrivilege()
+	h := ipc.NewHub(ipc.Dial, ipc.Msg{Version: version}, nil)
+	h.Discover(ipc.Sessions)
+	return h
+}
+
+// runAndNotify mène la commande puis prévient les icônes : fin (avec la dernière
+// ligne affichée) et, si les exécutables ont changé, relance depuis la nouvelle version.
+func (u *updater) runAndNotify(ctx context.Context, o updateOptions) int {
+	code := u.run(ctx, o)
+	if u.trays != nil {
+		u.trays.Broadcast(ipc.Msg{Type: ipc.TypeUpdateDone, OK: code == exitUpdateOK, ExitCode: code, Message: u.last})
+		if u.changed {
+			u.trays.Broadcast(ipc.Msg{Type: ipc.TypeRestart})
+		}
+		u.trays.Close()
+	}
+	return code
+}
+
+func updateStatusFile() string { return filepath.Join(paths.DataDir(), selfupdate.StatusFileName) }
 
 var versionLine = regexp.MustCompile(`^kura-agent (\S+) `)
 
@@ -203,7 +249,17 @@ func (u *updater) logTo() (io.Writer, func()) {
 	if err != nil {
 		return u.out, func() {}
 	}
-	return io.MultiWriter(u.out, f), func() { f.Close() }
+	// Le journal d'abord : sous kura-agentw.exe (lancé par l'icône), la sortie standard
+	// n'existe pas et ses erreurs ne doivent pas couper l'écriture du journal.
+	return io.MultiWriter(f, lenient{u.out}), func() { f.Close() }
+}
+
+// lenient ignore les erreurs d'écriture (sortie standard absente).
+type lenient struct{ w io.Writer }
+
+func (l lenient) Write(p []byte) (int, error) {
+	_, _ = l.w.Write(p)
+	return len(p), nil
 }
 
 func (u *updater) readStatus() selfupdate.Status {
@@ -224,7 +280,10 @@ func (u *updater) writeStatus(s selfupdate.Status) {
 func (u *updater) run(ctx context.Context, o updateOptions) int {
 	out, closeLog := u.logTo()
 	defer closeLog()
-	say := func(format string, a ...any) { fmt.Fprintf(out, format+"\n", a...) }
+	say := func(format string, a ...any) {
+		u.last = fmt.Sprintf(format, a...)
+		fmt.Fprintln(out, u.last)
+	}
 	refuse := func(format string, a ...any) int { say("Refusé : "+format, a...); return exitUpdateRefused }
 
 	if err := u.checkAdmin(); err != nil {
@@ -255,6 +314,7 @@ func (u *updater) run(ctx context.Context, o updateOptions) int {
 		return u.rollback(ctx, inst, from, out)
 	}
 
+	u.progress("recherche et vérification de la release")
 	res, err := u.check(ctx, selfupdate.Options{Current: from, Tag: o.tag, GOOS: u.goos, GOARCH: u.goarch})
 	if err != nil {
 		say("Échec : %v", err)
@@ -289,6 +349,7 @@ func (u *updater) run(ctx context.Context, o updateOptions) int {
 		}
 	}
 
+	u.progress("téléchargement de la version " + to)
 	staging, err := u.prepareStaging(inst)
 	if err != nil {
 		say("Échec : dossier de travail %s : %v", inst.Staging, err)
@@ -303,6 +364,7 @@ func (u *updater) run(ctx context.Context, o updateOptions) int {
 	say("• archive téléchargée, empreinte conforme à l'attestation ; nouvel exécutable : version %s", to)
 
 	// Remplacement : le journal est écrit avant, pour qu'une coupure soit reprise.
+	u.progress("remplacement des exécutables")
 	st := u.readStatus()
 	st.Journal = &selfupdate.Journal{From: from, To: to, Mode: inst.Mode, Step: "replacing", Started: u.now()}
 	u.writeStatus(st)
@@ -322,6 +384,7 @@ func (u *updater) run(ctx context.Context, o updateOptions) int {
 
 	st.Journal.Step = "finishing"
 	u.writeStatus(st)
+	u.progress("vérification de la version " + to)
 	if err := u.finishAndCheck(inst.Exe, to); err != nil {
 		say("La version %s ne passe pas sa vérification : %v", to, err)
 		say("Retour à la version %s…", from)
@@ -345,10 +408,15 @@ func (u *updater) run(ctx context.Context, o updateOptions) int {
 	if inst.Mode == selfupdate.ModeFiles {
 		selfupdate.CleanBackups(inst.Files)
 	}
-	say("kura-agent mis à jour : %s → %s. Configuration, secrets et planification inchangés.", from, to)
+	u.changed = true
 	if len(inst.Files) > 1 {
-		say("L'icône passera à la nouvelle version à la prochaine ouverture de session.")
+		if u.trays != nil {
+			say("Les icônes ouvertes redémarrent avec la nouvelle version ; les autres la prendront à la prochaine ouverture de session.")
+		} else {
+			say("L'icône passera à la nouvelle version à la prochaine ouverture de session.")
+		}
 	}
+	say("kura-agent mis à jour : %s → %s. Configuration, secrets et planification inchangés.", from, to)
 	return exitUpdateOK
 }
 
@@ -480,6 +548,7 @@ func (u *updater) rollback(ctx context.Context, inst installation, current strin
 	}
 	st.Last = &selfupdate.Record{From: current, To: last.From, At: u.now(), Mode: inst.Mode, Result: "rollback"}
 	u.writeStatus(st)
+	u.changed = true
 	fmt.Fprintf(out, "kura-agent %s remis. Configuration, secrets et planification inchangés.\n", last.From)
 	return exitUpdateOK
 }

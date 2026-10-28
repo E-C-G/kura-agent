@@ -20,7 +20,7 @@ Console d'administration associée : [E-C-G/kura-ctl](https://github.com/E-C-G/k
 | 5 bis | `import` : clé d'un paquet `.kura` préparé par la console kura-ctl | **fait** |
 | 5 ter | `install --package` : poste installé en une fois depuis un paquet de la console, CLI AWS comprise | **fait** |
 | 6 | Restauration (V2) | à faire |
-| 7 | `self-update` : recherche et vérification de l'attestation GitHub, installation, retour arrière | **fait** |
+| 7 | `self-update` : recherche et vérification de l'attestation GitHub, installation, retour arrière, icône | **fait** |
 
 Commandes disponibles : `run`, `validate`, `status`, `credentials`, `import`, `install`, `uninstall`,
 `suspend`, `tray`, `self-update`, `version`.
@@ -348,6 +348,16 @@ sauvegarde** pendant une exécution (mêmes comptes) ; **Suspendre** 1 h ou jusq
 Reprendre (invite UAC : la suspension s'écrit dans `C:\ProgramData\Kura`) ; ouvrir les journaux ou la
 configuration ; vérifier la configuration ; à propos ; quitter.
 
+Mise à jour, pour les seuls membres du groupe Administrateurs du poste (groupes imbriqués
+compris ; sous UAC, le compte compte même si ses droits ne sont pas encore élevés) : **Mettre à
+jour vers X…** quand la recherche planifiée a noté une version plus récente (grisé pendant une
+sauvegarde), sinon **Rechercher une mise à jour** (`self-update --check`, sans élévation). Après
+confirmation, l'icône lance `kura-agentw.exe self-update --yes --from-tray` avec élévation
+(invite UAC) ; ce processus annonce l'avancement à toutes les icônes ouvertes (infobulle), la fin
+(notification en cas d'échec) et, après une mise à jour réussie, leur demande de se relancer
+depuis la nouvelle version, qui le notifie. Une icône n'accepte cette relance que d'un processus
+élevé ou de SYSTEM. Un compte standard ne voit rien de la mise à jour.
+
 Notifications : fin en erreur, garde-fou ou avertissement selon `notify.toast_on` (un clic ouvre le
 journal de l'exécution), retard au démarrage puis une fois par jour.
 
@@ -590,7 +600,8 @@ deb, sinon `/usr/local/bin`), pas forcément l'exécutable lancé : un agent plu
    extraction des seuls exécutables, version annoncée par le nouvel exécutable contrôlée ;
 6. remplacement : chaque exécutable renommé en `.old` (gardé pour `--rollback`), le nouveau mis à
    sa place ; Windows remplace ainsi `kura-agent.exe` et `kura-agentw.exe` même en cours
-   d'exécution (l'icône passe à la nouvelle version à la prochaine ouverture de session). Paquet
+   d'exécution, puis relance les icônes ouvertes (lancé depuis `C:\Program Files\Kura` ;
+   sinon, elles passent à la nouvelle version à la prochaine ouverture de session). Paquet
    deb : `dpkg -i` ;
 7. finalisation par la nouvelle version (`self-update --finish`) : elle relit la configuration
    installée. Refus : retour automatique à l'ancienne version (code 6).

@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/E-C-G/kura-agent/internal/ipc"
 	"github.com/E-C-G/kura-agent/internal/lock"
 	"github.com/E-C-G/kura-agent/internal/selfupdate"
 )
@@ -266,5 +267,57 @@ func TestFinishUpdate(t *testing.T) {
 	writeText(t, bad, "version: 1\noption_inconnue: oui\n")
 	if code := finishUpdate(&out, &errb, bad); code != 1 || !strings.Contains(errb.String(), "refusée") {
 		t.Fatalf("configuration refusée : %d %s", code, errb.String())
+	}
+}
+
+// fakeTrays enregistre ce que self-update annonce aux icônes.
+type fakeTrays struct {
+	msgs   []ipc.Msg
+	closed bool
+}
+
+func (f *fakeTrays) Broadcast(m ipc.Msg) { f.msgs = append(f.msgs, m) }
+func (f *fakeTrays) Close()              { f.closed = true }
+
+func (f *fakeTrays) types() string {
+	var t []string
+	for _, m := range f.msgs {
+		t = append(t, m.Type)
+	}
+	return strings.Join(t, ",")
+}
+
+func TestSelfUpdateNotifiesTrays(t *testing.T) {
+	b := newUpdateBench(t, "0.9.0")
+	tr := &fakeTrays{}
+	b.u.trays = tr
+	if code := b.u.runAndNotify(context.Background(), updateOptions{yes: true}); code != exitUpdateOK {
+		t.Fatalf("code %d\n%s", code, b.out.String())
+	}
+	want := "update_progress,update_progress,update_progress,update_progress,update_done,restart"
+	if tr.types() != want || !tr.closed {
+		t.Fatalf("messages : %s", tr.types())
+	}
+	done := tr.msgs[len(tr.msgs)-2]
+	if !done.OK || !strings.Contains(done.Message, "0.9.0 → 0.10.0") {
+		t.Fatalf("fin : %+v", done)
+	}
+
+	// Déjà à jour : fin annoncée, pas de relance.
+	b.u.changed = false
+	tr2 := &fakeTrays{}
+	b.u.trays = tr2
+	if code := b.u.runAndNotify(context.Background(), updateOptions{yes: true}); code != exitUpdateOK || strings.Contains(tr2.types(), "restart") {
+		t.Fatalf("déjà à jour : %d %s", code, tr2.types())
+	}
+
+	// Refus (sauvegarde en cours) : fin en échec, avec la raison, pas de relance.
+	b2 := newUpdateBench(t, "0.9.0")
+	b2.u.acquireLock = func() (lock.Release, error) { return nil, lock.ErrBusy }
+	tr3 := &fakeTrays{}
+	b2.u.trays = tr3
+	b2.u.runAndNotify(context.Background(), updateOptions{yes: true})
+	if tr3.types() != "update_done" || tr3.msgs[0].OK || !strings.Contains(tr3.msgs[0].Message, "sauvegarde est en cours") {
+		t.Fatalf("refus : %+v", tr3.msgs)
 	}
 }

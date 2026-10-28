@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/E-C-G/kura-agent/internal/schedtask"
+	"github.com/E-C-G/kura-agent/internal/selfupdate"
 	"github.com/E-C-G/kura-agent/internal/state"
 	"github.com/E-C-G/kura-agent/pkg/config"
 )
@@ -39,6 +40,12 @@ type Input struct {
 	User       string // DOMAINE\nom de la session
 	Connected  bool   // run est connecté à cette icône (annulation possible)
 	Now        time.Time
+
+	// Mise à jour de l'agent (kura-agent self-update).
+	Version  string            // version de l'icône (celle de l'agent installé)
+	Admin    bool              // compte membre du groupe Administrateurs du poste
+	Update   selfupdate.Status // update.json
+	Updating string            // étape d'une mise à jour en cours, signalée par self-update
 }
 
 // View est ce que l'icône affiche.
@@ -53,6 +60,12 @@ type View struct {
 	ShowRunNow    bool // compte de tray.allow_run_now
 	RunNowEnabled bool
 	ShowCancel    bool
+
+	// Mise à jour : réservée aux administrateurs du poste.
+	UpdateTo        string // version plus récente disponible, attestée
+	UpdateLabel     string // « Mettre à jour vers 0.11.0… »
+	UpdateEnabled   bool
+	ShowCheckUpdate bool // « Rechercher une mise à jour »
 }
 
 const dateFmt = "02/01 15:04"
@@ -80,6 +93,9 @@ func Compute(in Input) View {
 	}
 
 	switch {
+	case in.Updating != "":
+		v.Icon = IconRunning
+		v.Tooltip = "Mise à jour de l'agent : " + in.Updating
 	case v.Running:
 		v.Icon = IconRunning
 		v.Tooltip = "Sauvegarde en cours"
@@ -117,9 +133,43 @@ func Compute(in Input) View {
 	v.Tooltip = truncate("Kura – "+v.Tooltip, 127)
 
 	v.ShowRunNow = allowed
-	v.RunNowEnabled = allowed && !v.Running && !v.Suspended
+	v.RunNowEnabled = allowed && !v.Running && !v.Suspended && in.Updating == ""
 	v.ShowCancel = allowed && v.Running && in.Connected
+	if in.Admin {
+		if to := newerAvailable(in); to != "" {
+			v.UpdateTo = to
+			v.UpdateLabel = "Mettre à jour vers " + to + "…"
+			v.UpdateEnabled = !v.Running && in.Updating == ""
+			if v.Running {
+				v.UpdateLabel += " (après la sauvegarde en cours)"
+			}
+		} else {
+			v.ShowCheckUpdate = in.Updating == ""
+		}
+	}
 	return v
+}
+
+// newerAvailable : version notée par la recherche planifiée, plus récente que celle
+// de l'icône (une mise à jour faite entre-temps la rend caduque).
+func newerAvailable(in Input) string {
+	a := in.Update.Available
+	if a == nil {
+		return ""
+	}
+	if cmp, err := selfupdate.Compare(a.Version, in.Version); err != nil || cmp <= 0 {
+		return ""
+	}
+	return a.Version
+}
+
+// UpdatedToast : notification de l'icône relancée juste après une mise à jour réussie.
+func UpdatedToast(u selfupdate.Status, version string, now time.Time) *Toast {
+	l := u.Last
+	if l == nil || l.Result != "ok" || l.To != version || now.Sub(l.At) > 5*time.Minute || now.Before(l.At) {
+		return nil
+	}
+	return &Toast{Title: "Kura mis à jour", Text: fmt.Sprintf("Version %s installée (précédente : %s).", l.To, l.From), Level: LevelInfo}
 }
 
 func lateAfter(in Input) time.Duration {

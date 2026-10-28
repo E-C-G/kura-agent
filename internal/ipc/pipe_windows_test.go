@@ -122,3 +122,50 @@ func TestCloseWhileAccepting(t *testing.T) {
 		}
 	}
 }
+
+// L'icône reconnaît un client élevé (self-update lancé par l'invite UAC) ou SYSTEM :
+// sur le runner de CI, le processus de test est élevé ; ailleurs, le résultat suit
+// l'élévation du processus.
+func TestClientPrivileged(t *testing.T) {
+	var session uint32
+	if err := windows.ProcessIdToSessionId(windows.GetCurrentProcessId(), &session); err != nil {
+		t.Fatal(err)
+	}
+	self, _ := os.Executable()
+	saved := serverPrefix
+	serverPrefix = append(serverPrefix, strings.ToLower(filepath.Base(self)))
+	defer func() { serverPrefix = saved }()
+	l, err := Listen()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	got := make(chan bool, 1)
+	go func() {
+		conn, err := l.Accept()
+		if err != nil {
+			got <- false
+			return
+		}
+		var p *Peer
+		p = NewPeer(conn, func(m Msg) {
+			if m.Type == TypeRestart {
+				got <- conn.(interface{ ClientPrivileged() bool }).ClientPrivileged()
+				p.Close()
+			}
+		})
+	}()
+	hub := NewHub(func(s int) (io.ReadWriteCloser, error) { return dialPipe(l.Name, s) }, Msg{}, nil)
+	defer hub.Close()
+	hub.Connect([]int{int(session)})
+	hub.Broadcast(Msg{Type: TypeRestart})
+	want := windows.GetCurrentProcessToken().IsElevated()
+	select {
+	case v := <-got:
+		if v != want {
+			t.Fatalf("client privilégié : %v, attendu %v (processus élevé : %v)", v, want, want)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("message non reçu")
+	}
+}
