@@ -27,23 +27,26 @@ import (
 // system regroupe les opérations système d'install et d'uninstall, remplaçables
 // dans les tests.
 type system struct {
-	checkAdmin       func() error
-	secureDataDir    func(dir string) error
-	installBinary    func(dir string) (exe, gui string, err error)
-	setAutostart     func(gui string) error
-	removeAutostart  func() error
-	stopTrays        func() int
-	programDir       func() string
-	legacyAccount    func(name string) bool // compte svc-kura d'une version précédente
-	removeAccount    func(name string) error
-	accountSID       func(name string) (string, error)
-	validate         func(configFile string) int
-	registerTask     func(xml string) error
-	deleteTask       func() error
-	removeProgramDir func(dir string) (pendingReboot bool, err error)
-	acquireLock      func() (lock.Release, error)
-	askSecret        func(prompt string) (string, error)
-	askAWSKeys       func(name string) (string, error)
+	checkAdmin      func() error
+	secureDataDir   func(dir string) error
+	installBinary   func(dir string) (exe, gui string, err error)
+	setAutostart    func(gui string) error
+	removeAutostart func() error
+	stopTrays       func() int
+	programDir      func() string
+	legacyAccount   func(name string) bool // compte svc-kura d'une version précédente
+	removeAccount   func(name string) error
+	accountSID      func(name string) (string, error)
+	validate        func(configFile string) int
+	registerTask    func(xml string) error
+	deleteTask      func() error
+	// Windows : tâche \Kura\Restore (restauration depuis l'icône).
+	registerRestoreTask func(xml string) error
+	deleteRestoreTask   func() error
+	removeProgramDir    func(dir string) (pendingReboot bool, err error)
+	acquireLock         func() (lock.Release, error)
+	askSecret           func(prompt string) (string, error)
+	askAWSKeys          func(name string) (string, error)
 	// ensureAWS installe la CLI AWS si elle manque (MSI fourni, sinon téléchargé) ;
 	// tempDir : dossier de travail réservé aux administrateurs.
 	ensureAWS func(tempDir, want string, candidates []string) (awsinstall.Result, error)
@@ -74,23 +77,27 @@ type system struct {
 
 func realSystem() system {
 	sys := system{
-		checkAdmin:       setup.CheckAdmin,
-		secureDataDir:    setup.SecureDataDir,
-		installBinary:    setup.InstallBinary,
-		setAutostart:     setup.SetTrayAutostart,
-		removeAutostart:  setup.RemoveTrayAutostart,
-		stopTrays:        setup.StopTrays,
-		programDir:       setup.ProgramDir,
-		legacyAccount:    func(n string) bool { _, err := setup.LocalAccountSID(n); return err == nil },
-		removeAccount:    setup.RemoveAccount,
-		accountSID:       setup.AccountSID,
-		validate:         func(f string) int { return cmdValidate([]string{"--config", f}) },
-		registerTask:     schedtask.Register,
-		deleteTask:       schedtask.Delete,
-		removeProgramDir: setup.RemoveProgramDir,
-		acquireLock:      lock.Acquire,
-		askSecret:        askSecret,
-		askAWSKeys:       askAWSKeys,
+		checkAdmin:      setup.CheckAdmin,
+		secureDataDir:   setup.SecureDataDir,
+		installBinary:   setup.InstallBinary,
+		setAutostart:    setup.SetTrayAutostart,
+		removeAutostart: setup.RemoveTrayAutostart,
+		stopTrays:       setup.StopTrays,
+		programDir:      setup.ProgramDir,
+		legacyAccount:   func(n string) bool { _, err := setup.LocalAccountSID(n); return err == nil },
+		removeAccount:   setup.RemoveAccount,
+		accountSID:      setup.AccountSID,
+		validate:        func(f string) int { return cmdValidate([]string{"--config", f}) },
+		registerTask:    schedtask.Register,
+		deleteTask:      schedtask.Delete,
+		registerRestoreTask: func(def string) error {
+			return schedtask.RegisterNamed(schedtask.RestoreName, def)
+		},
+		deleteRestoreTask: func() error { return schedtask.DeleteNamed(schedtask.RestoreName) },
+		removeProgramDir:  setup.RemoveProgramDir,
+		acquireLock:       lock.Acquire,
+		askSecret:         askSecret,
+		askAWSKeys:        askAWSKeys,
 		ensureAWS: func(dir, want string, c []string) (awsinstall.Result, error) {
 			return awsinstall.System(os.Stdout, dir).Ensure(want, c)
 		},
@@ -532,6 +539,34 @@ func installWindowsTask(sys system, cfg *config.Config, exe string, step func(st
 	}
 	step("tâche %s enregistrée : %s, compte SYSTEM, autorisations maximales", schedtask.Name, describeSchedule(cfg.Schedule))
 
+	// Restauration depuis l'icône : tâche lançable par les comptes de tray.users.
+	if len(cfg.Tray.Users) == 0 {
+		if err := sys.deleteRestoreTask(); err != nil {
+			fmt.Fprintf(out, "Attention : tâche %s non supprimée (%v)\n", schedtask.RestoreName, err)
+		}
+	} else {
+		var users []string
+		for _, u := range cfg.Tray.Users {
+			s, err := sys.accountSID(u)
+			if err != nil {
+				return fail(exitInstallConfig, "tray.users : compte %q introuvable (%v)", u, err)
+			}
+			users = append(users, s)
+		}
+		def, err := schedtask.RestoreXML(schedtask.Params{Command: exe, Arguments: "restore --serve", WorkingDir: sys.dataDir, RunNowSIDs: users})
+		if err != nil {
+			return fail(exitInstallConfig, "tâche %s : %v", schedtask.RestoreName, err)
+		}
+		switch err := sys.registerRestoreTask(def); {
+		case errors.As(err, &partial):
+			fmt.Fprintf(out, "Attention : %v.\nRestaurer mes fichiers (icône) ne fonctionnera que pour les administrateurs.\n", err)
+		case err != nil:
+			return fail(exitInstallFailed, "tâche %s : %v", schedtask.RestoreName, err)
+		default:
+			step("tâche %s enregistrée : restauration depuis l'icône pour %s", schedtask.RestoreName, strings.Join(cfg.Tray.Users, ", "))
+		}
+	}
+
 	// Compte de service des versions 0.3 à 0.4.1 : la tâche ne l'utilise plus.
 	if sys.legacyAccount(setup.LegacyAccount) {
 		if err := sys.removeAccount(setup.LegacyAccount); err != nil {
@@ -706,6 +741,11 @@ func uninstall(sys system, purge bool) int {
 		step("démons %s et %s retirés", launchd.Label, launchd.CatchUpLabel)
 	} else {
 		step("tâche %s supprimée", schedtask.Name)
+		if err := sys.deleteRestoreTask(); err != nil {
+			errs = append(errs, err)
+		} else {
+			step("tâche %s supprimée", schedtask.RestoreName)
+		}
 	}
 	if sys.legacyAccount(setup.LegacyAccount) {
 		if err := sys.removeAccount(setup.LegacyAccount); err != nil {

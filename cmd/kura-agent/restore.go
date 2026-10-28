@@ -118,6 +118,19 @@ func realRestoreDeps() restoreDeps {
 }
 
 func cmdRestore(args []string) int {
+	if len(args) > 0 && args[0] == "--serve" {
+		// Tâche \Kura\Restore : sert les fenêtres de restauration de l'icône.
+		fs := flag.NewFlagSet("restore --serve", flag.ContinueOnError)
+		cfgPath := fs.String("config", paths.ConfigFile(), "fichier de configuration installé")
+		if err := fs.Parse(args[1:]); err != nil {
+			return 2
+		}
+		sd, closeLog := realServeDeps()
+		defer closeLog()
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+		defer stop()
+		return serveRestore(ctx, sd, *cfgPath)
+	}
 	return runRestore(args, os.Stdout, os.Stderr, realRestoreDeps())
 }
 

@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"os"
 	"path"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -84,9 +85,26 @@ type Outcome struct {
 // fichier, depuis un seul goroutine à la fois. Les fichiers déjà présents avec la bonne
 // taille et notés au journal de reprise sont sautés.
 func Restore(ctx context.Context, g Getter, d *Dest, items []Item, workers int, resumed map[string]string, done func(Outcome)) {
+	RestoreWith(ctx, g, d, items, Options{Workers: workers, Resumed: resumed}, done)
+}
+
+// Options règle RestoreWith.
+type Options struct {
+	Workers int
+	Resumed map[string]string // reprise : chemin → version déjà restaurée
+	// WorkerInit, s'il est donné, est appelé par chaque lecteur sur son propre thread
+	// système (verrouillé) avant tout fichier ; il rend de quoi défaire ce qu'il a fait.
+	// Sert à écrire au nom d'un compte (emprunt d'identité, propre à chaque thread).
+	WorkerInit func() (func(), error)
+}
+
+// RestoreWith est Restore avec ses options.
+func RestoreWith(ctx context.Context, g Getter, d *Dest, items []Item, opt Options, done func(Outcome)) {
+	workers := opt.Workers
 	if workers < 1 {
 		workers = 1
 	}
+	resumed := opt.Resumed
 	jobs := make(chan Item)
 	var mu sync.Mutex
 	var wg sync.WaitGroup
@@ -94,10 +112,22 @@ func Restore(ctx context.Context, g Getter, d *Dest, items []Item, workers int, 
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			var initErr error
+			if opt.WorkerInit != nil {
+				runtime.LockOSThread()
+				// Thread jamais déverrouillé : il disparaît avec la goroutine, sans
+				// risque qu'une autre reprenne une identité empruntée.
+				var undo func()
+				if undo, initErr = opt.WorkerInit(); initErr == nil && undo != nil {
+					defer undo()
+				}
+			}
 			for it := range jobs {
 				var o Outcome
 				o.Item = it
-				if v, listed := resumed[it.Out]; resumed != nil && (!listed || v == it.Version.VersionID) && d.Done(it.Out, it.Version.Size) {
+				if initErr != nil {
+					o.Err = initErr
+				} else if v, listed := resumed[it.Out]; resumed != nil && (!listed || v == it.Version.VersionID) && d.Done(it.Out, it.Version.Size) {
 					// noté au journal de reprise, ou renommé juste avant l'interruption
 					o.Skipped = true
 				} else if err := ctx.Err(); err != nil {

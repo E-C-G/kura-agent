@@ -47,6 +47,7 @@ const (
 	cmdAbout
 	cmdUpdate
 	cmdCheckUpdate
+	cmdRestore
 	cmdQuit
 )
 
@@ -142,6 +143,12 @@ func Main(opt Options) int {
 		r, _, _ := procGetMessageW.Call(uintptr(unsafe.Pointer(&m2)), 0, 0, 0)
 		if int32(r) <= 0 {
 			break
+		}
+		// Fenêtre de restauration : tabulation et touches de dialogue entre ses contrôles.
+		if h := restoreDialogHwnd(); h != 0 {
+			if r, _, _ := procIsDialogMessageW.Call(h, uintptr(unsafe.Pointer(&m2))); r != 0 {
+				continue
+			}
 		}
 		procTranslateMessage.Call(uintptr(unsafe.Pointer(&m2)))
 		procDispatchMessageW.Call(uintptr(unsafe.Pointer(&m2)))
@@ -445,6 +452,9 @@ func (a *app) showMenu() {
 		}
 		procAppendMenuW.Call(menu, mfPopup, sub, uintptr(unsafe.Pointer(utf16("Suspendre"))))
 	}
+	if v.ShowRestore {
+		add(menu, mfString, cmdRestore, "Restaurer mes fichiers…")
+	}
 	if v.UpdateLabel != "" {
 		flags := uintptr(mfString)
 		if !v.UpdateEnabled {
@@ -532,6 +542,8 @@ func (a *app) command(cmd int) {
 		a.confirmUpdate(a.view.UpdateTo, notes)
 	case cmdCheckUpdate:
 		go a.checkUpdate()
+	case cmdRestore:
+		a.openRestore()
 	case cmdQuit:
 		a.removeIcon()
 		procDestroyWindow.Call(a.hwnd)
