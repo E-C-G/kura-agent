@@ -13,6 +13,10 @@ var ErrUnsupported = platform.ErrNotImplemented
 // sous Windows, la tâche tourne sous SYSTEM).
 const ServiceAccount = "kura-agent"
 
+// BinDir : emplacement de l'exécutable copié par install sous Linux (hors paquet) et
+// macOS.
+const BinDir = "/usr/local/bin"
+
 func notImplemented() error { return platform.NotImplemented(platform.Install) }
 
 // LegacyAccount est le compte de service des versions 0.3.0 à 0.4.1. La tâche tourne

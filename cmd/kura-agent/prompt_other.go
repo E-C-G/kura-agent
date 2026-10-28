@@ -4,3 +4,6 @@ package main
 
 // hideInput : autres systèmes (développement), la saisie reste visible.
 func hideInput() func() { return nil }
+
+// stdinIsTerminal : autres systèmes (développement).
+func stdinIsTerminal() bool { return false }

@@ -20,7 +20,7 @@ Console d'administration associée : [E-C-G/kura-ctl](https://github.com/E-C-G/k
 | 5 bis | `import` : clé d'un paquet `.kura` préparé par la console kura-ctl | **fait** |
 | 5 ter | `install --package` : poste installé en une fois depuis un paquet de la console, CLI AWS comprise | **fait** |
 | 6 | Restauration (V2) | à faire |
-| 7 | `self-update` : lot 1, `--check` (recherche et vérification de l'attestation GitHub) | **fait** |
+| 7 | `self-update` : recherche et vérification de l'attestation GitHub, installation, retour arrière | **fait** |
 
 Commandes disponibles : `run`, `validate`, `status`, `credentials`, `import`, `install`, `uninstall`,
 `suspend`, `tray`, `self-update`, `version`.
@@ -570,13 +570,38 @@ tentatives à 5 min d'intervalle, voir plus haut).
 ## Nouvelles versions : `kura-agent self-update`
 
 ```text
-kura-agent self-update --check [--version vX.Y.Z] [--json] [--config FICHIER]
+kura-agent self-update [--version vX.Y.Z] [--yes] [--config FICHIER]   installe (administrateur)
+kura-agent self-update --rollback                                      remet la version précédente
+kura-agent self-update --check [--version vX.Y.Z] [--json]             recherche seule, sans droits
 ```
 
-`--check` cherche la dernière release de `E-C-G/kura-agent` (ou celle de `--version`) et vérifie
-l'archive de ce système (Windows : `.zip`, Ubuntu : `.deb`, macOS : `.tar.gz`), sans rien
-télécharger d'autre ni rien modifier ; pas besoin de droits d'administrateur. L'installation par
-`self-update` arrive avec la 0.10.0.
+`self-update` met à jour l'agent **installé** (`C:\Program Files\Kura`, `/usr/bin` pour le paquet
+deb, sinon `/usr/local/bin`), pas forcément l'exécutable lancé : un agent plus récent téléchargé
+à côté peut donc mettre à jour une installation ancienne. Déroulé :
+
+1. droits d'administrateur (invite « Exécuter en tant qu'administrateur », `sudo`) ;
+2. verrou `run.lock` : refus pendant une sauvegarde ; une sauvegarde planifiée qui tombe pendant
+   la mise à jour attend sa fin (10 min au plus) au lieu d'être perdue ;
+3. recherche et vérification de la release (ci-dessous), version visée 0.10.0 au moins et plus
+   récente que la version installée ; espace libre d'au moins trois fois l'archive ;
+4. confirmation (`--yes` hors d'un terminal) ;
+5. téléchargement dans un dossier réservé aux administrateurs (`C:\Program Files\Kura\.update`,
+   `/var/cache/kura-update`, `…/Kura/update` sous macOS), empreinte comparée à l'attestation,
+   extraction des seuls exécutables, version annoncée par le nouvel exécutable contrôlée ;
+6. remplacement : chaque exécutable renommé en `.old` (gardé pour `--rollback`), le nouveau mis à
+   sa place ; Windows remplace ainsi `kura-agent.exe` et `kura-agentw.exe` même en cours
+   d'exécution (l'icône passe à la nouvelle version à la prochaine ouverture de session). Paquet
+   deb : `dpkg -i` ;
+7. finalisation par la nouvelle version (`self-update --finish`) : elle relit la configuration
+   installée. Refus : retour automatique à l'ancienne version (code 6).
+
+Configuration, secrets et planification ne sont pas touchés. L'état est dans `update.json` du
+dossier de données (`kura-agent status` l'affiche) et le déroulé dans `update-<date>.log` du
+dossier des journaux. Une coupure pendant le remplacement est reprise par la commande suivante
+(`self-update`, ou `run` sous Windows et macOS), qui remet la version précédente.
+
+Après chaque sauvegarde réelle, au plus une fois par 24 h, `run` cherche une version plus récente
+(sans rien télécharger) et la note dans `update.json` ; `kura-agent status` l'annonce.
 
 Une release n'est acceptée que si elle est publiée, ni brouillon ni préversion, **immuable**
 (réglage « releases immuables » du dépôt), et si son **attestation de release** couvre
@@ -592,8 +617,10 @@ GitHub ajoute une autorité à sa racine environ tous les six mois. Le workflow
 sans mise à jour au-delà d'un changement d'autorité refuse les releases suivantes et se met à
 jour une fois à la main.
 
-Codes de sortie : 0 à jour (ou version de développement) · 3 version plus récente disponible ·
-4 refusé · 5 recherche ou vérification en échec (rien n'est modifié).
+Codes de sortie : 0 mis à jour, à jour (ou version de développement) · 3 version plus récente
+disponible (`--check`) · 4 refusé (droits, sauvegarde en cours, version, confirmation, espace) ·
+5 recherche, téléchargement ou vérification en échec (rien n'est modifié) · 6 nouvelle version en
+échec, ancienne remise · 7 retour arrière impossible : réinstaller la version indiquée à la main.
 
 Proxy : la tâche planifiée tourne sous le compte système, sans le proxy de l'utilisateur.
 `update.proxy` dans la configuration (`http://proxy.example.com:3128`, sans identifiants) ;

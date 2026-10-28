@@ -57,7 +57,8 @@ Usage :
   kura-agent uninstall [--purge]
   kura-agent suspend  DURÉE | tomorrow | off
   kura-agent tray     [--config FICHIER]
-  kura-agent self-update --check [--version vX.Y.Z] [--json] [--config FICHIER]
+  kura-agent self-update [--check] [--version vX.Y.Z] [--yes] [--json] [--config FICHIER]
+  kura-agent self-update --rollback
   kura-agent version
 
 Commandes :
@@ -74,8 +75,9 @@ Commandes :
   uninstall    retire la tâche, le compte et l'exécutable ; --purge efface aussi les données
   suspend      suspend la planification (ex. 1h, tomorrow = demain 08:00) ; off pour reprendre
   tray         icône de la barre de notification (kura-agentw.exe, lancée à l'ouverture de session)
-  self-update  --check : cherche une version plus récente sur GitHub et vérifie son
-               attestation de release, sans rien modifier (code 3 : mise à jour disponible)
+  self-update  installe la dernière version publiée sur GitHub, attestation de release
+               vérifiée, en gardant la précédente (--rollback la remet) ; console
+               d'administration. --check : recherche seule, sans droits (code 3 : disponible)
   version      affiche la version
 
 Codes de sortie de run : 0 OK · 1 avertissement · 2 erreur · 3 configuration invalide
@@ -175,6 +177,15 @@ func cmdRun(args []string) int {
 
 	// Verrou d'abord : une erreur de config ne doit pas écraser l'état d'une exécution en cours.
 	release, err := lock.Acquire()
+	if errors.Is(err, lock.ErrBusy) && updateInProgress() {
+		// Une mise à jour de l'agent tient le verrou : la sauvegarde attend sa fin au
+		// lieu d'être perdue.
+		fmt.Fprintln(os.Stderr, "mise à jour de l'agent en cours : attente de sa fin (10 min au plus)")
+		for deadline := time.Now().Add(10 * time.Minute); errors.Is(err, lock.ErrBusy) && time.Now().Before(deadline); {
+			time.Sleep(5 * time.Second)
+			release, err = lock.Acquire()
+		}
+	}
 	if errors.Is(err, lock.ErrBusy) {
 		fmt.Fprintln(os.Stderr, "une exécution est déjà en cours : abandon")
 		return runner.ExitBusy
@@ -184,6 +195,7 @@ func cmdRun(args []string) int {
 		return runner.ExitError
 	}
 	defer release()
+	recoverInterruptedUpdate()
 
 	cfg, err := config.Load(*cfgPath, config.LoadOptions{})
 	if err == nil {
@@ -269,6 +281,9 @@ func cmdRun(args []string) int {
 		return runner.ExitConfig
 	}
 	printSummary(os.Stdout, &st)
+	if !*dryRun {
+		scheduledUpdateCheck(cfg)
+	}
 	return st.ExitCode
 }
 
@@ -494,6 +509,9 @@ func cmdStatus(args []string) int {
 	}
 	if st == nil {
 		fmt.Println("aucune exécution enregistrée")
+		if !*asJSON {
+			printUpdateStatus(os.Stdout)
+		}
 		return 0
 	}
 	if *asJSON {
@@ -503,6 +521,7 @@ func cmdStatus(args []string) int {
 		return 0
 	}
 	printSummary(os.Stdout, st)
+	printUpdateStatus(os.Stdout)
 	return 0
 }
 

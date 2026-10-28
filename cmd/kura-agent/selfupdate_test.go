@@ -69,12 +69,6 @@ func TestSelfUpdateCheck(t *testing.T) {
 	if code := runSelfUpdate([]string{"--check"}, &out, &errb, c); code != exitUpdateOK || !strings.Contains(out.String(), "développement") {
 		t.Fatalf("dev : code %d\n%s", code, out.String())
 	}
-
-	// Sans --check : l'installation arrive au lot suivant.
-	errb.Reset()
-	if code := runSelfUpdate(nil, &out, &errb, c); code != exitUpdateRefused || !strings.Contains(errb.String(), "--check") {
-		t.Fatalf("sans --check : code %d %s", code, errb.String())
-	}
 }
 
 func TestSelfUpdateCheckFailure(t *testing.T) {
