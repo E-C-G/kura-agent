@@ -29,22 +29,33 @@ type webhook struct {
 
 // Payload est le bilan envoyé au webhook (format documenté dans le README).
 type Payload struct {
-	Event        string     `json:"event"` // run_finished
-	Host         string     `json:"host"`
-	Profile      string     `json:"profile"`
-	Bucket       string     `json:"bucket"`
-	RunID        string     `json:"run_id"`
-	Result       string     `json:"result"` // ok | warning | error | guard | cancelled
-	Success      bool       `json:"success"`
-	ExitCode     int        `json:"exit_code"`
-	Partial      bool       `json:"partial"` // lancée avec --job : tous les jobs n'ont pas tourné
-	Message      string     `json:"message,omitempty"`
-	StartedAt    time.Time  `json:"started_at"`
-	EndedAt      *time.Time `json:"ended_at,omitempty"`
-	LastSuccess  *time.Time `json:"last_success,omitempty"`
-	AgentVersion string     `json:"agent_version"`
-	SentAt       time.Time  `json:"sent_at"`
-	Jobs         []JobPart  `json:"jobs"`
+	Event        string        `json:"event"` // run_finished
+	Host         string        `json:"host"`
+	Profile      string        `json:"profile"`
+	Bucket       string        `json:"bucket"`
+	RunID        string        `json:"run_id"`
+	Result       string        `json:"result"` // ok | warning | error | guard | cancelled
+	Success      bool          `json:"success"`
+	ExitCode     int           `json:"exit_code"`
+	Partial      bool          `json:"partial"` // lancée avec --job : tous les jobs n'ont pas tourné
+	Message      string        `json:"message,omitempty"`
+	StartedAt    time.Time     `json:"started_at"`
+	EndedAt      *time.Time    `json:"ended_at,omitempty"`
+	LastSuccess  *time.Time    `json:"last_success,omitempty"`
+	AgentVersion string        `json:"agent_version"`
+	SentAt       time.Time     `json:"sent_at"`
+	Prepares     []PreparePart `json:"prepares,omitempty"`
+	Jobs         []JobPart     `json:"jobs"`
+}
+
+// PreparePart résume une préparation (archive…) dans le bilan.
+type PreparePart struct {
+	ID      string `json:"id"`
+	Type    string `json:"type"`
+	Result  string `json:"result"`
+	Files   int    `json:"files,omitempty"`
+	Size    int64  `json:"size,omitempty"`
+	Message string `json:"message,omitempty"`
 }
 
 // JobPart résume un job dans le bilan.
@@ -68,6 +79,10 @@ func (w *webhook) Finish(ctx context.Context, st state.Status, full bool) error 
 		RunID: st.RunID, Result: st.Result, Success: full && Succeeded(st), ExitCode: st.ExitCode,
 		Partial: !full, Message: st.Message, StartedAt: st.StartedAt, EndedAt: st.EndedAt,
 		LastSuccess: st.LastSuccess, AgentVersion: w.opt.Version, Jobs: []JobPart{},
+	}
+	for _, pr := range st.Prepares {
+		p.Prepares = append(p.Prepares, PreparePart{ID: pr.ID, Type: pr.Type, Result: pr.Result,
+			Files: pr.Files, Size: pr.Size, Message: pr.Message})
 	}
 	for _, j := range st.Jobs {
 		p.Jobs = append(p.Jobs, JobPart{ID: j.ID, Result: j.Result, Uploaded: j.Uploaded,

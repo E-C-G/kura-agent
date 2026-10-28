@@ -23,6 +23,7 @@ import (
 	"github.com/E-C-G/kura-agent/internal/execx"
 	"github.com/E-C-G/kura-agent/internal/guard"
 	"github.com/E-C-G/kura-agent/internal/ipc"
+	"github.com/E-C-G/kura-agent/internal/prepare"
 	"github.com/E-C-G/kura-agent/internal/procs"
 	"github.com/E-C-G/kura-agent/internal/report"
 	"github.com/E-C-G/kura-agent/internal/state"
@@ -83,6 +84,16 @@ type Deps struct {
 	// nil : rien n'est noté.
 	Quarantine func(prefixes []string) error
 
+	// Préparations (prepare) : zone de préparation, lanceur des outils, dossiers de
+	// l'agent jamais archivés. StagingDir vide : toute préparation échoue.
+	StagingDir  string
+	PrepareExec prepare.Runner
+	AgentDirs   []string
+	// PrepareCheckTool remplace la vérification des outils (tests : outils hors de root).
+	PrepareCheckTool func(ctx context.Context, r prepare.Runner, path string) (string, error)
+	// EnsureStaging crée ou vérifie la zone de préparation ; défaut prepare.EnsureStaging.
+	EnsureStaging func(dir string) error
+
 	Now        func() time.Time                                 // défaut : time.Now
 	Sleep      func(ctx context.Context, d time.Duration) error // défaut : attente annulable
 	Retries    int                                              // nouvelles tentatives ; défaut 2
@@ -114,6 +125,9 @@ func (d *Deps) defaults() {
 	}
 	if d.RetryDelay == 0 {
 		d.RetryDelay = 5 * time.Minute
+	}
+	if d.EnsureStaging == nil {
+		d.EnsureStaging = prepare.EnsureStaging
 	}
 }
 
@@ -196,10 +210,30 @@ func Run(ctx context.Context, cfg *config.Config, opt Options, d Deps) (state.St
 		defer close(preDone)
 		preOK = r.preTasks(runCtx, jobs)
 	}()
-	ordered := independentFirst(jobs)
+
+	// Préparations (archives…) : celles dont dépend un job choisi, avant lui. Celles qui
+	// attendent une pré-tâche passent après elle, avec les jobs qui en dépendent.
+	r.prepOK, r.prepSkipped, r.prepUsers = map[string]bool{}, map[string]bool{}, map[string]int{}
+	for _, j := range jobs {
+		if j.Prepare != "" {
+			r.prepUsers[j.Prepare]++
+		}
+	}
+	r.stagingReady = r.openStaging(jobs)
+	for _, id := range r.neededPrepares(jobs) {
+		if p, _ := cfg.PrepareByID(id); p.DependsOnPreTask == "" {
+			r.runPrepare(runCtx, p, nil)
+		}
+	}
+	ordered := r.independentFirst(jobs)
 	for i, j := range ordered {
-		if j.DependsOnPreTask != "" {
+		if r.waitsForPreTask(j) {
 			<-preDone
+		}
+		if j.Prepare != "" {
+			if p, ok := cfg.PrepareByID(j.Prepare); ok && p.DependsOnPreTask != "" {
+				r.runPrepare(runCtx, p, preOK)
+			}
 		}
 		r.update(func(st *state.Status) {
 			st.Current = &state.Progress{Job: j.Name, Index: i + 1, Total: len(ordered)}
@@ -217,13 +251,17 @@ func Run(ctx context.Context, cfg *config.Config, opt Options, d Deps) (state.St
 	<-preDone
 	r.update(func(st *state.Status) { st.Current = nil })
 	r.postTasks()
+	r.closeStaging()
 
 	// Bilan
-	results := make([]string, 0, len(r.st.Jobs)+len(r.st.PreTasks))
+	results := make([]string, 0, len(r.st.Jobs)+len(r.st.PreTasks)+len(r.st.Prepares))
 	for _, j := range r.st.Jobs {
 		results = append(results, j.Result)
 	}
 	for _, p := range r.st.PreTasks {
+		results = append(results, p.Result)
+	}
+	for _, p := range r.st.Prepares {
 		results = append(results, p.Result)
 	}
 	overall := state.Worst(results...)
@@ -305,6 +343,13 @@ type run struct {
 	// closed : par processus (en minuscules), sessions où il a été fermé et chemin de
 	// son exécutable, pour la relance par l'icône.
 	closed map[string]map[int]string
+
+	// prepOK : préparations faites (id → réussie) ; stagingReady : zone de préparation
+	// prête (créée ou vérifiée, vidée des restes), sinon la raison.
+	prepOK       map[string]bool
+	prepSkipped  map[string]bool
+	prepUsers    map[string]int // jobs choisis qui n'ont pas encore envoyé chaque résultat
+	stagingReady error
 }
 
 func (r *run) save() {
@@ -323,21 +368,130 @@ func (r *run) update(f func(*state.Status)) {
 	r.save()
 }
 
-// independentFirst place les jobs sans depends_on_pre_task en tête, en gardant l'ordre
-// du fichier dans chaque groupe.
-func independentFirst(jobs []config.Job) []config.Job {
+// independentFirst place en tête les jobs qui n'attendent aucune pré-tâche (ni
+// directement, ni par leur préparation), en gardant l'ordre du fichier dans chaque groupe.
+func (r *run) independentFirst(jobs []config.Job) []config.Job {
 	out := make([]config.Job, 0, len(jobs))
 	for _, j := range jobs {
-		if j.DependsOnPreTask == "" {
+		if !r.waitsForPreTask(j) {
 			out = append(out, j)
 		}
 	}
 	for _, j := range jobs {
-		if j.DependsOnPreTask != "" {
+		if r.waitsForPreTask(j) {
 			out = append(out, j)
 		}
 	}
 	return out
+}
+
+// waitsForPreTask : le job, ou la préparation dont il envoie le résultat, dépend d'une
+// pré-tâche.
+func (r *run) waitsForPreTask(j config.Job) bool {
+	if j.DependsOnPreTask != "" {
+		return true
+	}
+	p, ok := r.cfg.PrepareByID(j.Prepare)
+	return ok && p.DependsOnPreTask != ""
+}
+
+// neededPrepares : préparations dont dépend au moins un job choisi, dans l'ordre du fichier.
+func (r *run) neededPrepares(jobs []config.Job) []string {
+	used := map[string]bool{}
+	for _, j := range jobs {
+		if j.Prepare != "" {
+			used[j.Prepare] = true
+		}
+	}
+	var out []string
+	for _, p := range r.cfg.Prepare {
+		if used[p.ID] {
+			out = append(out, p.ID)
+		}
+	}
+	return out
+}
+
+// openStaging prépare la zone de préparation : créée ou vérifiée si un job choisi en a
+// besoin, puis vidée des restes d'une exécution interrompue (même sans préparation à
+// faire, pour qu'aucun export ne reste sur le disque). Rien en simulation.
+func (r *run) openStaging(jobs []config.Job) error {
+	if r.opt.DryRun || r.d.StagingDir == "" && len(r.neededPrepares(jobs)) == 0 {
+		return nil
+	}
+	if r.d.StagingDir == "" {
+		return errors.New("zone de préparation inconnue")
+	}
+	if len(r.neededPrepares(jobs)) == 0 {
+		if _, err := os.Lstat(r.d.StagingDir); err != nil {
+			return nil // rien à vider
+		}
+	}
+	if err := r.d.EnsureStaging(r.d.StagingDir); err != nil {
+		return err
+	}
+	if err := prepare.Clear(r.d.StagingDir); err != nil {
+		return fmt.Errorf("zone de préparation : restes d'une exécution précédente non supprimés : %w", err)
+	}
+	return nil
+}
+
+// closeStaging vide la zone de préparation : aucun export ni archive ne reste sur le
+// disque entre deux exécutions.
+func (r *run) closeStaging() {
+	if len(r.prepOK) == 0 || r.opt.DryRun || r.stagingReady != nil {
+		return
+	}
+	if err := prepare.Clear(r.d.StagingDir); err != nil {
+		r.log.Warn("zone de préparation non vidée", "err", err)
+	}
+}
+
+// releasePrepare : un job a fini avec le résultat de la préparation id ; après le
+// dernier, le résultat est effacé.
+func (r *run) releasePrepare(id string) {
+	if r.prepUsers[id]--; r.prepUsers[id] > 0 || r.d.StagingDir == "" {
+		return
+	}
+	if err := os.RemoveAll(filepath.Join(r.d.StagingDir, id)); err != nil {
+		r.log.Warn("résultat de préparation non effacé", "id", id, "err", err)
+	}
+}
+
+// runPrepare fait une préparation (une seule fois par exécution) et note son résultat.
+// preOK : résultat des pré-tâches, pour une préparation qui en dépend ; nil sinon.
+func (r *run) runPrepare(ctx context.Context, p config.Prepare, preOK map[string]bool) {
+	if _, done := r.prepOK[p.ID]; done {
+		return
+	}
+	ps := state.PrepareStatus{ID: p.ID, Type: p.Type, Result: state.ResultOK}
+	switch {
+	case r.opt.DryRun:
+		ps.Message = "simulation : préparation non exécutée"
+	case ctx.Err() != nil:
+		ps.Result, ps.Message = r.interrupted(ctx), "non exécutée : "+r.interruptReason(ctx)
+	case r.stagingReady != nil:
+		ps.Result, ps.Message = state.ResultError, r.stagingReady.Error()
+	case p.DependsOnPreTask != "" && !preOK[strings.ToLower(p.DependsOnPreTask)]:
+		ps.Result, ps.Message = state.ResultSkipped, p.DependsOnPreTask+" n'a pas pu être fermé : préparation sautée"
+	default:
+		r.update(func(st *state.Status) { st.Current = &state.Progress{Job: "préparation " + p.ID} })
+		out := io.Discard
+		if f, err := os.OpenFile(filepath.Join(r.runDir, "prepare-"+p.ID+".log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644); err == nil {
+			defer f.Close()
+			out = f
+		}
+		ps = prepare.Run(ctx, r.cfg, p, prepare.Deps{
+			Exec: r.d.PrepareExec, StagingDir: r.d.StagingDir, AgentDirs: r.d.AgentDirs,
+			CheckTool: r.d.PrepareCheckTool, Out: out, Log: r.log, Now: r.d.Now,
+		})
+	}
+	r.prepOK[p.ID] = ps.Result == state.ResultOK || ps.Result == state.ResultWarning
+	r.prepSkipped[p.ID] = ps.Result == state.ResultSkipped
+	if ps.Result != state.ResultOK {
+		r.log.Warn("préparation", "id", p.ID, "résultat", ps.Result, "message", ps.Message)
+	}
+	r.update(func(st *state.Status) { st.Prepares = append(st.Prepares, ps) })
 }
 
 // preTasks ferme les processus déclarés et renvoie, par processus, s'il est bien fermé.
@@ -366,17 +520,26 @@ func (r *run) preTasks(ctx context.Context, jobs []config.Job) map[string]bool {
 // preTaskNeeded : une pré-tâche dont dépendent des jobs ne sert que si l'un d'eux est exécuté ;
 // une pré-tâche dont aucun job ne dépend s'exécute toujours.
 func (r *run) preTaskNeeded(p config.PreTask, selected []config.Job) bool {
+	// dependsOn : le job, ou la préparation dont il envoie le résultat, attend p.
+	dependsOn := func(j config.Job) bool {
+		if strings.EqualFold(j.DependsOnPreTask, p.Process) {
+			return true
+		}
+		pr, ok := r.cfg.PrepareByID(j.Prepare)
+		return ok && strings.EqualFold(pr.DependsOnPreTask, p.Process)
+	}
 	declared := false
 	for _, j := range r.cfg.Jobs {
-		if strings.EqualFold(j.DependsOnPreTask, p.Process) {
-			declared = true
-		}
+		declared = declared || dependsOn(j)
+	}
+	for _, pr := range r.cfg.Prepare {
+		declared = declared || strings.EqualFold(pr.DependsOnPreTask, p.Process)
 	}
 	if !declared {
 		return true
 	}
 	for _, j := range selected {
-		if strings.EqualFold(j.DependsOnPreTask, p.Process) {
+		if dependsOn(j) {
 			return true
 		}
 	}
@@ -627,6 +790,25 @@ func (r *run) job(ctx context.Context, j config.Job, preOK map[string]bool) (js 
 		js.Result, js.Message = state.ResultSkipped, dep+" n'a pas pu être fermé : job sauté"
 		log.Warn("job sauté", "raison", js.Message)
 		return js
+	}
+	if j.Prepare != "" {
+		switch {
+		case r.opt.DryRun:
+			js.Message = "simulation : envoie le résultat de la préparation " + j.Prepare + ", non exécutée"
+			return js
+		case r.prepSkipped[j.Prepare]:
+			// Pré-tâche non faite (Outlook resté ouvert) : sauté, comme un job qui en dépend.
+			js.Result, js.Message = state.ResultSkipped, "préparation "+j.Prepare+" sautée : job sauté"
+			log.Warn("job sauté", "raison", js.Message)
+			return js
+		case !r.prepOK[j.Prepare]:
+			// Rien d'ancien ni de partiel ne part : la zone ne contient que ce qui a réussi.
+			js.Result, js.Message = state.ResultError, "préparation "+j.Prepare+" en échec : job sauté"
+			log.Error("job sauté", "raison", js.Message)
+			return js
+		}
+		// Le résultat ne reste pas plus que nécessaire : effacé après son dernier job.
+		defer r.releasePrepare(j.Prepare)
 	}
 
 	jobLog, err := os.OpenFile(filepath.Join(r.runDir, j.ID+".log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)

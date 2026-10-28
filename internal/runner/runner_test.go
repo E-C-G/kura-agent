@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/E-C-G/kura-agent/internal/prepare"
 	"github.com/E-C-G/kura-agent/internal/procs"
 	"github.com/E-C-G/kura-agent/internal/state"
 	"github.com/E-C-G/kura-agent/pkg/config"
@@ -118,6 +119,7 @@ type bench struct {
 	trays       Trays
 	smu         sync.Mutex
 	quarantined []string
+	zip         prepare.Runner // outil des préparations ; nil : aucun
 }
 
 func newBench(t *testing.T) *bench {
@@ -172,6 +174,12 @@ func (b *bench) run(ctx context.Context, opt Options) state.Status {
 			b.smu.Unlock()
 			return nil
 		},
+		StagingDir:  filepath.Join(b.dir, "staging"),
+		PrepareExec: b.zip,
+		PrepareCheckTool: func(context.Context, prepare.Runner, string) (string, error) {
+			return "3.0", nil
+		},
+		EnsureStaging: func(d string) error { return os.MkdirAll(d, 0o700) },
 	})
 	if err != nil {
 		b.t.Fatal(err)

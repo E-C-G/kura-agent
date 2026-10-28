@@ -41,28 +41,7 @@ func Scan(root string, excludes []string) (Census, error) {
 	if !st.IsDir() {
 		return c, fmt.Errorf("source %q : ce n'est pas un dossier", root)
 	}
-	matchers := make([]*regexp.Regexp, 0, len(excludes))
-	for _, e := range excludes {
-		matchers = append(matchers, globToRegexp(e))
-	}
-	excluded := func(rel string, dir bool) bool {
-		// La CLI compare le motif au chemin complet (ex. E:\$RECYCLE.BIN\x) : on essaie le
-		// chemin relatif avec et sans séparateur initial, en '/' et en '\', et pour un
-		// dossier avec séparateur final, pour couvrir les motifs « *\$RECYCLE.BIN\* ».
-		win := strings.ReplaceAll(rel, "/", `\`)
-		cands := []string{rel, "/" + rel, win, `\` + win}
-		if dir {
-			cands = append(cands, rel+"/", "/"+rel+"/", win+`\`, `\`+win+`\`)
-		}
-		for _, m := range matchers {
-			for _, cand := range cands {
-				if m.MatchString(cand) {
-					return true
-				}
-			}
-		}
-		return false
-	}
+	excluded := Excluder(excludes)
 	rootErr := errors.New("racine")
 	err = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -107,6 +86,33 @@ func Scan(root string, excludes []string) (Census, error) {
 		return c, fmt.Errorf("source %q illisible", root)
 	}
 	return c, err
+}
+
+// Excluder renvoie le test d'exclusion des motifs d'un job (ceux de aws s3 sync
+// --exclude) : rel est le chemin relatif à la source, en séparateurs /.
+func Excluder(excludes []string) func(rel string, dir bool) bool {
+	matchers := make([]*regexp.Regexp, 0, len(excludes))
+	for _, e := range excludes {
+		matchers = append(matchers, globToRegexp(e))
+	}
+	return func(rel string, dir bool) bool {
+		// La CLI compare le motif au chemin complet (ex. E:\$RECYCLE.BIN\x) : on essaie le
+		// chemin relatif avec et sans séparateur initial, en '/' et en '\', et pour un
+		// dossier avec séparateur final, pour couvrir les motifs « *\$RECYCLE.BIN\* ».
+		win := strings.ReplaceAll(rel, "/", `\`)
+		cands := []string{rel, "/" + rel, win, `\` + win}
+		if dir {
+			cands = append(cands, rel+"/", "/"+rel+"/", win+`\`, `\`+win+`\`)
+		}
+		for _, m := range matchers {
+			for _, cand := range cands {
+				if m.MatchString(cand) {
+					return true
+				}
+			}
+		}
+		return false
+	}
 }
 
 // globToRegexp traduit un motif fnmatch (celui de --exclude) en expression régulière :

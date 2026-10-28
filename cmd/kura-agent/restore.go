@@ -75,7 +75,9 @@ type restoreBucket interface {
 func realRestoreDeps() restoreDeps {
 	return restoreDeps{
 		checkAdmin: setup.CheckAdmin,
-		loadConfig: func(p string) (*config.Config, error) { return config.Load(p, config.LoadOptions{}) },
+		loadConfig: func(p string) (*config.Config, error) {
+			return config.Load(p, config.LoadOptions{StagingDir: paths.StagingDir()})
+		},
 		bucket: func(cfg *config.Config) (restoreBucket, error) {
 			if cfg.Profile.AWSCredentials == "" {
 				return nil, errors.New("profile.aws_credentials absent : la restauration lit la clé du poste dans le coffre (credential:<nom>)")

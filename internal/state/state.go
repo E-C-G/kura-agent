@@ -51,6 +51,7 @@ type Status struct {
 	ExitCode       int                  `json:"exit_code"`
 	Message        string               `json:"message,omitempty"`
 	PreTasks       []PreTaskStatus      `json:"pre_tasks,omitempty"`
+	Prepares       []PrepareStatus      `json:"prepares,omitempty"`
 	Jobs           []JobStatus          `json:"jobs"`
 	// Current est le job en cours pendant une exécution (info-bulle de l'icône).
 	Current *Progress `json:"current,omitempty"`
@@ -73,6 +74,18 @@ type PreTaskStatus struct {
 	Graceful  int    `json:"graceful,omitempty"`  // instances fermées par l'icône (fermeture douce)
 	Postponed int    `json:"postponed,omitempty"` // reports accordés à l'utilisateur
 	Message   string `json:"message,omitempty"`
+}
+
+// PrepareStatus résume une préparation (archive, export) faite avant les jobs.
+type PrepareStatus struct {
+	ID        string  `json:"id"`
+	Type      string  `json:"type"`
+	Result    string  `json:"result"`
+	Files     int     `json:"files,omitempty"`   // fichiers archivés
+	Missing   int     `json:"missing,omitempty"` // fichiers illisibles laissés de côté (on_locked: skip)
+	Size      int64   `json:"size,omitempty"`    // octets produits
+	DurationS float64 `json:"duration_s"`
+	Message   string  `json:"message,omitempty"`
 }
 
 // JobStatus résume un job.

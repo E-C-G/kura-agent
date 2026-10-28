@@ -151,3 +151,7 @@ func IsReparsePoint(err error) bool {
 	var r *ReparsePointError
 	return errors.As(err, &r)
 }
+
+// TrustedOwner : SYSTEM, TrustedInstaller, le groupe Administrateurs, le compte qui
+// lance l'agent, ou un membre du groupe Administrateurs (voir trustedOwner).
+func TrustedOwner(sid *windows.SID) bool { return trustedOwner(sid) }
