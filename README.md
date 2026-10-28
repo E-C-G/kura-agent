@@ -19,7 +19,7 @@ Console d'administration associée : [E-C-G/kura-ctl](https://github.com/E-C-G/k
 | 5 | Icône par session : état, préavis et fermeture douce d'Outlook, relance, annulation, suspension | **fait** |
 | 5 bis | `import` : clé d'un paquet `.kura` préparé par la console kura-ctl | **fait** |
 | 5 ter | `install --package` : poste installé en une fois depuis un paquet de la console, CLI AWS comprise | **fait** |
-| 6 | Restauration : historique, état à une date (lot 1), vers un dossier à part, journal, bilan (lot 2), en place (lot 3) ; depuis l'icône (lot 4) à venir | **lots 1 à 3 faits** |
+| 6 | Restauration : historique, état à une date (lot 1), vers un dossier à part, journal, bilan (lot 2), en place (lot 3), depuis l'icône pour ses propres fichiers (lot 4) | **fait** |
 | 7 | `self-update` : recherche et vérification de l'attestation GitHub, installation, retour arrière, icône | **fait** |
 
 Commandes disponibles : `run`, `validate`, `status`, `credentials`, `import`, `install`, `uninstall`,
@@ -311,7 +311,7 @@ mécanismes et comparer, puis désactiver et supprimer l'ancienne tâche et son 
 ### Désinstaller
 
 ```bat
-kura-agent uninstall              :: tâche, icône, C:\Program Files\Kura
+kura-agent uninstall              :: tâches \Kura\Sync et \Kura\Restore, icône, C:\Program Files\Kura
 kura-agent uninstall --purge      :: efface aussi C:\ProgramData\Kura (configuration, secrets, journaux)
 ```
 
@@ -346,7 +346,47 @@ Menu (clic gauche ou droit) : dernière sauvegarde réussie et prochaine exécut
 maintenant** (lance la tâche `\Kura\Sync`, comptes de `tray.allow_run_now`) ; **Annuler la
 sauvegarde** pendant une exécution (mêmes comptes) ; **Suspendre** 1 h ou jusqu'à demain 08:00, puis
 Reprendre (invite UAC : la suspension s'écrit dans `C:\ProgramData\Kura`) ; ouvrir les journaux ou la
-configuration ; vérifier la configuration ; à propos ; quitter.
+configuration ; vérifier la configuration ; à propos ; quitter. **Restaurer mes fichiers…** pour tous
+les comptes de `tray.users` (voir ci-dessous).
+
+**Restaurer mes fichiers.** Chaque compte de l'icône restaure ses propres fichiers, sans droits
+d'administrateur, dans une fenêtre :
+
+- un dossier (raccourcis : les dossiers sauvegardés où le compte peut écrire, dont son profil ;
+  ou *Parcourir…*), une date (calendrier borné aux 90 derniers jours ; aujourd'hui = dernière
+  sauvegarde), *Afficher* ;
+- la liste des fichiers du dossier à cette date (sous-dossiers compris) : nom, taille, date de la
+  sauvegarde, « supprimé le… », « modifié depuis » ; cases à cocher, *Tout cocher*, *Tout
+  décocher* ; l'historique du fichier sélectionné en dessous ;
+- *Restaurer* : dans un nouveau dossier « Restauration Kura AAAA-MM-JJ HHhMM » créé à côté du
+  dossier choisi, ou à leur place pour les seuls fichiers supprimés ; jamais d'écrasement ;
+- avancement dans la fenêtre, notification à la fin (un clic ouvre le dossier), bouton *Ouvrir le
+  dossier*.
+
+L'icône ouvre pour cela un second canal (`\\.\pipe\KuraRestore-<session>-…`, publié dans
+`HKCU\Software\Kura\RestorePipe` le temps de la fenêtre) et lance la tâche `\Kura\Restore`
+(SYSTEM, créée par `install`, lançable par les comptes de `tray.users`, une instance pour toutes les
+sessions). La tâche (`kura-agent restore --serve`) joint la fenêtre (exécutable et session vérifiés
+comme pour `run`) ; la fenêtre n'accepte qu'un client SYSTEM. Tout est vérifié par la tâche, avec le
+jeton du processus de l'icône (pris lors de sa vérification) : le compte doit figurer dans
+`tray.users` ; un fichier n'est listé que si le compte peut lister **son** dossier et y écrire
+(contrôle d'accès de Windows fait avec son jeton, dossier par dossier : le sous-dossier privé d'un
+dossier commun n'apparaît pas, ni le profil d'un autre compte), et, s'il est encore présent, le lire ;
+un dossier disparu n'est restaurable depuis l'icône que dans le profil du compte (ailleurs, il a pu
+appartenir à un autre compte : restauration par l'administrateur, en ligne de commande) ; hors du
+profil, seuls les fichiers encore présents sont proposés (versions antérieures) : un fichier
+supprimé d'un dossier commun a pu appartenir à un autre compte et rien sur le disque ne le prouve,
+il se restaure par l'administrateur ; seuls les dossiers des disques du poste sont proposés (pas de
+partage réseau) ; les fichiers sont écrits **en son nom** (emprunt
+d'identité), donc à lui et seulement là où il pourrait écrire lui-même, et jamais à la place d'un
+fichier existant, même apparu pendant la restauration. Le compte ne voit jamais la clé. La date est
+bornée à 90 jours par la tâche elle-même. Pas de verrou de la sauvegarde depuis l'icône (rien n'y
+est remplacé ; un compte standard ne doit pas pouvoir bloquer la sauvegarde). Le dossier
+« Restauration Kura … » se trouve dans une source sauvegardée : il partira à la sauvegarde
+suivante, le supprimer une fois les fichiers remis en place. Journal et bilan comme en ligne de
+commande, avec le compte qui a restauré ; journal de la tâche : `restore-tray.log` dans le dossier
+des journaux. La tâche s'arrête 90 s après la fermeture de la dernière fenêtre, ou au bout de 30 min
+sans demande.
 
 Mise à jour, pour les seuls membres du groupe Administrateurs du poste (groupes imbriqués
 compris ; sous UAC, le compte compte même si ses droits ne sont pas encore élevés) : **Mettre à
@@ -752,7 +792,8 @@ taille), la commande et le compte.
 `kura-agent status` affiche la dernière restauration. Chaque restauration est signalée au bilan
 (voir le webhook ci-dessus) ; `--versions` et `--list` ne le sont pas.
 
-La restauration de ses propres données depuis l'icône viendra dans une version suivante.
+Chaque compte de l'icône peut aussi restaurer ses propres fichiers depuis l'icône, sans droits
+d'administrateur (voir « L'icône »).
 
 Codes de sortie : 0 restauration faite, ou rien à restaurer · 1 restauration partielle ou
 interrompue (relancer la même commande) · 3 configuration illisible, chemin hors des sources des
@@ -819,7 +860,7 @@ internal/platform/  fonctions dépendantes du système : ce qui est écrit pour 
 internal/systemd/   planification Linux : kura-sync.service et kura-sync.timer, systemctl
 internal/setup/     ACL, copie des fichiers, icône au démarrage, ancien compte svc-kura (install)
 internal/awsinstall/ CLI AWS absente : MSI fourni ou téléchargé, signature Amazon vérifiée, msiexec
-internal/schedtask/ tâche \Kura\Sync : XML du Planificateur, schtasks
+internal/schedtask/ tâches \Kura\Sync et \Kura\Restore : XML du Planificateur, schtasks
 internal/paths/     emplacements sur disque
 internal/selfupdate/ nouvelles versions : releases GitHub, attestation de release vérifiée (sigstore-go)
 internal/restore/   restauration : chemin → clé, versions du bucket (SDK AWS), état à une date, écriture confinée

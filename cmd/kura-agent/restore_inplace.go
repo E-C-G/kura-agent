@@ -99,10 +99,14 @@ func restoreInPlace(ctx context.Context, stdout, stderr io.Writer, d restoreDeps
 		fmt.Fprintf(stdout, "  %s (job %s)\n", disp(j.report.target.Local), j.report.target.Job.ID)
 	}
 	fmt.Fprintf(stdout, "  à remettre (absents)       : %d fichier(s), %s\n", nWrite, humanSize(sWrite))
-	if replace {
+	// Lignes à zéro omises (un seul fichier, rien à remplacer…).
+	if replace && nReplace > 0 {
 		fmt.Fprintf(stdout, "  à remplacer (différents)   : %d fichier(s), %s — l'actuel gardé à côté (.avant-restauration-<date>)\n", nReplace, humanSize(sReplace))
+	}
+	if replace && nSame > 0 {
 		fmt.Fprintf(stdout, "  laissés (identiques)       : %d\n", nSame)
-	} else {
+	}
+	if !replace && nKeep > 0 {
 		fmt.Fprintf(stdout, "  laissés (présents)         : %d — --replace pour remplacer ceux qui diffèrent\n", nKeep)
 	}
 	if nRefused > 0 {

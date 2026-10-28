@@ -43,7 +43,7 @@ func oem(b []byte) string {
 	return windows.UTF16ToString(u)
 }
 
-func create(def string) (string, error) {
+func create(name, def string) (string, error) {
 	f, err := os.CreateTemp("", "kura-task-*.xml")
 	if err != nil {
 		return "", err
@@ -56,20 +56,23 @@ func create(def string) (string, error) {
 	if err := f.Close(); err != nil {
 		return "", err
 	}
-	return schtasks("/Create", "/TN", Name, "/XML", f.Name(), "/F")
+	return schtasks("/Create", "/TN", name, "/XML", f.Name(), "/F")
 }
 
 // Register crée ou remplace la tâche à partir de son XML. Si schtasks refuse le
 // descripteur de sécurité (droit de lancement des comptes de allow_run_now), la tâche
 // est créée sans, et l'erreur renvoyée est un *RunNowNotAppliedError.
-func Register(def string) error {
-	out, err := create(def)
+func Register(def string) error { return RegisterNamed(Name, def) }
+
+// RegisterNamed crée ou remplace la tâche name (voir Register).
+func RegisterNamed(name, def string) error {
+	out, err := create(name, def)
 	if err == nil {
 		return nil
 	}
 	first := fmt.Sprintf("%v : %s", err, out)
 	if bare := WithoutSecurityDescriptor(def); bare != def {
-		if out2, err2 := create(bare); err2 == nil {
+		if out2, err2 := create(name, bare); err2 == nil {
 			return &RunNowNotAppliedError{Cause: first}
 		} else {
 			return fmt.Errorf("schtasks /Create : %s ; sans descripteur de sécurité : %v : %s", first, err2, out2)
@@ -79,18 +82,24 @@ func Register(def string) error {
 }
 
 // Exists indique si la tâche est enregistrée.
-func Exists() bool {
-	_, err := schtasks("/Query", "/TN", Name)
+func Exists() bool { return ExistsNamed(Name) }
+
+// ExistsNamed indique si la tâche name est enregistrée.
+func ExistsNamed(name string) bool {
+	_, err := schtasks("/Query", "/TN", name)
 	return err == nil
 }
 
 // Delete supprime la tâche ; absente n'est pas une erreur.
-func Delete() error {
-	if !Exists() {
+func Delete() error { return DeleteNamed(Name) }
+
+// DeleteNamed supprime la tâche name ; absente n'est pas une erreur.
+func DeleteNamed(name string) error {
+	if !ExistsNamed(name) {
 		return nil
 	}
-	if out, err := schtasks("/Delete", "/TN", Name, "/F"); err != nil {
-		return fmt.Errorf("schtasks /Delete : %v : %s", err, out)
+	if out, err := schtasks("/Delete", "/TN", name, "/F"); err != nil {
+		return fmt.Errorf("schtasks /Delete %s : %v : %s", name, err, out)
 	}
 	return nil
 }

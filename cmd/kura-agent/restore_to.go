@@ -292,6 +292,12 @@ type restorePlan struct {
 	batches   []batch
 	kept      []keptItem
 	preFailed []keptItem
+
+	// Depuis l'icône : compte servi, écriture en son nom, avancement.
+	account    string
+	workerInit func() (func(), error)
+	progress   func(done, total int, bytes int64)
+	info       report.RestoreInfo // rempli par execute
 }
 
 // execute écrit les fichiers, tient le journal, l'état et le bilan, et résume.
@@ -303,17 +309,32 @@ func execute(ctx context.Context, stdout, stderr io.Writer, d restoreDeps, cfg *
 	logPath := ""
 	var logw io.Writer = io.Discard
 	if err := os.MkdirAll(d.logsDir, 0o755); err == nil {
-		logPath = filepath.Join(d.logsDir, "restore-"+started.Format("20060102-150405")+".log")
-		if f, err := os.OpenFile(logPath, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o644); err == nil {
-			defer f.Close()
-			logw = f
-		} else {
-			logPath = ""
+		// Un journal par restauration, même pour deux restaurations de la même seconde
+		// (deux fenêtres de l'icône).
+		for i := 1; i < 100; i++ {
+			name := "restore-" + started.Format("20060102-150405")
+			if i > 1 {
+				name += fmt.Sprintf("-%d", i)
+			}
+			p := filepath.Join(d.logsDir, name+".log")
+			f, err := os.OpenFile(p, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+			if errors.Is(err, fs.ErrExist) {
+				continue
+			}
+			if err == nil {
+				defer f.Close()
+				logw, logPath = f, p
+			}
+			break
 		}
 	}
 	fmt.Fprintf(logw, "kura-agent %s restore — %s\n", d.version, started.Local().Format("02/01/2006 15:04:05"))
 	fmt.Fprintf(logw, "Commande : kura-agent restore %s\n", quoteArgs(args))
-	fmt.Fprintf(logw, "Compte : %s\nÉtat : %s\nDestination : %s\n", d.account(), stateLabel(p.at), p.where)
+	account := p.account
+	if account == "" {
+		account = d.account()
+	}
+	fmt.Fprintf(logw, "Compte : %s\nÉtat : %s\nDestination : %s\n", account, stateLabel(p.at), p.where)
 	for _, r := range p.reports {
 		fmt.Fprintf(logw, "Chemin : %s (job %s, préfixe %s)\n", disp(r.target.Local), r.target.Job.ID, r.target.Key)
 	}
@@ -342,7 +363,7 @@ func execute(ctx context.Context, stdout, stderr io.Writer, d restoreDeps, cfg *
 	last := time.Now()
 	for _, bt := range p.batches {
 		bt.dest.Stamp = stamp
-		restore.Restore(ctx, b, bt.dest, bt.items, d.workers, bt.resumed, func(o restore.Outcome) {
+		restore.RestoreWith(ctx, b, bt.dest, bt.items, restore.Options{Workers: d.workers, Resumed: bt.resumed, WorkerInit: p.workerInit}, func(o restore.Outcome) {
 			it := o.Item
 			l := line(bt.show(it.Out), it)
 			done++
@@ -371,6 +392,9 @@ func execute(ctx context.Context, stdout, stderr io.Writer, d restoreDeps, cfg *
 				}
 				fmt.Fprintf(logw, "OK\t%s\n", l)
 			}
+			if p.progress != nil {
+				p.progress(done, total, bytes)
+			}
 			if !asJSON && time.Since(last) >= 10*time.Second {
 				last = time.Now()
 				fmt.Fprintf(stdout, "  … %d/%d fichier(s), %s\n", done, total, humanSize(bytes))
@@ -385,7 +409,7 @@ func execute(ctx context.Context, stdout, stderr io.Writer, d restoreDeps, cfg *
 	}
 
 	ended := d.now()
-	info := report.RestoreInfo{Account: d.account(), Mode: p.mode, To: p.where, Files: restored + replaced, Replaced: replaced,
+	info := report.RestoreInfo{Account: account, Mode: p.mode, To: p.where, Files: restored + replaced, Replaced: replaced,
 		Bytes: bytes, Skipped: skipped + len(p.kept), Ignored: ignored, Failed: failed, Result: "ok", ExitCode: exitRestoreOK,
 		Log: logPath, Started: started, Ended: ended}
 	for _, r := range p.reports {
@@ -413,6 +437,7 @@ func execute(ctx context.Context, stdout, stderr io.Writer, d restoreDeps, cfg *
 		fmt.Fprintf(stderr, "Bilan de la restauration non envoyé : %v\n", err)
 	}
 	cancel()
+	p.info = info
 
 	if asJSON {
 		enc := json.NewEncoder(stdout)

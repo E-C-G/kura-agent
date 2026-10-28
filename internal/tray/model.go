@@ -60,6 +60,7 @@ type View struct {
 	ShowRunNow    bool // compte de tray.allow_run_now
 	RunNowEnabled bool
 	ShowCancel    bool
+	ShowRestore   bool // « Restaurer mes fichiers… » : comptes de tray.users
 
 	// Mise à jour : réservée aux administrateurs du poste.
 	UpdateTo        string // version plus récente disponible, attestée
@@ -133,6 +134,7 @@ func Compute(in Input) View {
 	v.Tooltip = truncate("Kura – "+v.Tooltip, 127)
 
 	v.ShowRunNow = allowed
+	v.ShowRestore = in.Config != nil && config.Listed(in.Config.Tray.Users, in.User)
 	v.RunNowEnabled = allowed && !v.Running && !v.Suspended && in.Updating == ""
 	v.ShowCancel = allowed && v.Running && in.Connected
 	if in.Admin {

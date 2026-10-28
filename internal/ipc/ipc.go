@@ -76,6 +76,8 @@ type Msg struct {
 	Result   string `json:"result,omitempty"`
 	ExitCode int    `json:"exit_code,omitempty"`
 	Message  string `json:"message,omitempty"`
+
+	Restore *RestoreData `json:"restore,omitempty"` // messages restore_*
 }
 
 // maxLine borne un message : rien de légitime n'approche cette taille.

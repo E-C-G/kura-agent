@@ -145,3 +145,30 @@ func TestWithoutSecurityDescriptor(t *testing.T) {
 		t.Fatal("deuxième retrait")
 	}
 }
+
+func TestRestoreXML(t *testing.T) {
+	def, err := RestoreXML(Params{Command: `C:\Program Files\Kura\kura-agent.exe`, Arguments: "restore --serve",
+		WorkingDir: `C:\ProgramData\Kura`, RunNowSIDs: []string{"S-1-5-21-1-2-3-1001"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		`<URI>\Kura\Restore</URI>`,
+		`<SecurityDescriptor>D:(A;;FA;;;SY)(A;;FA;;;BA)(A;;FRFX;;;S-1-5-21-1-2-3-1001)</SecurityDescriptor>`,
+		`<UserId>S-1-5-18</UserId>`,
+		`<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>`,
+		`<ExecutionTimeLimit>PT12H</ExecutionTimeLimit>`,
+		`<Arguments>restore --serve</Arguments>`,
+		`<Triggers></Triggers>`,
+	} {
+		if !strings.Contains(def, want) {
+			t.Errorf("sans %s :\n%s", want, def)
+		}
+	}
+	if strings.Contains(def, "CalendarTrigger") || strings.Contains(def, "LogonType") {
+		t.Errorf("déclencheur ou type de session inattendu :\n%s", def)
+	}
+	if _, err := RestoreXML(Params{Command: "x", RunNowSIDs: []string{"S-1-5-21);(A;;FA;;;WD"}}); err == nil {
+		t.Fatal("SID piégé accepté")
+	}
+}

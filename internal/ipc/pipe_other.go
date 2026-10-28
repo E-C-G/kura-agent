@@ -25,6 +25,12 @@ func (*Listener) Accept() (io.ReadWriteCloser, error) { return nil, errUnsupport
 // Dial n'est pas encore écrit pour ce système.
 func Dial(int) (io.ReadWriteCloser, error) { return nil, errUnsupported }
 
+// ListenRestore n'est pas encore écrit pour ce système.
+func ListenRestore() (*Listener, error) { return nil, errUnsupported }
+
+// DialRestore n'est pas encore écrit pour ce système.
+func DialRestore(int) (io.ReadWriteCloser, error) { return nil, errUnsupported }
+
 // Sessions n'est pas encore écrit pour ce système.
 func Sessions() ([]int, error) { return nil, errUnsupported }
 

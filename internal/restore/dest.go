@@ -12,6 +12,7 @@ import (
 	"os"
 	"path"
 	"strings"
+	"time"
 )
 
 // Dest écrit les fichiers restaurés sous un dossier, sans jamais en sortir : chaque
@@ -143,16 +144,35 @@ func (d *Dest) Write(ctx context.Context, g Getter, rel string, v Version) error
 	if err != nil {
 		return err
 	}
-	// Dernier contrôle juste avant le renommage : la place est toujours libre.
-	if _, err := d.root.Lstat(rel); err == nil {
-		_ = d.root.Remove(tmp)
+	return d.place(tmp, rel)
+}
+
+// place donne au temporaire son nom sans jamais remplacer un fichier apparu entre-temps
+// (une application qui enregistre au même moment) : un lien physique se crée de façon
+// exclusive, puis le temporaire est retiré. Sur un système de fichiers sans liens
+// physiques (FAT, exFAT), dernier contrôle puis renommage.
+func (d *Dest) place(tmp, rel string) error {
+	defer func() { // sans effet une fois renommé ; un antivirus peut le tenir un instant
+		for i := 0; i < 5; i++ {
+			if err := d.root.Remove(tmp); err == nil || errors.Is(err, fs.ErrNotExist) {
+				return
+			}
+			time.Sleep(200 * time.Millisecond)
+		}
+	}()
+	err := d.root.Link(tmp, rel)
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, fs.ErrExist):
 		return ErrExists
-	}
-	if err := d.root.Rename(tmp, rel); err != nil {
-		_ = d.root.Remove(tmp)
+	case !linkUnsupported(err):
 		return err
 	}
-	return nil
+	if _, err := d.root.Lstat(rel); err == nil {
+		return ErrExists
+	}
+	return d.root.Rename(tmp, rel)
 }
 
 // Replace remplace le fichier rel par la version v en gardant le fichier actuel à côté,

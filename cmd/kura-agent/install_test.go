@@ -23,21 +23,22 @@ import (
 )
 
 type fakeSys struct {
-	t        *testing.T
-	calls    []string
-	xml      string
-	validate int
-	asked    []string
-	askErr   error
-	lockErr  error
-	legacy   bool // un compte svc-kura d'une version précédente existe
-	awsErr   error
-	awsTemp  string
-	units    systemd.Units
-	plists   launchd.Plists
-	msis     []string
-	removed  []string
-	password string
+	t          *testing.T
+	calls      []string
+	xml        string
+	restoreXML string
+	validate   int
+	asked      []string
+	askErr     error
+	lockErr    error
+	legacy     bool // un compte svc-kura d'une version précédente existe
+	awsErr     error
+	awsTemp    string
+	units      systemd.Units
+	plists     launchd.Plists
+	msis       []string
+	removed    []string
+	password   string
 }
 
 func (f *fakeSys) system(dir string) system {
@@ -62,6 +63,12 @@ func (f *fakeSys) system(dir string) system {
 		},
 		registerTask: func(x string) error { f.calls = append(f.calls, "task"); f.xml = x; return nil },
 		deleteTask:   func() error { f.calls = append(f.calls, "rmtask"); return nil },
+		registerRestoreTask: func(x string) error {
+			f.calls = append(f.calls, "restoretask")
+			f.restoreXML = x
+			return nil
+		},
+		deleteRestoreTask: func() error { f.calls = append(f.calls, "rmrestoretask"); return nil },
 		removeProgramDir: func(d string) (bool, error) {
 			f.calls = append(f.calls, "rmprog")
 			return false, nil
@@ -149,7 +156,7 @@ func TestInstallFresh(t *testing.T) {
 	if code := install(sys, installOptions{cfgPath: cfg, skipValidate: false}); code != 0 {
 		t.Fatalf("code %d ; appels %v", code, f.calls)
 	}
-	want := "admin acl awscli binary validate task autostart"
+	want := "admin acl awscli binary validate task rmrestoretask autostart"
 	if got := strings.Join(f.calls, " "); got != want {
 		t.Fatalf("ordre des étapes :\n reçu   %s\n attendu %s", got, want)
 	}
@@ -250,7 +257,7 @@ func TestUninstall(t *testing.T) {
 	if code := uninstall(sys, false); code != 0 {
 		t.Fatalf("code %d", code)
 	}
-	if got := strings.Join(f.calls, " "); got != "admin lock rmautostart stoptrays rmtask rmaccount:svc-kura rmprog" {
+	if got := strings.Join(f.calls, " "); got != "admin lock rmautostart stoptrays rmtask rmrestoretask rmaccount:svc-kura rmprog" {
 		t.Fatalf("étapes : %s", got)
 	}
 	if _, err := os.Stat(sys.dataDir); err != nil {
@@ -313,7 +320,7 @@ func TestInstallRemovesLegacyAccount(t *testing.T) {
 	if code := install(f.system(dir), installOptions{cfgPath: writeConfig(t, dir, ""), skipValidate: false}); code != 0 {
 		t.Fatalf("code %d", code)
 	}
-	if got := strings.Join(f.calls, " "); got != "admin acl awscli binary validate task rmaccount:svc-kura autostart" {
+	if got := strings.Join(f.calls, " "); got != "admin acl awscli binary validate task rmrestoretask rmaccount:svc-kura autostart" {
 		t.Fatalf("étapes : %s", got)
 	}
 }
@@ -367,7 +374,7 @@ func TestInstallFromPackage(t *testing.T) {
 	if code := install(sys, installOptions{pkgPath: file, msiCandidates: []string{msi}}); code != 0 {
 		t.Fatalf("code %d ; appels %v", code, f.calls)
 	}
-	if got := strings.Join(f.calls, " "); got != "admin acl awscli binary validate task autostart" {
+	if got := strings.Join(f.calls, " "); got != "admin acl awscli binary validate task rmrestoretask autostart" {
 		t.Fatalf("étapes : %s", got)
 	}
 	if len(f.asked) != 1 || len(f.msis) != 1 || f.msis[0] != msi || f.awsTemp != filepath.Join(sys.dataDir, "awscli") {
@@ -652,6 +659,27 @@ func TestUninstallMac(t *testing.T) {
 	for _, d := range append([]string{sys.dataDir}, sys.purgeDirs...) {
 		if _, err := os.Stat(d); !os.IsNotExist(err) {
 			t.Errorf("%s resté", d)
+		}
+	}
+}
+
+// Comptes de l'icône : tâche \Kura\Restore lançable par eux.
+func TestInstallRestoreTask(t *testing.T) {
+	dir := t.TempDir()
+	f := &fakeSys{t: t}
+	cfg := writeConfig(t, dir, "")
+	data, _ := os.ReadFile(cfg)
+	y := strings.Replace(string(data), "tray:\n", "tray:\n  users: [\""+strings.ReplaceAll(currentUser(t), `\`, `\\`)+"\"]\n", 1)
+	os.WriteFile(cfg, []byte(y), 0o644)
+	if code := install(f.system(dir), installOptions{cfgPath: cfg}); code != 0 {
+		t.Fatalf("code %d ; appels %v", code, f.calls)
+	}
+	if got := strings.Join(f.calls, " "); !strings.Contains(got, "validate task restoretask autostart") {
+		t.Fatalf("étapes : %s", got)
+	}
+	for _, w := range []string{`<URI>\Kura\Restore</URI>`, "(A;;FRFX;;;S-1-5-21-9-9-9-2000)", "<Arguments>restore --serve</Arguments>", "kura-agent.exe</Command>"} {
+		if !strings.Contains(f.restoreXML, w) {
+			t.Errorf("%q absent de la tâche de restauration :\n%s", w, f.restoreXML)
 		}
 	}
 }

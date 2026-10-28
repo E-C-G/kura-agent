@@ -17,6 +17,13 @@ import (
 // Name est le chemin de la tâche dans le Planificateur.
 const Name = `\Kura\Sync`
 
+// RestoreName : tâche de la restauration depuis l'icône (sans déclencheur, lancée par
+// l'icône des comptes de tray.users).
+const RestoreName = `\Kura\Restore`
+
+// RestoreLimit : durée maximale d'une session de restauration depuis l'icône.
+const RestoreLimit = 12 * time.Hour
+
 // Margin s'ajoute à schedule.max_duration pour la limite du Planificateur : l'agent
 // s'arrête lui-même à max_duration en écrivant son bilan ; Windows ne tue le
 // processus qu'en dernier recours.
@@ -56,12 +63,9 @@ func XML(s config.Schedule, p Params) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	sd := "D:(A;;FA;;;SY)(A;;FA;;;BA)"
-	for _, sid := range p.RunNowSIDs {
-		if !strings.HasPrefix(sid, "S-1-") || strings.ContainsAny(sid, "();") {
-			return "", fmt.Errorf("SID invalide %q", sid)
-		}
-		sd += "(A;;FRFX;;;" + sid + ")"
+	sd, err := securityDescriptor(p.RunNowSIDs)
+	if err != nil {
+		return "", err
 	}
 	limit := s.MaxDuration.Duration
 	if limit <= 0 {
@@ -100,11 +104,63 @@ func XML(s config.Schedule, p Params) (string, error) {
 			Command: p.Command, Arguments: p.Arguments, WorkingDirectory: p.WorkingDir,
 		}},
 	}
+	return marshal(t)
+}
+
+func marshal(t task) (string, error) {
 	out, err := xml.MarshalIndent(t, "", "  ")
 	if err != nil {
 		return "", err
 	}
 	return `<?xml version="1.0" encoding="UTF-16"?>` + "\n" + string(out) + "\n", nil
+}
+
+// securityDescriptor : SYSTEM et Administrateurs en contrôle total, lecture et
+// lancement pour les comptes donnés.
+func securityDescriptor(sids []string) (string, error) {
+	sd := "D:(A;;FA;;;SY)(A;;FA;;;BA)"
+	for _, sid := range sids {
+		if !strings.HasPrefix(sid, "S-1-") || strings.ContainsAny(sid, "();") {
+			return "", fmt.Errorf("SID invalide %q", sid)
+		}
+		sd += "(A;;FRFX;;;" + sid + ")"
+	}
+	return sd, nil
+}
+
+// RestoreXML décrit la tâche \Kura\Restore : SYSTEM, sans déclencheur, une instance à
+// la fois, lançable par les comptes p.RunNowSIDs (ceux de tray.users).
+func RestoreXML(p Params) (string, error) {
+	if p.Command == "" {
+		return "", fmt.Errorf("commande obligatoire")
+	}
+	sd, err := securityDescriptor(p.RunNowSIDs)
+	if err != nil {
+		return "", err
+	}
+	t := task{
+		Version: "1.4",
+		NS:      "http://schemas.microsoft.com/windows/2004/02/mit/task",
+		RegistrationInfo: registrationInfo{
+			Author:             "kura-agent",
+			Description:        "Restauration Kura depuis l'icône (lit le bucket, écrit au nom du compte de l'icône). Gérée par kura-agent install / uninstall : ne pas modifier à la main.",
+			URI:                RestoreName,
+			SecurityDescriptor: sd,
+		},
+		Principals: principals{Principal: principal{ID: "Author", UserID: SystemSID, RunLevel: "HighestAvailable"}},
+		Settings: settings{
+			MultipleInstancesPolicy: "IgnoreNew",
+			AllowHardTerminate:      true,
+			AllowStartOnDemand:      true,
+			Enabled:                 true,
+			ExecutionTimeLimit:      isoDuration(RestoreLimit),
+			Priority:                7,
+		},
+		Actions: actions{Context: "Author", Exec: execAction{
+			Command: p.Command, Arguments: p.Arguments, WorkingDirectory: p.WorkingDir,
+		}},
+	}
+	return marshal(t)
 }
 
 // RunNowNotAppliedError : la tâche est créée, mais sans le descripteur de sécurité qui
