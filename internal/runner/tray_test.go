@@ -336,3 +336,56 @@ func TestJobDurationIsRecorded(t *testing.T) {
 		}
 	}
 }
+
+// Outlook fermé pour une préparation : relancé dès la copie de sa source faite, avant
+// l'archive envoyée ; une seule relance.
+func TestOutlookRestartedOnceCopyDone(t *testing.T) {
+	b, ft := trayBench(t)
+	b.cfg.Jobs = b.cfg.Jobs[:1] // data seulement : le .pst part dans l'archive
+	withPrepare(b, "outlook.exe")
+	restartedBeforeUpload := false
+	b.aws.behave["COURRIER"] = func(dry bool, _ int) (string, int) {
+		if !dry {
+			restartedBeforeUpload = slices.Contains(ft.types(), ipc.TypeStart)
+		}
+		return "", 0
+	}
+	st := b.run(context.Background(), Options{})
+	if st.ExitCode != ExitOK || b.aws.real("COURRIER") != 1 {
+		t.Fatalf("code %d : %+v", st.ExitCode, st.Jobs)
+	}
+	if !restartedBeforeUpload {
+		t.Fatalf("Outlook relancé après l'envoi : requêtes %v", ft.types())
+	}
+	if got := strings.Join(ft.types(), " "); got != "prompt_close close start" {
+		t.Fatalf("requêtes à l'icône : %s", got)
+	}
+}
+
+// Un job qui envoie lui-même le dossier d'Outlook garde Outlook fermé : la relance attend
+// sa fin, même si la copie de la préparation est faite avant.
+func TestOutlookRestartWaitsForDependentJob(t *testing.T) {
+	b, ft := trayBench(t)
+	withPrepare(b, "outlook.exe")
+	// Ordre du fichier : data, courrier (préparation), outlook (job direct).
+	b.cfg.Jobs[1], b.cfg.Jobs[2] = b.cfg.Jobs[2], b.cfg.Jobs[1]
+	seen := map[string]bool{}
+	for _, dest := range []string{"COURRIER", "C/alice/Outlook"} {
+		b.aws.behave[dest] = func(dry bool, _ int) (string, int) {
+			if !dry {
+				seen[dest] = slices.Contains(ft.types(), ipc.TypeStart)
+			}
+			return "", 0
+		}
+	}
+	st := b.run(context.Background(), Options{})
+	if st.ExitCode != ExitOK {
+		t.Fatalf("code %d : %+v", st.ExitCode, st.Jobs)
+	}
+	if seen["COURRIER"] || seen["C/alice/Outlook"] {
+		t.Fatalf("Outlook relancé avant la fin du job qui en dépend : %v", seen)
+	}
+	if got := strings.Join(ft.types(), " "); got != "prompt_close close start" {
+		t.Fatalf("requêtes à l'icône : %s", got)
+	}
+}

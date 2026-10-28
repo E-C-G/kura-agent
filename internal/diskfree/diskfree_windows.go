@@ -1,11 +1,11 @@
 //go:build windows
 
-package selfupdate
+package diskfree
 
 import "golang.org/x/sys/windows"
 
-// FreeSpace : octets disponibles sur le volume de dir.
-func FreeSpace(dir string) (uint64, error) {
+// Free : octets disponibles sur le volume de dir.
+func Free(dir string) (uint64, error) {
 	p, err := windows.UTF16PtrFromString(dir)
 	if err != nil {
 		return 0, err

@@ -30,7 +30,12 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/E-C-G/kura-agent/internal/diskfree"
 )
+
+// FreeSpace : octets disponibles sur le volume de dir.
+func FreeSpace(dir string) (uint64, error) { return diskfree.Free(dir) }
 
 // Repo : dépôt des releases de l'agent.
 const Repo = "E-C-G/kura-agent"

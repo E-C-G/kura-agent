@@ -409,9 +409,11 @@ journal de l'exécution), retard au démarrage puis une fois par jour.
 où il tourne d'afficher une fenêtre au premier plan avec un compte à rebours de `notice_seconds` et
 deux boutons, *Fermer maintenant* et *Reporter de 1 h* (`allow_postpone`, au plus `max` fois).
 À l'échéance ou sur *Fermer maintenant*, l'icône ferme Outlook proprement (comme un clic sur la croix)
-et attend `graceful_timeout` ; ce qui reste ouvert est alors arrêté de force (`force: true`). Après les
-jobs, l'icône relance Outlook dans la session (post-tâche `start_process`), même si la sauvegarde a
-été annulée. Sans icône dans la session, ou sans réponse, `run` garde le comportement d'avant :
+et attend `graceful_timeout` ; ce qui reste ouvert est alors arrêté de force (`force: true`). L'icône
+relance Outlook dans la session (post-tâche `start_process`) dès que plus rien n'a besoin qu'il
+reste fermé : jobs marqués `depends_on_pre_task` terminés, et source des préparations qui en
+dépendent copiée (l'archive et son envoi se font ensuite, Outlook rouvert) ; au plus tard à la fin
+de l'exécution, même si la sauvegarde a été annulée. Sans icône dans la session, ou sans réponse, `run` garde le comportement d'avant :
 attente du préavis puis arrêt forcé, sans relance.
 
 Sécurité : `run` et l'icône dialoguent par le canal `\\.\pipe\Kura-<n° de session>`, ouvert par
@@ -609,7 +611,8 @@ Le format est défini dans `pkg/pack`, importé par la console : un seul code fa
    session, fait afficher le préavis par l'icône puis fermer Outlook proprement (sinon attend le
    préavis) ; cherche de nouveau et arrête de force ce qui tourne encore (`force: true`), après avoir
    revérifié le nom de chaque processus. S'il reste ouvert, les jobs marqués `depends_on_pre_task`
-   sont sautés (avertissement). Après les jobs, l'icône relance Outlook là où il a été fermé.
+   sont sautés (avertissement). L'icône relance Outlook là où il a été fermé dès que les jobs qui
+   en dépendent sont finis et que les préparations qui en dépendent ont copié leur source.
 3. Chaque source doit être un vrai dossier : une source qui est un lien symbolique ou une
    jonction est refusée (indiquer le dossier réel). Les liens **dans** une source ne sont jamais
    suivis : un utilisateur qui écrit dans une source ne doit pas pouvoir y faire entrer un
@@ -717,6 +720,13 @@ jobs:
   relue en entier (sommes CRC) et ne doit rien contenir d'autre ; avec `on_locked: fail`, aucun
   fichier ne doit manquer (fichier ou dossier illisible, nom impossible à passer à l'outil). Prévoir
   dans le dossier de données deux fois la taille de la source le temps de l'archive.
+- **Espace disque.** La zone de préparation est sur le disque du dossier de données (`C:` sous
+  Windows) : l'agent y garde toujours 2 Go libres. En dessous au départ, la préparation ne commence
+  pas ; en cours de copie ou d'archive (contrôle toutes les 2 s), elle s'arrête, l'outil est arrêté,
+  la copie et l'archive partielle sont effacées, et la préparation échoue avec l'espace restant.
+- **Outlook.** Avec `depends_on_pre_task`, Outlook reste fermé le temps de la copie de la source
+  seulement : il est relancé avant l'archive et l'envoi, qui ne lisent que la copie (sauf si un
+  autre job en dépend encore).
 - **Nom stable.** Le résultat s'appelle toujours `<id>.zip` : l'historique vient des versions du
   bucket (90 jours) et `restore --at` s'y applique tel quel.
 - **Zone de préparation.** `C:\ProgramData\Kura\staging` (SYSTEM et Administrateurs seuls),

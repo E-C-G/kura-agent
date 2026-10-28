@@ -54,6 +54,11 @@ func runZip(ctx context.Context, cfg *config.Config, p config.Prepare, d Deps, t
 	}
 	defer os.RemoveAll(copyDir)
 	c, err := copySource(ctx, p.Source, p, d.AgentDirs, flavor, copyDir)
+	if d.Copied != nil {
+		// La source n'est plus lue : un programme fermé pour elle peut repartir pendant
+		// l'archive et l'envoi, qui ne travaillent que sur la copie.
+		d.Copied()
+	}
 	if err != nil {
 		return err
 	}

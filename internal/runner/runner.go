@@ -93,6 +93,8 @@ type Deps struct {
 	PrepareCheckTool func(ctx context.Context, r prepare.Runner, path string) (string, error)
 	// EnsureStaging crée ou vérifie la zone de préparation ; défaut prepare.EnsureStaging.
 	EnsureStaging func(dir string) error
+	// FreeSpace lit l'espace libre de la zone de préparation ; nil : diskfree.Free.
+	FreeSpace func(dir string) (uint64, error)
 
 	Now        func() time.Time                                 // défaut : time.Now
 	Sleep      func(ctx context.Context, d time.Duration) error // défaut : attente annulable
@@ -219,6 +221,7 @@ func Run(ctx context.Context, cfg *config.Config, opt Options, d Deps) (state.St
 			r.prepUsers[j.Prepare]++
 		}
 	}
+	r.initHolds(jobs)
 	r.stagingReady = r.openStaging(jobs)
 	for _, id := range r.neededPrepares(jobs) {
 		if p, _ := cfg.PrepareByID(id); p.DependsOnPreTask == "" {
@@ -247,6 +250,9 @@ func Run(ctx context.Context, cfg *config.Config, opt Options, d Deps) (state.St
 		}
 		js := r.job(runCtx, j, ok)
 		r.update(func(st *state.Status) { st.Jobs = append(st.Jobs, js) })
+		if j.DependsOnPreTask != "" {
+			r.releaseHold(j.DependsOnPreTask)
+		}
 	}
 	<-preDone
 	r.update(func(st *state.Status) { st.Current = nil })
@@ -343,6 +349,14 @@ type run struct {
 	// closed : par processus (en minuscules), sessions où il a été fermé et chemin de
 	// son exécutable, pour la relance par l'icône.
 	closed map[string]map[int]string
+
+	// holds : par processus (en minuscules), ce qui a encore besoin qu'il reste fermé :
+	// jobs choisis qui en dépendent, préparations choisies qui n'ont pas fini de copier
+	// leur source. À zéro, ses post-tâches le relancent sans attendre la fin de
+	// l'exécution ; restarted note les post-tâches déjà faites.
+	holds        map[string]int
+	holdReleased map[string]bool // préparations dont la retenue est déjà levée
+	restarted    map[int]bool    // index dans cfg.PostTasks
 
 	// prepOK : préparations faites (id → réussie) ; stagingReady : zone de préparation
 	// prête (créée ou vérifiée, vidée des restes), sinon la raison.
@@ -484,8 +498,10 @@ func (r *run) runPrepare(ctx context.Context, p config.Prepare, preOK map[string
 		ps = prepare.Run(ctx, r.cfg, p, prepare.Deps{
 			Exec: r.d.PrepareExec, StagingDir: r.d.StagingDir, AgentDirs: r.d.AgentDirs,
 			CheckTool: r.d.PrepareCheckTool, Out: out, Log: r.log, Now: r.d.Now,
+			FreeSpace: r.d.FreeSpace, Copied: func() { r.releasePrepareHold(p) },
 		})
 	}
+	r.releasePrepareHold(p) // sautée, en échec avant la copie, ou simulation
 	r.prepOK[p.ID] = ps.Result == state.ResultOK || ps.Result == state.ResultWarning
 	r.prepSkipped[p.ID] = ps.Result == state.ResultSkipped
 	if ps.Result != state.ResultOK {
@@ -1060,40 +1076,100 @@ func (r *run) failureOf(ctx context.Context, err error) string {
 // tournaient : seule l'icône de cette session peut le faire (un processus de la tâche, sous SYSTEM,
 // ne peut pas ouvrir Outlook dans la session d'un utilisateur). Même après une
 // annulation : l'utilisateur doit retrouver son Outlook.
+// initHolds compte, par processus, ce qui a besoin qu'il reste fermé dans cette
+// exécution : jobs choisis marqués depends_on_pre_task, préparations choisies qui en
+// dépendent (le temps de copier leur source).
+func (r *run) initHolds(jobs []config.Job) {
+	r.holds, r.holdReleased, r.restarted = map[string]int{}, map[string]bool{}, map[int]bool{}
+	for _, j := range jobs {
+		if j.DependsOnPreTask != "" {
+			r.holds[strings.ToLower(j.DependsOnPreTask)]++
+		}
+	}
+	for _, id := range r.neededPrepares(jobs) {
+		if p, _ := r.cfg.PrepareByID(id); p.DependsOnPreTask != "" {
+			r.holds[strings.ToLower(p.DependsOnPreTask)]++
+		}
+	}
+}
+
+// releasePrepareHold : la préparation p n'a plus besoin de son programme fermé (copie
+// faite, ou préparation finie sans copie). Sans effet la seconde fois.
+func (r *run) releasePrepareHold(p config.Prepare) {
+	if p.DependsOnPreTask == "" || r.holdReleased[p.ID] {
+		return
+	}
+	r.holdReleased[p.ID] = true
+	r.releaseHold(p.DependsOnPreTask)
+}
+
+// releaseHold : une chose de moins attend que process reste fermé ; la dernière levée,
+// ses post-tâches le relancent tout de suite (Outlook rouvert pendant l'archive et
+// l'envoi, plutôt qu'à la fin de l'exécution).
+func (r *run) releaseHold(process string) {
+	key := strings.ToLower(process)
+	if r.holds[key] <= 0 {
+		return
+	}
+	if r.holds[key]--; r.holds[key] > 0 {
+		return
+	}
+	for i, p := range r.cfg.PostTasks {
+		if strings.ToLower(p.Process) == key && !r.restarted[i] {
+			r.log.Info("post-tâche : plus rien n'attend la fermeture, relance sans attendre la fin", "processus", p.Process)
+			r.postTask(i)
+		}
+	}
+}
+
+// postTasks fait les post-tâches qui n'ont pas déjà été faites en cours d'exécution.
 func (r *run) postTasks() {
+	for i := range r.cfg.PostTasks {
+		if !r.restarted[i] {
+			r.postTask(i)
+		}
+	}
+}
+
+// postTask relance, par l'icône de chaque session où il a été fermé, le processus de la
+// post-tâche i. Une seule fois par exécution ; rien en simulation.
+func (r *run) postTask(i int) {
+	if r.restarted == nil {
+		r.restarted = map[int]bool{}
+	}
+	r.restarted[i] = true
 	if r.opt.DryRun {
 		return
 	}
-	for _, p := range r.cfg.PostTasks {
-		sessions := r.closed[strings.ToLower(p.Process)]
-		if len(sessions) == 0 {
-			if !p.OnlyIfWasRunning {
-				r.log.Info("post-tâche : aucune session où relancer le processus (il n'a pas été fermé)", "processus", p.Process)
-			}
+	p := r.cfg.PostTasks[i]
+	sessions := r.closed[strings.ToLower(p.Process)]
+	if len(sessions) == 0 {
+		if !p.OnlyIfWasRunning {
+			r.log.Info("post-tâche : aucune session où relancer le processus (il n'a pas été fermé)", "processus", p.Process)
+		}
+		return
+	}
+	ids := make([]int, 0, len(sessions))
+	for s := range sessions {
+		ids = append(ids, s)
+	}
+	sort.Ints(ids)
+	for _, s := range ids {
+		log := r.log.With("processus", p.Process, "session", s)
+		if r.d.Trays == nil || !r.d.Trays.Has(s) {
+			log.Warn("post-tâche : pas d'icône dans la session, processus non relancé")
 			continue
 		}
-		ids := make([]int, 0, len(sessions))
-		for s := range sessions {
-			ids = append(ids, s)
-		}
-		sort.Ints(ids)
-		for _, s := range ids {
-			log := r.log.With("processus", p.Process, "session", s)
-			if r.d.Trays == nil || !r.d.Trays.Has(s) {
-				log.Warn("post-tâche : pas d'icône dans la session, processus non relancé")
-				continue
-			}
-			ctx, cancel := context.WithTimeout(context.Background(), replyMargin)
-			ans, err := r.d.Trays.Request(ctx, s, ipc.Msg{Type: ipc.TypeStart, Process: p.Process, Path: sessions[s]})
-			cancel()
-			switch {
-			case err != nil:
-				log.Warn("post-tâche : relance sans réponse de l'icône", "err", err)
-			case !ans.OK:
-				log.Warn("post-tâche : relance refusée ou impossible", "message", ans.Message)
-			default:
-				log.Info("post-tâche : processus relancé par l'icône")
-			}
+		ctx, cancel := context.WithTimeout(context.Background(), replyMargin)
+		ans, err := r.d.Trays.Request(ctx, s, ipc.Msg{Type: ipc.TypeStart, Process: p.Process, Path: sessions[s]})
+		cancel()
+		switch {
+		case err != nil:
+			log.Warn("post-tâche : relance sans réponse de l'icône", "err", err)
+		case !ans.OK:
+			log.Warn("post-tâche : relance refusée ou impossible", "message", ans.Message)
+		default:
+			log.Info("post-tâche : processus relancé par l'icône")
 		}
 	}
 }

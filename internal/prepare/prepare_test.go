@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/E-C-G/kura-agent/internal/execx"
 	"github.com/E-C-G/kura-agent/internal/state"
@@ -181,6 +182,98 @@ func TestZipRefusesBadToolAndEmptySource(t *testing.T) {
 	f.cfg.Prepare[0].Unavailable = "prepare[0].source : profil introuvable"
 	if ps := f.run(t, &fakeZip{}, okTool); ps.Result != state.ResultError || !strings.Contains(ps.Message, "profil") {
 		t.Fatalf("source indisponible acceptée : %+v", ps)
+	}
+}
+
+// Disque de la zone de préparation déjà sous la réserve : rien n'est copié ni lancé.
+func TestZipRefusedWhenDiskAlmostFull(t *testing.T) {
+	f := newFixture(t, filepath.Join(t.TempDir(), "zip"))
+	tool := &fakeZip{}
+	copied := 0
+	ps := Run(context.Background(), f.cfg, f.cfg.Prepare[0], Deps{
+		Exec: tool, StagingDir: f.staging, CheckTool: okTool,
+		FreeSpace: func(string) (uint64, error) { return MinFree - 1, nil },
+		Copied:    func() { copied++ },
+	})
+	if ps.Result != state.ResultError || !strings.Contains(ps.Message, "espace disque insuffisant") {
+		t.Fatalf("%+v", ps)
+	}
+	if len(tool.specs) != 0 || copied != 0 {
+		t.Fatalf("outil lancé (%d) ou source copiée (%d) malgré le disque plein", len(tool.specs), copied)
+	}
+	if left, _ := os.ReadDir(f.staging); len(left) != 0 {
+		t.Fatalf("zone non vide : %v", left)
+	}
+}
+
+// slowZip : un outil qui tourne jusqu'à son arrêt.
+type slowZip struct{ started chan struct{} }
+
+func (s *slowZip) RunSpec(ctx context.Context, _ execx.Spec) (int, error) {
+	close(s.started)
+	<-ctx.Done()
+	return -1, ctx.Err()
+}
+
+// Le disque se remplit pendant l'archive : l'outil est arrêté, la préparation échoue avec
+// la cause, et rien ne reste dans la zone.
+func TestZipStoppedWhenDiskFillsUp(t *testing.T) {
+	f := newFixture(t, filepath.Join(t.TempDir(), "zip"))
+	tool := &slowZip{started: make(chan struct{})}
+	free := func(string) (uint64, error) {
+		select {
+		case <-tool.started:
+			return 100 << 20, nil // l'archive a pris la place
+		default:
+			return 50 << 30, nil
+		}
+	}
+	ps := Run(context.Background(), f.cfg, f.cfg.Prepare[0], Deps{
+		Exec: tool, StagingDir: f.staging, CheckTool: okTool, FreeSpace: free, SpaceCheck: time.Millisecond,
+	})
+	if ps.Result != state.ResultError || !strings.Contains(ps.Message, "espace disque insuffisant") ||
+		!strings.Contains(ps.Message, "100,0 Mo libres") || strings.Contains(ps.Message, "canceled") {
+		t.Fatalf("%+v", ps)
+	}
+	if left, _ := os.ReadDir(f.staging); len(left) != 0 {
+		t.Fatalf("zone non vide : %v", left)
+	}
+}
+
+// Copied est appelé une fois, la copie faite et avant l'outil ; aussi quand la copie
+// échoue (source refusée).
+func TestZipCopiedCallback(t *testing.T) {
+	f := newFixture(t, filepath.Join(t.TempDir(), "zip"))
+	copied, toolSawCopied := 0, false
+	tool := &fakeZip{}
+	counting := runnerFunc(func(ctx context.Context, s execx.Spec) (int, error) {
+		toolSawCopied = copied == 1
+		return tool.RunSpec(ctx, s)
+	})
+	ps := Run(context.Background(), f.cfg, f.cfg.Prepare[0], Deps{
+		Exec: counting, StagingDir: f.staging, CheckTool: okTool, Copied: func() { copied++ },
+	})
+	if ps.Result != state.ResultOK || copied != 1 || !toolSawCopied {
+		t.Fatalf("%+v, appels %d, outil après la copie : %v", ps, copied, toolSawCopied)
+	}
+	copied = 0
+	ps = Run(context.Background(), f.cfg, f.cfg.Prepare[0], Deps{
+		Exec: counting, StagingDir: f.staging, CheckTool: okTool, AgentDirs: []string{f.src}, Copied: func() { copied++ },
+	})
+	if ps.Result != state.ResultError || copied != 1 {
+		t.Fatalf("%+v, appels %d", ps, copied)
+	}
+}
+
+type runnerFunc func(ctx context.Context, s execx.Spec) (int, error)
+
+func (f runnerFunc) RunSpec(ctx context.Context, s execx.Spec) (int, error) { return f(ctx, s) }
+
+func TestHumanSize(t *testing.T) {
+	for n, want := range map[uint64]string{512: "512 o", 1536: "1,5 Ko", MinFree: "2,0 Go"} {
+		if got := humanSize(n); got != want {
+			t.Errorf("humanSize(%d) = %q, attendu %q", n, got, want)
+		}
 	}
 }
 
