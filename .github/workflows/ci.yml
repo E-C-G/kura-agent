@@ -233,26 +233,23 @@ jobs:
           go test -count=1 -v -run 'TestPostgresRealExport|TestMySQLRealExport' ./internal/prepare/ 2>&1 | tee test.log || { annotate test.log; exit 1; }
 
       # mariadb-dump hors des paquets MySQL du runner (qui l'excluent) : client MariaDB
-      # extrait dans /opt/mariadb, à root ; sa bibliothèque libmariadb3 s'installe à côté
-      # de MySQL sans conflit.
+      # extrait dans /usr/lib/kura-mariadb, dossier de root (/opt du runner est ouvert à
+      # tous : l'agent y refuserait l'outil, à juste titre) ; sa bibliothèque libmariadb3
+      # s'installe à côté de MySQL sans conflit.
       - name: Client MariaDB
         run: |
           sudo apt-get update -q
           sudo apt-get install -y -q libmariadb3
           cd "$RUNNER_TEMP"
           apt-get download mariadb-client mariadb-client-core
-          for d in mariadb-client*.deb; do sudo dpkg-deb -x "$d" /opt/mariadb; done
-          # /opt du runner porte une ACL par défaut (écriture pour le compte runner) : héritée,
-          # elle ferait refuser l'outil par l'agent, à juste titre. Retirée, comme le
-          # demanderait l'agent sur un poste.
-          getfacl -p /opt | head -20
-          sudo setfacl -Rb /opt/mariadb
-          ls -l /opt/mariadb/usr/bin/ | grep -E 'mariadb|mysql'
-          /opt/mariadb/usr/bin/mariadb-dump --version
+          for d in mariadb-client*.deb; do sudo dpkg-deb -x "$d" /usr/lib/kura-mariadb; done
+          sudo setfacl -Rb /usr/lib/kura-mariadb
+          ls -l /usr/lib/kura-mariadb/usr/bin/ | grep -E 'mariadb|mysql'
+          /usr/lib/kura-mariadb/usr/bin/mariadb-dump --version
 
       - name: MariaDB
         env:
-          KURA_TEST_MYSQLDUMP: /opt/mariadb/usr/bin/mariadb-dump
+          KURA_TEST_MYSQLDUMP: /usr/lib/kura-mariadb/usr/bin/mariadb-dump
           KURA_TEST_MYSQL_TARGETS: 127.0.0.1:3307
           KURA_TEST_MYSQL_ROOT_PASSWORD: kura-ci-my
         run: |
