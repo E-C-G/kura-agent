@@ -18,13 +18,21 @@ import (
 type Census struct {
 	Files      int // fichiers comptés (hors exclusions)
 	Unreadable int // dossiers ou fichiers illisibles, ignorés
+	// Links : liens symboliques et jonctions rencontrés (hors exclusions), chemins
+	// relatifs à la source en séparateurs /. Jamais suivis par le comptage ; à exclure
+	// de aws s3 sync, qui suit les jonctions sous Windows malgré --no-follow-symlinks.
+	Links []string
 }
 
 // CountFiles compte les fichiers de root en appliquant les mêmes exclusions que
 // `aws s3 sync --exclude`. Les éléments illisibles (ex. System Volume Information)
 // sont comptés à part et ne font pas échouer le comptage.
 // Une source absente ou illisible à la racine est une erreur.
-func CountFiles(root string, excludes []string) (Census, error) {
+func CountFiles(root string, excludes []string) (Census, error) { return Scan(root, excludes) }
+
+// Scan parcourt la source sans suivre aucun lien : fichiers comptés (garde-fou) et liens
+// ou jonctions relevés (Census.Links).
+func Scan(root string, excludes []string) (Census, error) {
 	var c Census
 	st, err := os.Stat(root)
 	if err != nil {
@@ -78,7 +86,15 @@ func CountFiles(root string, excludes []string) (Census, error) {
 			}
 			return nil
 		}
-		if !d.IsDir() { // fichiers, liens symboliques, fichiers de substitution cloud…
+		if d.Type()&(fs.ModeSymlink|fs.ModeIrregular) != 0 {
+			// Lien symbolique, jonction (ou autre point de reparse : fichier à la
+			// demande de OneDrive, déduplication), vérifié par son étiquette.
+			if link, err := isLink(p); err == nil && link {
+				c.Links = append(c.Links, rel)
+				return nil // jamais compté ni parcouru
+			}
+		}
+		if !d.IsDir() { // fichiers, fichiers de substitution cloud…
 			c.Files++
 		}
 		return nil

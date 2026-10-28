@@ -114,6 +114,9 @@ type Counts struct {
 	// d'appliquer --exclude : un lien symbolique cassé dans un dossier exclu (.venv
 	// créé sous WSL…) sort en « File does not exist » et en code 2 à chaque passage.
 	SkippedExcluded int
+	// Linked : liens ou jonctions (chemins relatifs à la source) par lesquels sont passés
+	// des fichiers envoyés, d'après Counter.Linked.
+	Linked []string
 }
 
 // Counter compte les opérations au fil de la sortie et la recopie dans un io.Writer.
@@ -125,6 +128,10 @@ type Counter struct {
 	counts Counts
 	// Excluded dit si un chemin local est écarté par les exclusions du job (nil : aucun).
 	Excluded func(path string) bool
+	// Linked, appelé pour chaque fichier envoyé, dit s'il est passé par un lien ou une
+	// jonction de la source, et lequel (nil : pas de contrôle).
+	Linked func(local string) (string, bool)
+	linked map[string]bool
 }
 
 // NewCounter recopie tout ce qu'il reçoit dans out (le journal du job).
@@ -166,6 +173,17 @@ func (c *Counter) countLine(line string) {
 	switch {
 	case strings.HasPrefix(l, "upload:"):
 		c.counts.Uploaded++
+		if c.Linked != nil {
+			if rel, ok := c.Linked(uploadedPath(l)); ok {
+				if c.linked == nil {
+					c.linked = map[string]bool{}
+				}
+				if !c.linked[rel] {
+					c.linked[rel] = true
+					c.counts.Linked = append(c.counts.Linked, rel)
+				}
+			}
+		}
 	case strings.HasPrefix(l, "delete:"):
 		c.counts.Deleted++
 	case strings.HasPrefix(strings.ToLower(l), "warning: skipping file"):
@@ -175,6 +193,15 @@ func (c *Counter) countLine(line string) {
 			c.counts.Skipped++
 		}
 	}
+}
+
+// uploadedPath extrait le chemin local de « upload: <chemin> to s3://… ».
+func uploadedPath(l string) string {
+	rest := strings.TrimSpace(l[len("upload:"):])
+	if i := strings.LastIndex(rest, " to s3://"); i >= 0 {
+		return rest[:i]
+	}
+	return rest
 }
 
 // skippedPath extrait le chemin de « warning: Skipping file <chemin>. <raison>. ».

@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/E-C-G/kura-agent/internal/ipc"
+	"github.com/E-C-G/kura-agent/internal/restore"
+	"github.com/E-C-G/kura-agent/internal/state"
 	"github.com/E-C-G/kura-agent/pkg/config"
 )
 
@@ -334,4 +336,49 @@ func TestServeScopeReadAndDeleted(t *testing.T) {
 	if rels := list(&fakeTrayUser{account: `ACME\alice`, home: b.src, allowed: []string{b.src}, unreadable: []string{a}}, 4); strings.Join(rels, ",") != "../évasion.txt,sous dossier/b.txt" {
 		t.Fatalf("profil : %v", rels)
 	}
+}
+
+// M1 : ce qu'une jonction a fait entrer dans le bucket n'est jamais servi depuis l'icône,
+// même « supprimé dans le profil » : quarantaine, fichiers du coffre, dossiers de l'agent.
+func TestServeNeverServesAgentSecrets(t *testing.T) {
+	b := newToBench(t)
+	cfg, _ := b.d.loadConfig("")
+	cfg.Tray.Users = []string{"alice"}
+	at := restoreNow.AddDate(0, 0, -3)
+	for _, k := range []string{"j/wasabi.secret", "j/notes.txt", "k/hc-url.secret", "kit/acme.kura", "agent/status.json"} {
+		b.l.versions = append(b.l.versions,
+			restore.Version{Key: "acme-srv01/home/Documents/" + k, VersionID: k, LastModified: at, Size: 4},
+			restore.Version{Key: "acme-srv01/home/Documents/" + k, VersionID: k + "x", LastModified: at.Add(time.Hour), Deleted: true, Latest: true})
+	}
+	docs := filepath.Join(b.src, "Documents")
+	os.MkdirAll(docs, 0o755)
+	u := &fakeTrayUser{account: `ACME\\alice`, home: b.src, allowed: []string{b.src}}
+	w, code := startServe(t, b, u, func(sd *serveDeps) {
+		sd.quarantine = func() []state.QuarantineEntry {
+			return []state.QuarantineEntry{{Prefix: "acme-srv01/home/Documents/j"}}
+		}
+		sd.agentDirs = []string{filepath.Join(docs, "agent")}
+	})
+	<-w.hello
+	r := w.request(t, ipc.Msg{Type: ipc.TypeRestoreList, Path: docs, Restore: &ipc.RestoreData{At: &at, Req: 5}})
+	w.mu.Lock()
+	var rels []string
+	for _, f := range w.files[5] {
+		rels = append(rels, f.Rel)
+	}
+	w.mu.Unlock()
+	for _, rel := range rels {
+		if strings.HasPrefix(rel, "j/") || strings.HasSuffix(rel, ".secret") || strings.HasSuffix(rel, ".kura") || strings.HasPrefix(rel, "agent/") {
+			t.Errorf("servi : %s", rel)
+		}
+	}
+	if !strings.Contains(r.Message, "pas accessibles") {
+		t.Errorf("masquage non signalé : %q", r.Message)
+	}
+	// un dossier de l'agent ne peut pas être choisi
+	if r = w.request(t, ipc.Msg{Type: ipc.TypeRestoreList, Path: filepath.Join(docs, "agent"), Restore: &ipc.RestoreData{}}); !strings.Contains(r.Message, "dossier de Kura") {
+		t.Errorf("dossier de l'agent : %q", r.Message)
+	}
+	w.peer.Close()
+	<-code
 }

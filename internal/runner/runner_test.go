@@ -4,7 +4,9 @@ import (
 	"context"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -34,6 +36,7 @@ type fakeAWS struct {
 	behave map[string]behaviour
 	counts map[call]int
 	envs   [][]string
+	args   map[call][][]string
 }
 
 func newFakeAWS() *fakeAWS {
@@ -49,6 +52,10 @@ func (f *fakeAWS) Run(ctx context.Context, name string, args, env []string, out 
 	f.mu.Lock()
 	f.calls = append(f.calls, c)
 	f.envs = append(f.envs, env)
+	if f.args == nil {
+		f.args = map[call][][]string{}
+	}
+	f.args[c] = append(f.args[c], args)
 	n := f.counts[c]
 	f.counts[c]++
 	b := f.behave[dest]
@@ -99,17 +106,18 @@ func (f *fakeProcs) Terminate(p procs.Process) error {
 // --- banc d'essai -----------------------------------------------------------
 
 type bench struct {
-	t       *testing.T
-	cfg     *config.Config
-	aws     *fakeAWS
-	procs   *fakeProcs
-	data    string
-	outlook string
-	dir     string
-	sleeps  []time.Duration
-	onSleep func() // appelé à chaque attente (préavis, délai entre tentatives)
-	trays   Trays
-	smu     sync.Mutex
+	t           *testing.T
+	cfg         *config.Config
+	aws         *fakeAWS
+	procs       *fakeProcs
+	data        string
+	outlook     string
+	dir         string
+	sleeps      []time.Duration
+	onSleep     func() // appelé à chaque attente (préavis, délai entre tentatives)
+	trays       Trays
+	smu         sync.Mutex
+	quarantined []string
 }
 
 func newBench(t *testing.T) *bench {
@@ -158,6 +166,12 @@ func (b *bench) run(ctx context.Context, opt Options) state.Status {
 		},
 		RetryDelay: time.Minute,
 		Trays:      b.trays,
+		Quarantine: func(p []string) error {
+			b.smu.Lock()
+			b.quarantined = append(b.quarantined, p...)
+			b.smu.Unlock()
+			return nil
+		},
 	})
 	if err != nil {
 		b.t.Fatal(err)
@@ -767,5 +781,73 @@ func TestAWSEnvReachesEveryCallButNotTheLogs(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+// mkLink : jonction sous Windows (aucun privilège requis), lien symbolique ailleurs.
+func mkLink(t *testing.T, target, link string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		if out, err := exec.Command("cmd", "/c", "mklink", "/J", link, target).CombinedOutput(); err != nil {
+			t.Fatalf("mklink : %v %s", err, out)
+		}
+		return
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// M1 : une jonction posée dans une source (vers le coffre de l'agent, le profil d'un
+// autre compte) n'est jamais suivie : elle est passée à aws en exclusion.
+func TestLinksInSourceAreExcluded(t *testing.T) {
+	b := newBench(t)
+	secret := filepath.Join(b.dir, "ProgramData", "Kura", "credentials")
+	mk(t, filepath.Join(secret, "wasabi.secret"))
+	mkLink(t, secret, filepath.Join(b.outlook, "j [1]"))
+	st := b.run(context.Background(), Options{})
+	if js := b.job(st, "outlook"); js.Result != state.ResultOK {
+		t.Fatalf("%+v", js)
+	}
+	for _, args := range b.aws.args[call{"C/alice/Outlook", false}] {
+		joined := strings.Join(args, "\x00")
+		if !strings.Contains(joined, "--exclude\x00j [[]1]\x00--exclude\x00j [[]1]/*") {
+			t.Fatalf("jonction non exclue : %q", args)
+		}
+	}
+	if len(b.aws.args[call{"C/alice/Outlook", false}]) == 0 {
+		t.Fatal("pas de synchronisation")
+	}
+	// les autres jobs gardent leurs exclusions telles quelles
+	for _, args := range b.aws.args[call{"DATA", false}] {
+		if strings.Count(strings.Join(args, " "), "--exclude") != 1 {
+			t.Fatalf("exclusions du job data : %q", args)
+		}
+	}
+}
+
+// Un lien posé pendant la synchronisation, suivi par aws : job en erreur, préfixe en
+// quarantaine.
+func TestLinkAppearingDuringSyncIsQuarantined(t *testing.T) {
+	b := newBench(t)
+	secret := filepath.Join(b.dir, "ProgramData", "Kura", "credentials")
+	mk(t, filepath.Join(secret, "wasabi.secret"))
+	link := filepath.Join(b.outlook, "j")
+	b.aws.behave["C/alice/Outlook"] = func(dry bool, n int) (string, int) {
+		if dry {
+			return "", 0
+		}
+		if _, err := os.Lstat(link); err != nil {
+			mkLink(t, secret, link) // posé après le parcours préalable
+		}
+		return "upload: " + filepath.Join(link, "wasabi.secret") + " to s3://acme-srv01/C/alice/Outlook/j/wasabi.secret\n", 0
+	}
+	st := b.run(context.Background(), Options{})
+	js := b.job(st, "outlook")
+	if js.Result != state.ResultError || !strings.Contains(js.Message, "quarantaine") {
+		t.Fatalf("%+v", js)
+	}
+	if len(b.quarantined) != 1 || b.quarantined[0] != "C/alice/Outlook/j" {
+		t.Fatalf("quarantaine : %v", b.quarantined)
 	}
 }

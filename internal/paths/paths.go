@@ -71,6 +71,10 @@ func CredentialsDir() string { return current().creds }
 // PendingDir garde les bilans webhook non envoyés, renvoyés à l'exécution suivante.
 func PendingDir() string { return filepath.Join(DataDir(), "pending") }
 
+// QuarantineFile : préfixes du bucket jamais servis depuis l'icône (liens apparus
+// pendant une sauvegarde).
+func QuarantineFile() string { return filepath.Join(DataDir(), "quarantine.json") }
+
 // RestoreFile : dernière restauration (kura-agent status).
 func RestoreFile() string { return filepath.Join(DataDir(), "restore.json") }
 

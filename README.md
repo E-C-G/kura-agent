@@ -379,7 +379,10 @@ supprimé d'un dossier commun a pu appartenir à un autre compte et rien sur le 
 il se restaure par l'administrateur ; seuls les dossiers des disques du poste sont proposés (pas de
 partage réseau) ; les fichiers sont écrits **en son nom** (emprunt
 d'identité), donc à lui et seulement là où il pourrait écrire lui-même, et jamais à la place d'un
-fichier existant, même apparu pendant la restauration. Le compte ne voit jamais la clé. La date est
+fichier existant, même apparu pendant la restauration. Jamais servis depuis l'icône, quoi que
+contienne le bucket : les préfixes en quarantaine, tout chemin sous un dossier de l'agent
+(données, coffre, configuration, journaux, programme), et les fichiers du coffre et paquets de
+la console (`*.secret`, `*.kura`) où qu'ils se trouvent. Le compte ne voit jamais la clé. La date est
 bornée à 90 jours par la tâche elle-même. Pas de verrou de la sauvegarde depuis l'icône (rien n'y
 est remplacé ; un compte standard ne doit pas pouvoir bloquer la sauvegarde). Le dossier
 « Restauration Kura … » se trouve dans une source sauvegardée : il partira à la sauvegarde
@@ -605,9 +608,16 @@ Le format est défini dans `pkg/pack`, importé par la console : un seul code fa
    revérifié le nom de chaque processus. S'il reste ouvert, les jobs marqués `depends_on_pre_task`
    sont sautés (avertissement). Après les jobs, l'icône relance Outlook là où il a été fermé.
 3. Chaque source doit être un vrai dossier : une source qui est un lien symbolique ou une
-   jonction est refusée (indiquer le dossier réel). Les liens **dans** une source ne sont pas
-   suivis (`--no-follow-symlinks`) : un utilisateur qui écrit dans une source ne peut pas y
-   faire entrer un fichier qu'il ne sait pas lire.
+   jonction est refusée (indiquer le dossier réel). Les liens **dans** une source ne sont jamais
+   suivis : un utilisateur qui écrit dans une source ne doit pas pouvoir y faire entrer un
+   fichier qu'il ne sait pas lire (coffre de l'agent, profil d'un autre compte). Sous Windows,
+   la CLI AWS suit les jonctions malgré `--no-follow-symlinks` : avant chaque synchronisation,
+   l'agent parcourt donc la source (sans rien suivre), relève chaque lien symbolique et chaque
+   jonction (hors dossiers exclus) et les passe à `aws` en `--exclude` (journal du job : « lien(s)
+   ou jonction(s) non suivi(s), exclu(s) »). Pendant la synchronisation, chaque fichier envoyé est
+   contrôlé : s'il est passé par un lien apparu après le parcours, le job finit en erreur et le
+   préfixe concerné est noté dans `quarantine.json` (dossier des données) ; la restauration
+   depuis l'icône ne le sert jamais.
    Pour chaque job avec `delete: true`, **avant chaque tentative** de synchronisation : vérifie la
    source, compte ses fichiers, simule (`--dryrun`) et bloque le job si la source semble vide ou si les
    suppressions prévues dépassent les seuils. Un job bloqué ne touche pas au bucket.
