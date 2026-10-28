@@ -311,11 +311,22 @@ jobs:
       - name: GnuPG
         shell: pwsh
         run: |
-          choco install gnupg -y --no-progress
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $gpg = Get-ChildItem 'C:\Program Files*\GnuPG\bin\gpg.exe' -ErrorAction SilentlyContinue |
-            Select-Object -First 1 -ExpandProperty FullName
-          if (-not $gpg) { Write-Error "gpg introuvable"; exit 1 }
+          $out = choco install gnupg -y --no-progress 2>&1 | Out-String
+          $code = $LASTEXITCODE
+          $out
+          if ($code -ne 0) {
+            $tail = (($out -split "`n") | Select-Object -Last 40) -join '%0A'
+            Write-Output "::error title=choco gnupg::code $code%0A$tail"
+            exit $code
+          }
+          $gpg = @('C:\Program Files (x86)\GnuPG\bin\gpg.exe', 'C:\Program Files\GnuPG\bin\gpg.exe',
+                   'C:\Program Files (x86)\gnupg\bin\gpg.exe') | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $gpg) {
+            $found = (Get-ChildItem 'C:\Program Files*' -Recurse -Filter gpg.exe -ErrorAction SilentlyContinue |
+              Select-Object -ExpandProperty FullName) -join '%0A'
+            Write-Output "::error title=gpg introuvable::$found"
+            exit 1
+          }
           & $gpg --version
           "KURA_TEST_GPG=$gpg" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
