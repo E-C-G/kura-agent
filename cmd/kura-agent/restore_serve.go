@@ -48,8 +48,6 @@ type serveDeps struct {
 	restoreDeps
 	sessions func() ([]int, error)
 	dial     func(session int) (io.ReadWriteCloser, trayUser, error)
-	// quarantine : préfixes jamais servis (liens apparus pendant une sauvegarde).
-	quarantine func() []state.QuarantineEntry
 	// agentDirs : dossiers de l'agent (données, coffre, programme) : rien dessous n'est
 	// servi depuis l'icône.
 	agentDirs []string
@@ -343,7 +341,12 @@ func (ts *traySession) list(ctx context.Context, peer *ipc.Peer, m ipc.Msg, rd *
 		fail("%s est un fichier : choisir le dossier qui le contient.", dir)
 		return
 	}
-	files, hidden := ts.visible(dir, t.Key, files)
+	files, hidden, err := ts.visible(dir, t.Key, files)
+	if err != nil {
+		ts.logf("%s : %v", ts.u.Account(), err)
+		fail("%v", err)
+		return
+	}
 	var notes []string
 	if hidden {
 		notes = append(notes, "Certains fichiers ou dossiers ne vous sont pas accessibles : ils ne sont pas listés.")
@@ -410,9 +413,12 @@ func (ts *traySession) reach(dir string) (string, bool) {
 //     supprimé d'un dossier commun a pu appartenir à un autre compte, et rien sur le
 //     disque ne le prouve (un dossier se recrée, sa date se modifie) ; il se restaure
 //     par l'administrateur, en ligne de commande.
-func (ts *traySession) visible(base, keyBase string, files []restore.File) ([]restore.File, bool) {
+func (ts *traySession) visible(base, keyBase string, files []restore.File) ([]restore.File, bool, error) {
 	home := ts.u.Home()
-	files, hidden := ts.notForbidden(base, keyBase, files)
+	files, hidden, err := ts.notForbidden(base, keyBase, files)
+	if err != nil {
+		return nil, true, err
+	}
 	parentOf := func(f restore.File) string {
 		p := filepath.Join(base, filepath.FromSlash(path.Dir(f.Rel)))
 		if !within(base, p, ts.sd.windows) {
@@ -475,7 +481,7 @@ func (ts *traySession) visible(base, keyBase string, files []restore.File) ([]re
 			hidden = true
 		}
 	}
-	return out, hidden
+	return out, hidden, nil
 }
 
 // notForbidden écarte, avant tout contrôle de droits, ce que l'icône ne sert jamais :
@@ -485,10 +491,14 @@ func (ts *traySession) visible(base, keyBase string, files []restore.File) ([]re
 //     programme) ;
 //   - les fichiers du coffre et les paquets de la console (*.secret, *.kura), où qu'ils
 //     soient : un lien suivi par une sauvegarde a pu les faire entrer dans une source.
-func (ts *traySession) notForbidden(base, keyBase string, files []restore.File) ([]restore.File, bool) {
+func (ts *traySession) notForbidden(base, keyBase string, files []restore.File) ([]restore.File, bool, error) {
 	var q []state.QuarantineEntry
 	if ts.sd.quarantine != nil {
-		q = ts.sd.quarantine()
+		var err error
+		if q, err = ts.sd.quarantine(); err != nil {
+			// Illisible : rien n'est servi (jamais une quarantaine vide par défaut).
+			return nil, true, fmt.Errorf("quarantaine illisible (%v) : restauration depuis l'icône suspendue, prévenir l'administrateur", err)
+		}
 	}
 	var out []restore.File
 	hidden := false
@@ -506,7 +516,7 @@ func (ts *traySession) notForbidden(base, keyBase string, files []restore.File) 
 		}
 		out = append(out, f)
 	}
-	return out, hidden
+	return out, hidden, nil
 }
 
 // allowed vérifie un dossier demandé par la fenêtre : chemin absolu ordinaire, dans la
@@ -576,7 +586,11 @@ func (ts *traySession) run(ctx context.Context, peer *ipc.Peer, m ipc.Msg, rd *i
 		done(ipc.RestoreData{}, err.Error())
 		return
 	}
-	chosen, _ = ts.visible(l.path, l.target.Key, chosen)
+	chosen, _, err := ts.visible(l.path, l.target.Key, chosen)
+	if err != nil {
+		done(ipc.RestoreData{}, err.Error())
+		return
+	}
 	if len(chosen) == 0 {
 		done(ipc.RestoreData{}, "Ces fichiers ne vous sont plus accessibles.")
 		return

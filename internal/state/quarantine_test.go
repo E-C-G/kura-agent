@@ -1,6 +1,7 @@
 package state
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -23,5 +24,20 @@ func TestQuarantine(t *testing.T) {
 		if Quarantined(q, key) != want {
 			t.Errorf("%s : %v", key, !want)
 		}
+	}
+}
+
+// Un fichier abîmé n'est jamais écrasé : ses entrées seraient perdues.
+func TestQuarantineCorruptIsKept(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "quarantine.json")
+	os.WriteFile(p, []byte("{abîmé"), 0o644)
+	if _, err := ReadQuarantine(p); err == nil {
+		t.Fatal("lu sans erreur")
+	}
+	if err := AddQuarantine(p, []string{"x"}, time.Now()); err == nil {
+		t.Fatal("ajout sans erreur")
+	}
+	if b, _ := os.ReadFile(p); string(b) != "{abîmé" {
+		t.Fatal("fichier réécrit")
 	}
 }

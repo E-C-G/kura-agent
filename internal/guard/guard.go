@@ -88,9 +88,13 @@ func Scan(root string, excludes []string) (Census, error) {
 		}
 		if d.Type()&(fs.ModeSymlink|fs.ModeIrregular) != 0 {
 			// Lien symbolique, jonction (ou autre point de reparse : fichier à la
-			// demande de OneDrive, déduplication), vérifié par son étiquette.
-			if link, err := isLink(p); err == nil && link {
+			// demande de OneDrive, déduplication), vérifié par son étiquette. Si
+			// l'étiquette ne se lit pas (accès refusé…), traité comme un lien : exclu.
+			if link, err := isLink(p); err != nil || link {
 				c.Links = append(c.Links, rel)
+				if d.IsDir() {
+					return fs.SkipDir
+				}
 				return nil // jamais compté ni parcouru
 			}
 		}

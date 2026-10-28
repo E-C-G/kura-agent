@@ -113,7 +113,9 @@ func nearestExisting(dir string) string {
 	}
 }
 
-// mkdirOwned crée dir et ses parents manquants avec le propriétaire du dossier existant.
+// mkdirOwned crée dir et ses parents manquants (0700), puis leur donne le propriétaire o
+// (lchown : ne suit pas un lien posé entre-temps ; aucun chmod par chemin). Le dernier
+// dossier est créé privé (Windows : ACL des administrateurs dès sa création).
 func mkdirOwned(dir string, o restore.Owner) error {
 	var missing []string
 	for p := dir; ; {
@@ -129,13 +131,14 @@ func mkdirOwned(dir string, o restore.Owner) error {
 	}
 	for i := len(missing) - 1; i >= 0; i-- {
 		p := missing[i]
-		if err := os.Mkdir(p, 0o755); err != nil && !errors.Is(err, fs.ErrExist) {
-			return err
+		mk := func(p string) error { return os.Mkdir(p, 0o700) }
+		if i == 0 {
+			mk = restore.CreatePrivateDir
+		}
+		if err := mk(p); err != nil {
+			return err // y compris « existe déjà » : apparu entre-temps, pas créé par nous
 		}
 		if o.Set {
-			if err := os.Chmod(p, 0o755); err != nil {
-				return err
-			}
 			if err := os.Lchown(p, o.UID, o.GID); err != nil {
 				return err
 			}
@@ -212,7 +215,7 @@ func restoreTo(ctx context.Context, stdout, stderr io.Writer, d restoreDeps, cfg
 			dc.marker.Started.Local().Format("02/01/2006 15:04"), len(dc.resumed))
 	}
 	if problems > 0 {
-		fmt.Fprintf(stdout, "%d fichier(s) ne seront pas restaurés (noms refusés, détail au journal).\n", problems)
+		fmt.Fprintf(stdout, "%d fichier(s) ne seront pas restaurés (noms refusés ou quarantaine, détail au journal).\n", problems)
 	}
 	if code := confirmRestore(stderr, d, yes); code != 0 {
 		return code
@@ -223,7 +226,13 @@ func restoreTo(ctx context.Context, stdout, stderr io.Writer, d restoreDeps, cfg
 	if err != nil {
 		return refuse("propriétaire de %s : %v", disp(dc.dir), err)
 	}
-	if err := mkdirOwned(dc.dir, owner); err != nil {
+	if dc.exists {
+		// Dossier vide existant : réservé aux administrateurs avant d'y écrire (Windows ;
+		// refusé s'il appartient à un autre compte).
+		if err := restore.SecureExistingDir(dc.dir); err != nil {
+			return refuse("%s : %v", disp(dc.dir), err)
+		}
+	} else if err := mkdirOwned(dc.dir, owner); err != nil {
 		return refuse("création de %s : %v", disp(dc.dir), err)
 	}
 	dest, err := restore.OpenDest(dc.dir, owner)
@@ -231,6 +240,9 @@ func restoreTo(ctx context.Context, stdout, stderr io.Writer, d restoreDeps, cfg
 		return refuse("%v", err)
 	}
 	defer dest.Close()
+	// Dossier à part : fichiers de tous les comptes mêlés, droits d'origine inconnus du
+	// bucket : réservés aux administrateurs.
+	dest.Private = true
 	prog, err := dest.StartProgress(dc.marker)
 	if err != nil {
 		return refuse("%s : %v", disp(dc.dir), err)
@@ -427,7 +439,7 @@ func execute(ctx context.Context, stdout, stderr io.Writer, d restoreDeps, cfg *
 		info.Result, info.ExitCode = "partial", exitRestorePartial
 		info.Message = "Des fichiers sont en échec (détail au journal) : relancer la même commande réessaie seulement ceux-là."
 	}
-	fmt.Fprintf(logw, "Résumé : %d restauré(s) dont %d remplacé(s) (%d octets), %d laissé(s) ou déjà restauré(s), %d nom(s) refusé(s), %d en échec — %s\n",
+	fmt.Fprintf(logw, "Résumé : %d restauré(s) dont %d remplacé(s) (%d octets), %d laissé(s) ou déjà restauré(s), %d refusé(s), %d en échec — %s\n",
 		info.Files, replaced, bytes, info.Skipped, ignored, failed, info.Result)
 	if err := state.WriteAtomic(d.statusFile, info); err != nil {
 		fmt.Fprintf(stderr, "État de la restauration non enregistré : %v\n", err)
@@ -453,13 +465,17 @@ func execute(ctx context.Context, stdout, stderr io.Writer, d restoreDeps, cfg *
 		fmt.Fprintf(stdout, ", %d déjà restauré(s)", skipped)
 	}
 	if ignored > 0 {
-		fmt.Fprintf(stdout, ", %d nom(s) refusé(s)", ignored)
+		fmt.Fprintf(stdout, ", %d refusé(s)", ignored)
 	}
 	if failed > 0 {
 		fmt.Fprintf(stdout, ", %d en échec", failed)
 	}
 	if p.mode == "to" {
 		fmt.Fprintf(stdout, " — dans %s\n", p.where)
+		if p.account == "" { // ligne de commande (depuis l'icône, le compte écrit chez lui)
+			fmt.Fprintln(stdout, "Fichiers réservés aux administrateurs (le bucket ne garde pas les droits d'origine) : "+
+				"les remettre à leur propriétaire, ou restaurer en place.")
+		}
 	} else {
 		fmt.Fprintln(stdout, " — en place")
 	}
@@ -508,7 +524,7 @@ func printRestoreStatus(w io.Writer, file string) {
 	fmt.Fprintf(w, "  %s → %s\n", strings.Join(r.Paths, ", "), r.To)
 	fmt.Fprintf(w, "  %d fichier(s), %s", r.Files, humanSize(r.Bytes))
 	if r.Ignored > 0 {
-		fmt.Fprintf(w, ", %d nom(s) refusé(s)", r.Ignored)
+		fmt.Fprintf(w, ", %d refusé(s)", r.Ignored)
 	}
 	if r.Failed > 0 {
 		fmt.Fprintf(w, ", %d en échec", r.Failed)
@@ -517,4 +533,22 @@ func printRestoreStatus(w io.Writer, file string) {
 	if r.Log != "" {
 		fmt.Fprintf(w, "  journal : %s\n", r.Log)
 	}
+}
+
+// printQuarantine : préfixes en quarantaine, pour kura-agent status. Chacun signale un
+// lien ou une jonction apparu pendant une sauvegarde : une tentative à examiner.
+func printQuarantine(w io.Writer, file string) {
+	q, err := state.ReadQuarantine(file)
+	if err != nil {
+		fmt.Fprintf(w, "\nQuarantaine illisible (%v) : restaurations refusées tant qu'elle n'est pas corrigée.\n", err)
+		return
+	}
+	if len(q) == 0 {
+		return
+	}
+	fmt.Fprintf(w, "\nQuarantaine : %d préfixe(s) envoyé(s) à travers un lien apparu pendant une sauvegarde, à examiner :\n", len(q))
+	for _, e := range q {
+		fmt.Fprintf(w, "  %s (relevé le %s)\n", e.Prefix, e.At.Local().Format("02/01/2006 15:04"))
+	}
+	fmt.Fprintln(w, "  Jamais restaurés, sauf kura-agent restore --include-quarantined (administrateur, après examen).")
 }

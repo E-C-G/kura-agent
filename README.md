@@ -616,8 +616,10 @@ Le format est défini dans `pkg/pack`, importé par la console : un seul code fa
    jonction (hors dossiers exclus) et les passe à `aws` en `--exclude` (journal du job : « lien(s)
    ou jonction(s) non suivi(s), exclu(s) »). Pendant la synchronisation, chaque fichier envoyé est
    contrôlé : s'il est passé par un lien apparu après le parcours, le job finit en erreur et le
-   préfixe concerné est noté dans `quarantine.json` (dossier des données) ; la restauration
-   depuis l'icône ne le sert jamais.
+   préfixe concerné est noté dans `quarantine.json` (dossier des données) : aucune restauration
+   ne le sert (ligne de commande comprise, sauf `--include-quarantined` après examen), et
+   `kura-agent status` l'affiche. Une quarantaine illisible n'est jamais réécrite et bloque
+   les restaurations jusqu'à correction.
    Pour chaque job avec `delete: true`, **avant chaque tentative** de synchronisation : vérifie la
    source, compte ses fichiers, simule (`--dryrun`) et bloque le job si la source semble vide ou si les
    suppressions prévues dépassent les seuils. Un job bloqué ne touche pas au bucket.
@@ -776,8 +778,10 @@ destination, espace libre), espace libre comparé au volume avec 10 % de marge, 
 - toutes les écritures passent par `os.Root` : rien ne sort de la destination, et un lien
   symbolique ou une jonction rencontré arrête le fichier concerné (signalé en échec) ;
 - un fichier restauré porte la date de la sauvegarde qui l'a envoyé (la CLI AWS ne garde pas la
-  date d'origine) ; sous Windows il hérite des droits du dossier, sous Ubuntu et macOS il prend
-  le propriétaire et le groupe du dossier qui le reçoit (0644, dossiers 0755) ;
+  date d'origine) ; le bucket ne garde pas non plus les droits : dans un dossier à part, les
+  fichiers (de tous les comptes, avec `--all`) sont **réservés aux administrateurs** (Windows :
+  SYSTEM et Administrateurs seuls ; Ubuntu et macOS : root, 0600, dossiers 0700), à remettre
+  ensuite à leur propriétaire (`icacls`, `chown`) ou à restaurer en place ;
 - interrompue (Ctrl+C, coupure) ou terminée avec des fichiers en échec, la restauration laisse
   `.kura-restore.json` et `.kura-restore.done` dans la destination : la même commande relancée
   saute ce qui est fait et ne relit que le reste ; une autre restauration vers ce dossier est
@@ -793,8 +797,13 @@ plusieurs parties) ; s'il diffère, il est remplacé et l'actuel gardé à côt�
 sauvegarde (`run.lock`) : refusée si une sauvegarde tourne, et la sauvegarde planifiée qui tombe
 pendant la restauration se termine en « déjà en cours » (rattrapage selon `run_if_missed`).
 `--list` avec `--in-place` montre le plan (remis, remplacés, laissés) sans prendre le verrou.
-Relancée, la même commande ne refait que ce qui manque. Sous Ubuntu et macOS, chaque fichier prend
-le propriétaire et le groupe du dossier qui le reçoit.
+Relancée, la même commande ne refait que ce qui manque. Droits : un fichier **remplacé** reprend
+ceux de l'actuel (Windows : son ACL, protection contre l'héritage comprise ; Ubuntu et macOS :
+mode, propriétaire et groupe). Un fichier **remis** (absent) prend, sous Windows, les droits du
+dossier qui le reçoit ; sous Ubuntu et macOS, le propriétaire et le groupe de ce dossier, en
+0600 (dossiers créés 0700) : jamais lisible par tous. Un fichier système qui demandait d'autres
+droits (`/etc/passwd`, contenu d'un site web…) est à corriger après coup. Les préfixes en
+quarantaine sont refusés, sauf `--include-quarantined`.
 
 Journal : `restore-AAAAMMJJ-HHMMSS.log` dans le dossier des journaux, une ligne par fichier
 (`OK`, `REMPLACÉ`, `PRÉSENT`, `IDENTIQUE`, `DÉJÀ`, `REFUSÉ`, `ÉCHEC`, avec version, date et

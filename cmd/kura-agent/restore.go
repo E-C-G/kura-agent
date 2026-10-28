@@ -21,6 +21,7 @@ import (
 	"github.com/E-C-G/kura-agent/internal/restore"
 	"github.com/E-C-G/kura-agent/internal/selfupdate"
 	"github.com/E-C-G/kura-agent/internal/setup"
+	"github.com/E-C-G/kura-agent/internal/state"
 	"github.com/E-C-G/kura-agent/pkg/config"
 )
 
@@ -56,6 +57,9 @@ type restoreDeps struct {
 	report      func(ctx context.Context, cfg *config.Config, info report.RestoreInfo) error
 	workers     int
 	version     string
+	// quarantine : préfixes envoyés à travers un lien apparu pendant une sauvegarde ;
+	// refusés par toute restauration, sauf --include-quarantined.
+	quarantine func() ([]state.QuarantineEntry, error)
 
 	// lot 3 : restauration en place
 	lock         func() (func(), error) // verrou de la sauvegarde (run.lock)
@@ -109,6 +113,9 @@ func realRestoreDeps() restoreDeps {
 		},
 		workers: 8,
 		version: version,
+		quarantine: func() ([]state.QuarantineEntry, error) {
+			return state.ReadQuarantine(paths.QuarantineFile())
+		},
 		lock: func() (func(), error) {
 			r, err := lock.Acquire()
 			return func() { r() }, err
@@ -168,6 +175,7 @@ func runRestore(args []string, stdout, stderr io.Writer, d restoreDeps) int {
 	inPlace := fs.Bool("in-place", false, "remet à leur place les fichiers absents ; ceux qui existent sont laissés")
 	replace := fs.Bool("replace", false, "avec --in-place : remplace aussi ceux qui diffèrent, l'actuel gardé à côté")
 	yes := fs.Bool("yes", false, "sans confirmation (obligatoire hors d'un terminal)")
+	withQuarantine := fs.Bool("include-quarantined", false, "restaure aussi les préfixes en quarantaine (liens apparus pendant une sauvegarde), après examen")
 	asJSON := fs.Bool("json", false, "résultat en JSON")
 	cfgPath := fs.String("config", paths.ConfigFile(), "fichier de configuration installé")
 	pos, flags := splitPositional(args, map[string]bool{"at": true, "to": true, "config": true})
@@ -284,6 +292,27 @@ func runRestore(args []string, stdout, stderr io.Writer, d restoreDeps) int {
 			return exitRestoreBucket
 		}
 		reports = append(reports, listReport{target: t, files: restore.StateAt(vs, t, at, d.windows)})
+	}
+	// Quarantaine : ce qui est passé par un lien apparu pendant une sauvegarde ne vient
+	// pas de la source (profil d'un autre compte, coffre) ; refusé sauf demande expresse.
+	if !*withQuarantine && d.quarantine != nil {
+		q, err := d.quarantine()
+		if err != nil {
+			fmt.Fprintf(stderr, "Quarantaine illisible (%v) : la corriger, ou --include-quarantined après examen.\n", err)
+			return exitRestoreConfig
+		}
+		n := 0
+		for i := range reports {
+			for k, f := range reports[i].files {
+				if f.Problem == "" && state.Quarantined(q, f.Key) {
+					reports[i].files[k].Problem = "en quarantaine (lien apparu pendant une sauvegarde)"
+					n++
+				}
+			}
+		}
+		if n > 0 {
+			fmt.Fprintf(stderr, "Attention : %d fichier(s) en quarantaine ne seront pas restaurés (voir kura-agent status) ; --include-quarantined pour les restaurer après examen.\n", n)
+		}
 	}
 	if dest != nil {
 		return restoreTo(ctx, stdout, stderr, d, cfg, b, dest, reports, at, *all, *yes, *asJSON, args)
@@ -438,7 +467,7 @@ func printList(w io.Writer, r listReport, at time.Time, windows bool) {
 		note := ""
 		switch {
 		case f.Problem != "":
-			note = "  (nom refusé : " + f.Problem + ")"
+			note = "  (refusé : " + f.Problem + ")"
 			problems++
 		case f.DeletedSince != nil:
 			note = "  (supprimé du poste le " + f.DeletedSince.Local().Format("02/01/2006") + ")"
@@ -450,7 +479,7 @@ func printList(w io.Writer, r listReport, at time.Time, windows bool) {
 	}
 	fmt.Fprintf(w, "%d fichier(s), %s.", len(r.files), humanSize(restore.Total(r.files)))
 	if problems > 0 {
-		fmt.Fprintf(w, " %d nom(s) refusé(s) ne seraient pas restaurés.", problems)
+		fmt.Fprintf(w, " %d fichier(s) refusé(s) ne seraient pas restaurés.", problems)
 	}
 	fmt.Fprintln(w)
 }

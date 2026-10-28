@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -62,5 +63,71 @@ func TestReplaceLockedFile(t *testing.T) {
 	entries, _ := os.ReadDir(d.Dir)
 	if len(entries) != 1 {
 		t.Fatalf("restes : %v", entries)
+	}
+}
+
+// SDDL relu : « D:P » ou « D:PAI » selon l'héritage automatique.
+var (
+	privateACL    = regexp.MustCompile(`^D:P[A-Z]*\(A;;FA;;;SY\)\(A;;FA;;;BA\)$`)
+	privateDirACL = regexp.MustCompile(`^D:P[A-Z]*\(A;OICI;FA;;;SY\)\(A;OICI;FA;;;BA\)$`)
+)
+
+func daclString(t *testing.T, p string) string {
+	t.Helper()
+	sd, err := windows.GetNamedSecurityInfo(p, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sd.String()
+}
+
+// Dossier à part : fichiers réservés aux administrateurs ; remplacement : ACL de l'actuel
+// reprise, protection comprise.
+func TestWindowsRights(t *testing.T) {
+	d := newDest(t)
+	d.Private = true
+	m := &memBucket{data: map[string][]byte{"v1": []byte("bonjour")}}
+	if err := d.Write(context.Background(), m, "a.txt", Version{Key: "k", VersionID: "v1", Size: 7}); err != nil {
+		t.Fatal(err)
+	}
+	if s := daclString(t, filepath.Join(d.Dir, "a.txt")); !privateACL.MatchString(s) {
+		t.Fatalf("fichier privé : %s", s)
+	}
+
+	d2 := newDest(t)
+	cur := filepath.Join(d2.Dir, "b.txt")
+	os.WriteFile(cur, []byte("actuel"), 0o644)
+	sd, _ := windows.SecurityDescriptorFromString(privateFileSDDL)
+	dacl, _, _ := sd.DACL()
+	if err := windows.SetNamedSecurityInfo(cur, windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, dacl, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d2.Replace(context.Background(), m, "b.txt", Version{Key: "k", VersionID: "v1", Size: 7}, "x"); err != nil {
+		t.Fatal(err)
+	}
+	if s := daclString(t, cur); !privateACL.MatchString(s) {
+		t.Fatalf("ACL non reprise : %s", s)
+	}
+}
+
+// Dossier --to : créé privé ; un dossier existant appartenant à un autre compte est refusé.
+func TestPrivateDirs(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "R")
+	if err := CreatePrivateDir(p); err != nil {
+		t.Fatal(err)
+	}
+	if s := daclString(t, p); !privateDirACL.MatchString(s) {
+		t.Fatalf("%s", s)
+	}
+	if err := SecureExistingDir(p); err != nil { // créé par le test (administrateur en CI)
+		t.Logf("dossier existant : %v", err)
+	}
+	link := filepath.Join(t.TempDir(), "j")
+	if out, err := exec.Command("cmd", "/c", "mklink", "/J", link, p).CombinedOutput(); err != nil {
+		t.Fatalf("mklink : %v %s", err, out)
+	}
+	if err := SecureExistingDir(link); err == nil {
+		t.Fatal("jonction acceptée")
 	}
 }
