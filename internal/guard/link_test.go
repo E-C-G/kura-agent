@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -78,5 +79,41 @@ func TestScanFindsLinks(t *testing.T) {
 	}
 	if p := ExcludePattern("a/j [1]?*"); p[0] != "a/j [[]1][?][*]" || p[1] != "a/j [[]1][?][*]/*" {
 		t.Fatalf("%q", p)
+	}
+}
+
+// List relève les fichiers retenus, sans suivre de lien ni entrer dans un dossier de
+// l'agent, exclusions appliquées.
+func TestListSkipsLinksAndAgentDirs(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "src")
+	outside := filepath.Join(dir, "dehors")
+	for _, p := range []string{
+		filepath.Join(src, "a.txt"), filepath.Join(src, "sous", "b.txt"), filepath.Join(src, "x.tmp"),
+		filepath.Join(src, "Kura", "coffre.secret"), filepath.Join(outside, "secret.txt"),
+	} {
+		os.MkdirAll(filepath.Dir(p), 0o755)
+		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mkLink(t, outside, filepath.Join(src, "lien"))
+	agent := filepath.Join(src, "Kura")
+	if runtime.GOOS == "windows" {
+		agent = filepath.Join(src, "kura") // casse ignorée sous Windows
+	}
+	c, err := List(src, []string{"*.tmp"}, []string{agent})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Join(c.Paths, ",")
+	if got != "a.txt,sous/b.txt" {
+		t.Fatalf("fichiers retenus : %q", got)
+	}
+	if len(c.Links) != 1 || c.Links[0] != "lien" {
+		t.Errorf("lien non relevé : %v", c.Links)
+	}
+	if len(c.Skipped) != 1 || c.Skipped[0] != "Kura" {
+		t.Errorf("dossier de l'agent parcouru : %v", c.Skipped)
 	}
 }

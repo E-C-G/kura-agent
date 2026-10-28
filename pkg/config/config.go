@@ -26,6 +26,8 @@ type Config struct {
 	Schedule  Schedule   `yaml:"schedule"`
 	PreTasks  []PreTask  `yaml:"pre_tasks"`
 	PostTasks []PostTask `yaml:"post_tasks"`
+	Tools     Tools      `yaml:"tools"`
+	Prepare   []Prepare  `yaml:"prepare"`
 	Jobs      []Job      `yaml:"jobs"`
 	Tray      Tray       `yaml:"tray"`
 	Notify    Notify     `yaml:"notify"`
@@ -90,6 +92,64 @@ type PostTask struct {
 	OnlyIfWasRunning bool   `yaml:"only_if_was_running"`
 }
 
+// Tools donne le chemin absolu des outils installés sur le poste, que les préparations
+// lancent (jamais cherchés dans le PATH). Chacun est vérifié à l'installation et à chaque
+// exécution : présent, version reconnue, modifiable par les administrateurs seuls.
+type Tools struct {
+	PgDump    string `yaml:"pg_dump"`
+	MySQLDump string `yaml:"mysqldump"`
+	SQLCmd    string `yaml:"sqlcmd"`
+	Zip       string `yaml:"zip"` // Info-ZIP zip, ou 7-Zip (7z, 7za, 7zz)
+	GPG       string `yaml:"gpg"`
+}
+
+// Types de préparation.
+const (
+	PrepareZip      = "zip"
+	PrepareDBExport = "db_export"
+	PrepareGPG      = "gpg"
+	PrepareAge      = "age"
+)
+
+// Prepare est une préparation : avant les jobs, elle écrit un résultat (archive, export,
+// chiffré) dans la zone de préparation de l'agent, sous un dossier à son id ; un job
+// l'envoie au bucket en prenant ${STAGING:<id>} pour source.
+type Prepare struct {
+	ID               string   `yaml:"id"`
+	Type             string   `yaml:"type"`
+	Timeout          Duration `yaml:"timeout"`
+	DependsOnPreTask string   `yaml:"depends_on_pre_task"`
+
+	// zip
+	Source   string   `yaml:"source"`
+	Exclude  []string `yaml:"exclude"`
+	Level    string   `yaml:"level"`     // deflate (défaut) | store
+	OnLocked string   `yaml:"on_locked"` // fail (défaut) | skip
+
+	// Unavailable : la source ne se résout pas sur cette machine (compte supprimé) ; la
+	// préparation échoue avec ce message, les autres continuent. Rempli par Expand.
+	Unavailable string `yaml:"-"`
+}
+
+// Niveaux de compression et conduite devant un fichier illisible (zip).
+const (
+	LevelDeflate  = "deflate"
+	LevelStore    = "store"
+	OnLockedFail  = "fail"
+	OnLockedSkip  = "skip"
+	stagingPrefix = "${STAGING:"
+)
+
+// PrepareByID renvoie la préparation d'identifiant id.
+func (c *Config) PrepareByID(id string) (Prepare, bool) {
+	for _, p := range c.Prepare {
+		if p.ID == id {
+			return p, true
+		}
+	}
+	return Prepare{}, false
+}
+
 // Job est une synchronisation source locale -> préfixe du bucket.
 type Job struct {
 	ID               string   `yaml:"id"`
@@ -100,6 +160,10 @@ type Job struct {
 	Exclude          []string `yaml:"exclude"`
 	Guard            *Guard   `yaml:"guard"`
 	DependsOnPreTask string   `yaml:"depends_on_pre_task"`
+
+	// Prepare : id de la préparation dont le job envoie le résultat (source
+	// ${STAGING:<id>}) ; vide pour un job ordinaire. Rempli par Expand.
+	Prepare string `yaml:"-"`
 
 	// Unavailable : la source ou la destination ne se résout pas sur cette machine
 	// (ex. ${PROFILE:bob} d'un compte supprimé). Le job finit en erreur avec ce
@@ -258,6 +322,9 @@ type LoadOptions struct {
 	// CheckSystem vérifie l'existence des sources et des comptes sur la machine.
 	// kura-ctl le désactive : il génère des configs pour d'autres machines.
 	CheckSystem bool
+	// StagingDir : zone de préparation de l'agent sur cette machine. Non vide, la source
+	// ${STAGING:<id>} d'un job devient <StagingDir>/<id> ; vide (kura-ctl), elle reste telle quelle.
+	StagingDir string
 }
 
 // Load lit, complète, développe et valide un fichier de configuration.
@@ -293,6 +360,9 @@ func Parse(data []byte, opt LoadOptions) (*Config, error) {
 	if err := c.Expand(env); err != nil {
 		return nil, err
 	}
+	if opt.StagingDir != "" {
+		c.ResolveStaging(opt.StagingDir)
+	}
 	if err := c.Validate(ValidateOptions{CheckSystem: opt.CheckSystem, Env: env}); err != nil {
 		return nil, err
 	}
@@ -318,6 +388,20 @@ func (c *Config) ApplyDefaults() {
 		p := &c.PreTasks[i]
 		if p.GracefulTimeout.Duration == 0 {
 			p.GracefulTimeout.Duration = 60 * time.Second
+		}
+	}
+	for i := range c.Prepare {
+		p := &c.Prepare[i]
+		if p.Timeout.Duration == 0 {
+			p.Timeout.Duration = time.Hour
+		}
+		if p.Type == PrepareZip {
+			if p.Level == "" {
+				p.Level = LevelDeflate
+			}
+			if p.OnLocked == "" {
+				p.OnLocked = OnLockedFail
+			}
 		}
 	}
 	for i := range c.Jobs {

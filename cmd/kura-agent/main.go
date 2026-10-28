@@ -209,7 +209,7 @@ func cmdRun(args []string) int {
 	defer release()
 	recoverInterruptedUpdate()
 
-	cfg, err := config.Load(*cfgPath, config.LoadOptions{})
+	cfg, err := config.Load(*cfgPath, config.LoadOptions{StagingDir: paths.StagingDir()})
 	if err == nil {
 		err = platformConfig(cfg)
 	}
@@ -290,6 +290,9 @@ func cmdRun(args []string) int {
 		Quarantine: func(p []string) error {
 			return state.AddQuarantine(paths.QuarantineFile(), p, time.Now())
 		},
+		StagingDir:  paths.StagingDir(),
+		PrepareExec: execx.System{},
+		AgentDirs:   agentDirs(),
 	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -369,13 +372,19 @@ func cmdValidate(args []string) int {
 		fmt.Printf("OK     %s\n", label)
 	}
 
-	cfg, err := config.Load(*cfgPath, config.LoadOptions{CheckSystem: true})
+	cfg, err := config.Load(*cfgPath, config.LoadOptions{CheckSystem: true, StagingDir: paths.StagingDir()})
 	check("configuration "+*cfgPath, err)
 	if cfg == nil {
 		return runner.ExitConfig
 	}
 	if err := platformConfig(cfg); err != nil {
 		check("fonctions demandées sous "+platform.OSName(), err)
+	}
+	for _, t := range checkPrepareTools(cfg) {
+		check(t.Field+" "+t.Path, t.Err)
+		if t.Err == nil && t.Version != "" {
+			fmt.Printf("       version %s\n", t.Version)
+		}
 	}
 	aws, err := resolveAWS(cfg.Profile.AWSCLI)
 	check("AWS CLI", err)
@@ -571,6 +580,13 @@ func printSummary(w io.Writer, st *state.Status) {
 	}
 	for _, p := range st.PreTasks {
 		fmt.Fprintf(w, "  pré-tâche %-12s %s : %d trouvé(s), %d arrêté(s) %s\n", p.Process, label(p.Result), p.Found, p.Closed, p.Message)
+	}
+	for _, p := range st.Prepares {
+		fmt.Fprintf(w, "  préparation %-10s %-16s %s · %d fichier(s) · %s · %.0f s", p.ID, label(p.Result), p.Type, p.Files, humanSize(p.Size), p.DurationS)
+		if p.Message != "" {
+			fmt.Fprintf(w, "\n             %s", p.Message)
+		}
+		fmt.Fprintln(w)
 	}
 	for _, j := range st.Jobs {
 		fmt.Fprintf(w, "  job %-10s %-24s envois %d · suppressions %d · %.0f s", j.ID, label(j.Result), j.Uploaded, j.Deleted, j.DurationS)

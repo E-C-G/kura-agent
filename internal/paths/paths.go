@@ -80,3 +80,7 @@ func RestoreFile() string { return filepath.Join(DataDir(), "restore.json") }
 
 // SuspendFile est la suspension de la planification (kura-agent suspend).
 func SuspendFile() string { return filepath.Join(DataDir(), "suspend.json") }
+
+// StagingDir : zone de préparation (exports, archives) remplie avant les jobs et vidée
+// à la fin de chaque exécution ; réservée à l'agent.
+func StagingDir() string { return filepath.Join(DataDir(), "staging") }

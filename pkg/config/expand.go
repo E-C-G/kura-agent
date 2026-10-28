@@ -65,6 +65,10 @@ func ExpandString(s string, env Env) (string, error) {
 			}
 			return toSlash(dir)
 		}
+		if name == "STAGING" {
+			firstErr = fmt.Errorf("%s : ${STAGING:<id>} s'emploie seul, comme source d'un job", m)
+			return m
+		}
 		if hasArg {
 			firstErr = fmt.Errorf("%s : seule ${PROFILE:compte} accepte un argument", m)
 			return m
@@ -97,17 +101,50 @@ func (c *Config) Expand(env Env) error {
 		}
 	}
 	exp("profile.aws_cli", &c.Profile.AWSCLI, nil)
+	for i := range c.Prepare {
+		p := &c.Prepare[i]
+		if p.Source == "" {
+			continue
+		}
+		v, err := ExpandString(p.Source, env)
+		var unresolved UnresolvedError
+		switch {
+		case err == nil:
+			p.Source = v
+		case errors.As(err, &unresolved):
+			p.Unavailable = fmt.Sprintf("prepare[%d].source : %v", i, err)
+		default:
+			errs = append(errs, FieldError{Field: fmt.Sprintf("prepare[%d].source", i), Msg: err.Error()})
+		}
+	}
 	for i := range c.Jobs {
 		j := &c.Jobs[i]
 		f := fmt.Sprintf("jobs[%d]", i)
 		exp(f+".name", &j.Name, j)
-		exp(f+".source", &j.Source, j)
+		if m := stagingSource.FindStringSubmatch(j.Source); m != nil {
+			j.Prepare = m[1] // résolue par ResolveStaging, sur la machine de l'agent
+		} else {
+			exp(f+".source", &j.Source, j)
+		}
 		exp(f+".destination", &j.Destination, j)
 	}
 	if len(errs) > 0 {
 		return errs
 	}
 	return nil
+}
+
+// stagingSource : source d'un job tirée d'une préparation, ${STAGING:<id>}.
+var stagingSource = regexp.MustCompile(`^\$\{STAGING:([a-z0-9-]+)\}$`)
+
+// ResolveStaging remplace la source ${STAGING:<id>} des jobs par <dir>/<id>, le dossier
+// de la préparation dans la zone de préparation de cette machine.
+func (c *Config) ResolveStaging(dir string) {
+	for i := range c.Jobs {
+		if j := &c.Jobs[i]; j.Prepare != "" {
+			j.Source = toSlash(dir) + "/" + j.Prepare
+		}
+	}
 }
 
 func toSlash(p string) string { return strings.ReplaceAll(p, `\`, "/") }

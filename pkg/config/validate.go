@@ -139,6 +139,76 @@ func (c *Config) Validate(opt ValidateOptions) error {
 		}
 	}
 
+	// tools
+	for _, t := range []struct{ field, path string }{
+		{"tools.pg_dump", c.Tools.PgDump}, {"tools.mysqldump", c.Tools.MySQLDump}, {"tools.sqlcmd", c.Tools.SQLCmd},
+		{"tools.zip", c.Tools.Zip}, {"tools.gpg", c.Tools.GPG},
+	} {
+		if t.path != "" && !absPath(t.path) {
+			add(t.field, "chemin absolu attendu (l'outil n'est jamais cherché dans le PATH), reçu %q", t.path)
+		}
+	}
+	if c.Tools.Zip != "" && ZipFlavor(c.Tools.Zip) == "" {
+		add("tools.zip", "%q : zip (Info-ZIP) ou 7z, 7za, 7zz (7-Zip) attendu", c.Tools.Zip)
+	}
+
+	// prepare
+	prepares := map[string]int{}
+	for i, pr := range c.Prepare {
+		f := fmt.Sprintf("prepare[%d]", i)
+		switch _, dup := prepares[pr.ID]; {
+		case pr.ID == "":
+			add(f+".id", "obligatoire")
+		case !idPattern.MatchString(pr.ID):
+			add(f+".id", "%q : minuscules, chiffres et '-' uniquement", pr.ID)
+		case dup:
+			add(f+".id", "%q déjà utilisé", pr.ID)
+		default:
+			prepares[pr.ID] = i
+		}
+		if pr.Timeout.Duration < 0 {
+			add(f+".timeout", "durée négative")
+		}
+		if pr.DependsOnPreTask != "" && !preProcesses[strings.ToLower(pr.DependsOnPreTask)] {
+			add(f+".depends_on_pre_task", "aucune pré-tâche ne ferme %q", pr.DependsOnPreTask)
+		}
+		switch pr.Type {
+		case PrepareZip:
+			if c.Tools.Zip == "" {
+				add(f+".type", "zip demande tools.zip : chemin absolu de zip (Info-ZIP) ou de 7z (7-Zip), installé sur le poste")
+			}
+			switch {
+			case pr.Source == "":
+				add(f+".source", "obligatoire (dossier à archiver)")
+			case pr.Unavailable != "":
+				if opt.CheckSystem {
+					add(f+".source", "%s", pr.Unavailable)
+				}
+			case !absPath(pr.Source):
+				add(f+".source", "chemin absolu attendu, reçu %q", pr.Source)
+			case opt.CheckSystem:
+				if st, err := os.Stat(pr.Source); err != nil {
+					add(f+".source", "%q inaccessible : %v", pr.Source, err)
+				} else if !st.IsDir() {
+					add(f+".source", "%q n'est pas un dossier", pr.Source)
+				}
+			}
+			if pr.Level != LevelDeflate && pr.Level != LevelStore {
+				add(f+".level", "valeur %q inconnue (deflate, store)", pr.Level)
+			}
+			if pr.OnLocked != OnLockedFail && pr.OnLocked != OnLockedSkip {
+				add(f+".on_locked", "valeur %q inconnue (fail, skip)", pr.OnLocked)
+			}
+		case PrepareDBExport, PrepareGPG, PrepareAge:
+			add(f+".type", "type %q pas encore disponible dans cette version de l'agent (zip seulement)", pr.Type)
+		case "":
+			add(f+".type", "obligatoire (zip)")
+		default:
+			add(f+".type", "type %q inconnu (zip, db_export, gpg, age)", pr.Type)
+		}
+	}
+	usedPrepares := map[string]bool{}
+
 	// jobs
 	if len(c.Jobs) == 0 {
 		add("jobs", "au moins un job")
@@ -161,6 +231,12 @@ func (c *Config) Validate(opt ValidateOptions) error {
 		ids[j.ID] = true
 
 		switch {
+		case j.Prepare != "":
+			// Zone de préparation : remplie à chaque exécution, absente avant.
+			if _, ok := prepares[j.Prepare]; !ok {
+				add(f+".source", "${STAGING:%s} : aucune préparation n'a cet id", j.Prepare)
+			}
+			usedPrepares[j.Prepare] = true
 		case j.Source == "":
 			add(f+".source", "obligatoire")
 		case j.Unavailable != "":
@@ -200,6 +276,12 @@ func (c *Config) Validate(opt ValidateOptions) error {
 		}
 		if j.DependsOnPreTask != "" && !preProcesses[strings.ToLower(j.DependsOnPreTask)] {
 			add(f+".depends_on_pre_task", "aucune pré-tâche ne ferme %q", j.DependsOnPreTask)
+		}
+	}
+
+	for i, pr := range c.Prepare {
+		if pr.ID != "" && !usedPrepares[pr.ID] {
+			add(fmt.Sprintf("prepare[%d].id", i), "%q : aucun job ne l'envoie (source: ${STAGING:%s})", pr.ID, pr.ID)
 		}
 	}
 
@@ -282,6 +364,34 @@ func (c *Config) Validate(opt ValidateOptions) error {
 		return errs
 	}
 	return nil
+}
+
+// absPath : chemin absolu Windows (C:\… ou C:/…) ou Unix (/…), quel que soit le système
+// qui vérifie (kura-ctl prépare des configurations pour d'autres postes).
+func absPath(p string) bool {
+	return strings.HasPrefix(p, "/") || drivePath.MatchString(p)
+}
+
+var drivePath = regexp.MustCompile(`^[A-Za-z]:[\\/]`)
+
+// Saveurs d'outil zip.
+const (
+	ZipInfoZIP = "info-zip"
+	Zip7Zip    = "7-zip"
+)
+
+// ZipFlavor reconnaît l'outil de tools.zip à son nom : Info-ZIP (zip) ou 7-Zip (7z, 7za,
+// 7zz) ; "" sinon.
+func ZipFlavor(path string) string {
+	base := strings.ToLower(path[strings.LastIndexAny(path, `/\`)+1:])
+	base = strings.TrimSuffix(base, ".exe")
+	switch base {
+	case "zip":
+		return ZipInfoZIP
+	case "7z", "7za", "7zz":
+		return Zip7Zip
+	}
+	return ""
 }
 
 // nested indique si deux préfixes S3 se recouvrent (identiques ou l'un dans l'autre).

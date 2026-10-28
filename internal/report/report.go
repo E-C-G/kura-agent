@@ -198,6 +198,13 @@ func Summary(st state.Status) string {
 		}
 		b.WriteString("\n")
 	}
+	for _, p := range st.Prepares {
+		fmt.Fprintf(&b, "préparation %s (%s) : %s, %d fichier(s), %d octet(s), %.0f s", p.ID, p.Type, p.Result, p.Files, p.Size, p.DurationS)
+		if p.Message != "" {
+			fmt.Fprintf(&b, " — %s", p.Message)
+		}
+		b.WriteString("\n")
+	}
 	for _, j := range st.Jobs {
 		fmt.Fprintf(&b, "job %s : %s, %d envoi(s), %d suppression(s), %.0f s", j.ID, j.Result, j.Uploaded, j.Deleted, j.DurationS)
 		if j.Message != "" {

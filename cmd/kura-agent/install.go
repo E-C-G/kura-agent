@@ -257,12 +257,18 @@ func install(sys system, opt installOptions) int {
 	} else if cfgData, err = os.ReadFile(cfgPath); err != nil {
 		return fail(exitInstallConfig, "lecture de la configuration : %v", err)
 	}
-	cfg, err := config.Parse(cfgData, config.LoadOptions{CheckSystem: true})
+	cfg, err := config.Parse(cfgData, config.LoadOptions{CheckSystem: true, StagingDir: paths.StagingDir()})
 	if err != nil {
 		if pkg != nil {
 			return fail(exitInstallConfig, "configuration du paquet : %v", err)
 		}
 		return fail(exitInstallConfig, "%v", err)
+	}
+	for _, t := range checkPrepareTools(cfg) {
+		if t.Err != nil {
+			return fail(exitInstallConfig, "%s : %v", t.Field, t.Err)
+		}
+		step("%s : %s (version %s)", t.Field, t.Path, t.Version)
 	}
 	if pkg != nil {
 		if cfg.Profile.Bucket != pkg.Bucket {

@@ -21,6 +21,7 @@ Console d'administration associée : [E-C-G/kura-ctl](https://github.com/E-C-G/k
 | 5 ter | `install --package` : poste installé en une fois depuis un paquet de la console, CLI AWS comprise | **fait** |
 | 6 | Restauration : historique, état à une date (lot 1), vers un dossier à part, journal, bilan (lot 2), en place (lot 3), depuis l'icône pour ses propres fichiers (lot 4) | **fait** |
 | 7 | `self-update` : recherche et vérification de l'attestation GitHub, installation, retour arrière, icône | **fait** |
+| 8 | Préparations avant les jobs : archive zip (lot 1) ; exports de bases (lot 2), chiffrement gpg et age (lot 3) | lot 1 **fait** |
 
 Commandes disponibles : `run`, `validate`, `status`, `credentials`, `import`, `install`, `uninstall`,
 `suspend`, `tray`, `self-update`, `restore`, `version`.
@@ -505,6 +506,8 @@ L'agent envoie en `POST` un bilan JSON à la fin de chaque exécution réelle :
 
 - `success` est vrai quand tous les jobs configurés ont tourné sans erreur ; `partial` quand
   l'exécution a été lancée avec `--job`.
+- `prepares` (seulement si des préparations ont tourné) : `id`, `type`, `result`, `files`, `size`
+  (octets), `message`.
 - Avec `token` seul, l'en-tête `X-Kura-Token` porte le jeton. Avec `hmac: true`, le jeton ne
   voyage plus : `X-Kura-Timestamp` et `X-Kura-Signature: sha256=<hex>`, HMAC-SHA256 de
   `<timestamp>.<corps>` avec le jeton, permettent au broker de vérifier l'origine du bilan et de
@@ -665,6 +668,60 @@ toute la passe était à refaire. L'agent lance `aws.exe` avec `AWS_RETRY_MODE=s
 `AWS_MAX_ATTEMPTS=10` : chaque requête est réessayée, avec une pause croissante plafonnée à
 20 s, pendant environ 2 minutes. Au-delà, l'agent relance la commande entière (2 nouvelles
 tentatives à 5 min d'intervalle, voir plus haut).
+
+## Préparations : archive zip avant les jobs
+
+Une préparation écrit, avant les jobs, un fichier que la synchronisation seule ne sait pas
+sauvegarder proprement ; un job ordinaire l'envoie ensuite en prenant `${STAGING:<id>}` pour
+source. Cette version fait les archives zip (un dossier de dizaines de milliers de petits
+fichiers, ou à sauvegarder d'un bloc) ; les exports de bases et le chiffrement suivront.
+
+```yaml
+tools:                             # outils installés sur le poste, chemins absolus
+  zip: "C:/Program Files/7-Zip/7z.exe"   # ou /usr/bin/zip (Info-ZIP)
+
+prepare:
+  - id: courrier
+    type: zip
+    source: "D:/Courrier"
+    exclude: ["*.tmp"]
+    level: deflate                 # deflate (défaut) | store
+    on_locked: fail                # fail (défaut) | skip : fichier illisible laissé de côté, avertissement
+    timeout: 1h                    # défaut 1 h
+    depends_on_pre_task: outlook.exe   # facultatif (Windows) : attendre la fermeture d'Outlook
+
+jobs:
+  - id: courrier
+    name: Courrier
+    source: "${STAGING:courrier}"
+    destination: COURRIER
+    delete: true
+```
+
+- **Outils.** L'agent n'installe ni ne cherche aucun outil : `tools.zip` donne le chemin absolu
+  d'Info-ZIP `zip` (3.0 ou plus) ou de 7-Zip `7z` (16.02 ou plus). À l'installation, dans
+  `validate` puis à chaque exécution, l'outil doit exister, donner une version reconnue, et ni lui
+  ni ses dossiers parents ne doivent être modifiables par un autre compte que les administrateurs
+  (Windows : propriétaire et droits de chaque dossier, jonctions refusées ; Linux, macOS : root,
+  sans écriture pour les autres). Sinon un utilisateur ferait exécuter son code par l'agent.
+  L'outil tourne avec un environnement réduit (aucune variable de l'agent).
+- **Archive.** L'agent parcourt la source lui-même, avec les règles du garde-fou : liens et
+  jonctions jamais suivis, exclusions appliquées, dossiers de l'agent laissés de côté. L'outil ne
+  reçoit que la liste des fichiers retenus (`zip -y -nw -@`, `7z a -tzip -snl -spd @liste`). L'archive
+  est relue en entière (sommes CRC) et ne doit contenir rien d'autre que cette liste ; avec
+  `on_locked: fail`, aucun fichier ne doit manquer.
+- **Nom stable.** Le résultat s'appelle toujours `<id>.zip` : l'historique vient des versions du
+  bucket (90 jours) et `restore --at` s'y applique tel quel.
+- **Zone de préparation.** `C:\ProgramData\Kura\staging` (SYSTEM et Administrateurs seuls),
+  `/var/lib/kura/staging` (compte kura-agent, 0700) ; une préparation écrit dans `<id>.tmp`, renommé
+  `<id>` une fois réussie ; la zone est vidée à la fin de chaque exécution, réussie ou non.
+- **Échec.** Le job qui en dépend est sauté (code 2) : rien de partiel ni d'ancien n'est envoyé ;
+  les autres jobs continuent. Une préparation ne tourne que si un job choisi en dépend (`run --job`),
+  jamais en simulation. Résultat, nombre de fichiers et taille : `status.json`, `kura-agent status`,
+  bilan (`prepares` dans le webhook), journal `prepare-<id>.log` de l'exécution.
+- **Validation.** `${STAGING:x}` doit nommer une préparation, chaque préparation doit être envoyée par
+  un job, `tools.zip` est obligatoire pour une préparation zip. `db_export`, `gpg` et `age` sont
+  refusés par cette version.
 
 ## Nouvelles versions : `kura-agent self-update`
 
@@ -847,12 +904,14 @@ C:\ProgramData\Kura\
 ├── suspend.json             suspension en cours (kura-agent suspend)
 ├── restore.json             dernière restauration (kura-agent status)
 ├── credentials\             secrets chiffrés (administrateurs seulement)
+├── staging\                 préparations (archives) le temps d'une exécution, vidée à la fin
 ├── pending\                 bilans webhook en attente de renvoi
 └── logs\
     ├── restore-20261028-111203.log   une restauration, une ligne par fichier
     └── runs\2026-10-24_2230\
         ├── run.log          déroulé de l'exécution
         ├── data.log         commandes et sortie brute d'aws pour le job "data"
+        ├── prepare-courrier.log   sortie de l'outil zip de la préparation "courrier"
         └── outlook.log
 ```
 
@@ -882,6 +941,7 @@ internal/awsinstall/ CLI AWS absente : MSI fourni ou téléchargé, signature Am
 internal/schedtask/ tâches \Kura\Sync et \Kura\Restore : XML du Planificateur, schtasks
 internal/paths/     emplacements sur disque
 internal/selfupdate/ nouvelles versions : releases GitHub, attestation de release vérifiée (sigstore-go)
+internal/prepare/   préparations : outils vérifiés (droits, version), zone de préparation, archive zip
 internal/restore/   restauration : chemin → clé, versions du bucket (SDK AWS), état à une date, écriture confinée
 ```
 
