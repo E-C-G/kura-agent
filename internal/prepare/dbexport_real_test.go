@@ -95,7 +95,7 @@ func TestPostgresRealExport(t *testing.T) {
 	if ps.Result != state.ResultOK || !slices.Contains(ps.Databases, "compta") || !slices.Contains(ps.Databases, weird) {
 		t.Fatalf("%+v\n%s", ps, log)
 	}
-	for _, f := range []string{"compta.dump", "L%27atelier = 2.dump", "globals.sql"} {
+	for _, f := range []string{"compta.dump", "L%27atelier %3D 2.dump", "globals.sql"} {
 		if _, err := os.Stat(filepath.Join(dir, f)); err != nil {
 			t.Fatalf("%s : %v", f, err)
 		}
