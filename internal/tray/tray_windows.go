@@ -3,6 +3,7 @@
 package tray
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -23,6 +24,7 @@ import (
 	"github.com/E-C-G/kura-agent/internal/ipc"
 	"github.com/E-C-G/kura-agent/internal/paths"
 	"github.com/E-C-G/kura-agent/internal/schedtask"
+	"github.com/E-C-G/kura-agent/internal/selfupdate"
 	"github.com/E-C-G/kura-agent/internal/state"
 	"github.com/E-C-G/kura-agent/pkg/config"
 )
@@ -43,6 +45,8 @@ const (
 	cmdOpenConfig
 	cmdCheckConfig
 	cmdAbout
+	cmdUpdate
+	cmdCheckUpdate
 	cmdQuit
 )
 
@@ -76,6 +80,16 @@ type app struct {
 	promptMu  sync.Mutex // un préavis à la fois
 	promptSeq int        // numéro du préavis affiché (sous mu)
 	listener  *ipc.Listener
+
+	// Mise à jour (thread de l'interface).
+	admin         bool              // membre du groupe Administrateurs du poste
+	mutex         windows.Handle    // Local\Kura-Tray, rendu avant une relance
+	update        selfupdate.Status // update.json
+	updating      string            // étape annoncée par self-update
+	updatingSince time.Time         // dernière nouvelle de self-update
+	updatedToast  bool              // notification « mis à jour » déjà vue
+	checkingMu    sync.Mutex
+	checkingSince time.Time
 }
 
 // Main lance l'icône dans la session courante. Elle se ferme aussitôt pour un compte
@@ -104,8 +118,10 @@ func Main(opt Options) int {
 	if m == 0 || errors.Is(err, windows.ERROR_ALREADY_EXISTS) {
 		return 0 // déjà une icône dans cette session
 	}
+	a.mutex = windows.Handle(m)
 	_ = windows.ProcessIdToSessionId(windows.GetCurrentProcessId(), &a.session)
 	a.exe, _ = os.Executable()
+	a.admin = isAdminMember()
 	procSetProcessDpiAwarenessCtx.Call(^uintptr(3)) // DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 (-4)
 
 	if _, err := loadTaskDialog(); err != nil {
@@ -265,12 +281,21 @@ func (a *app) reload() {
 		st = a.status
 	}
 	susp, _ := state.ReadSuspension(paths.SuspendFile())
+	if u, err := selfupdate.ReadStatus(filepath.Join(paths.DataDir(), selfupdate.StatusFileName)); err == nil {
+		a.update = u
+	}
+	// self-update lancé mais jamais joint (icône hors de son dossier, arrêt brutal) :
+	// l'entrée de menu ne reste pas grisée.
+	if a.updating != "" && time.Since(a.updatingSince) > 15*time.Minute {
+		a.updating = ""
+	}
 
 	a.mu.Lock()
 	connected := a.peer != nil
 	a.mu.Unlock()
 	now := time.Now()
-	in := Input{Status: st, Config: a.cfg, ConfigErr: a.cfgErr, Suspension: susp, User: a.user, Connected: connected, Now: now}
+	in := Input{Status: st, Config: a.cfg, ConfigErr: a.cfgErr, Suspension: susp, User: a.user, Connected: connected, Now: now,
+		Version: a.opt.Version, Admin: a.admin, Update: a.update, Updating: a.updating}
 	v := Compute(in)
 
 	toastOn := []string{"failure", "warning"}
@@ -291,6 +316,7 @@ func (a *app) reload() {
 		a.balloon(*t, "")
 	}
 	a.status, a.seenStatus, a.view = st, true, v
+	a.updatedNotice()
 
 	if v.Running {
 		procSetTimer.Call(a.hwnd, timerAnimate, 600, 0)
@@ -340,6 +366,7 @@ func (a *app) addIcon() {
 	procShellNotifyIconW.Call(nimSetVersion, uintptr(unsafe.Pointer(&n)))
 	a.iconAdded = true
 	a.currentIcon = n.Icon
+	a.updatedNotice()
 	if t := LateToast(a.view, a.lastLate, time.Now()); t != nil {
 		a.lastLate = time.Now()
 		a.balloon(*t, "")
@@ -418,6 +445,16 @@ func (a *app) showMenu() {
 		}
 		procAppendMenuW.Call(menu, mfPopup, sub, uintptr(unsafe.Pointer(utf16("Suspendre"))))
 	}
+	if v.UpdateLabel != "" {
+		flags := uintptr(mfString)
+		if !v.UpdateEnabled {
+			flags |= mfGrayed
+		}
+		add(menu, flags, cmdUpdate, v.UpdateLabel)
+	}
+	if v.ShowCheckUpdate {
+		add(menu, mfString, cmdCheckUpdate, "Rechercher une mise à jour")
+	}
 	sep()
 	add(menu, mfString, cmdOpenLogs, "Ouvrir les journaux")
 	add(menu, mfString, cmdOpenConfig, "Ouvrir la configuration")
@@ -483,7 +520,18 @@ func (a *app) command(cmd int) {
 		if a.cfg != nil {
 			text += fmt.Sprintf("\nProfil : %s\nBucket : %s", a.cfg.Profile.Name, a.cfg.Profile.Bucket)
 		}
+		if a.view.UpdateTo != "" {
+			text += fmt.Sprintf("\n\nVersion %s disponible (attestation GitHub vérifiée).", a.view.UpdateTo)
+		}
 		messageBox(a.hwnd, "À propos de Kura", text, mbOK|mbIconInfo)
+	case cmdUpdate:
+		notes := ""
+		if av := a.update.Available; av != nil {
+			notes = av.NotesURL
+		}
+		a.confirmUpdate(a.view.UpdateTo, notes)
+	case cmdCheckUpdate:
+		go a.checkUpdate()
 	case cmdQuit:
 		a.removeIcon()
 		procDestroyWindow.Call(a.hwnd)
@@ -545,9 +593,13 @@ func (a *app) serve() {
 		}
 		ready := make(chan struct{})
 		var p *ipc.Peer
+		privileged := func() bool {
+			c, ok := conn.(interface{ ClientPrivileged() bool })
+			return ok && c.ClientPrivileged()
+		}
 		p = ipc.NewPeer(conn, func(m ipc.Msg) {
 			<-ready
-			a.onRunMsg(p, m)
+			a.onRunMsg(p, m, privileged)
 		})
 		a.mu.Lock()
 		a.peer = p
@@ -558,16 +610,40 @@ func (a *app) serve() {
 		a.mu.Lock()
 		a.peer = nil
 		a.mu.Unlock()
-		a.invoke(a.reload)
+		a.invoke(func() {
+			a.updating = "" // self-update terminé ou interrompu
+			a.reload()
+		})
 	}
 }
 
 // onRunMsg est appelé depuis la goroutine de lecture : les requêtes longues partent
 // dans leur propre goroutine pour que l'annulation et les événements passent.
-func (a *app) onRunMsg(p *ipc.Peer, m ipc.Msg) {
+func (a *app) onRunMsg(p *ipc.Peer, m ipc.Msg, privileged func() bool) {
 	switch m.Type {
 	case ipc.TypeHello, ipc.TypeStarted, ipc.TypeJob, ipc.TypeFinished:
 		a.invoke(a.reload)
+	case ipc.TypeUpdateProgress:
+		a.invoke(func() {
+			a.updating, a.updatingSince = m.Message, time.Now()
+			a.reload()
+		})
+	case ipc.TypeUpdateDone:
+		a.invoke(func() {
+			a.updating = ""
+			a.reload()
+			if !m.OK {
+				a.balloon(Toast{Title: "Mise à jour de Kura non faite", Text: truncate(m.Message, 250), Level: LevelWarning}, paths.LogsDir())
+			}
+		})
+	case ipc.TypeRestart:
+		// Seul un processus administrateur (self-update élevé) ou SYSTEM peut fermer
+		// l'icône ainsi.
+		if !privileged() {
+			a.log.Warn("relance demandée par un processus non administrateur : ignorée")
+			return
+		}
+		a.invoke(a.restart)
 	case ipc.TypePromptClose:
 		go func() {
 			choice := a.prompt(p, m)
@@ -649,4 +725,137 @@ func (a *app) prompt(p *ipc.Peer, m ipc.Msg) string {
 		return ""
 	}
 	return ipc.ChoiceTimeout
+}
+
+// --- mise à jour de l'agent ----------------------------------------------------
+
+// isAdminMember : le compte de la session appartient au groupe Administrateurs du
+// poste, directement ou par un groupe imbriqué. Sous UAC, le jeton de session porte ce
+// groupe en « refus seulement » : il compte, l'invite UAC donnera les droits.
+func isAdminMember() bool {
+	admins, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
+	if err != nil {
+		return false
+	}
+	groups, err := windows.GetCurrentProcessToken().GetTokenGroups()
+	if err != nil {
+		return false
+	}
+	for _, g := range groups.AllGroups() {
+		if g.Sid.Equals(admins) && g.Attributes&(windows.SE_GROUP_ENABLED|windows.SE_GROUP_USE_FOR_DENY_ONLY) != 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// updatedNotice : juste après une mise à jour réussie, l'icône relancée le dit.
+func (a *app) updatedNotice() {
+	if a.updatedToast || !a.iconAdded {
+		return
+	}
+	a.updatedToast = true
+	if t := UpdatedToast(a.update, a.opt.Version, time.Now()); t != nil {
+		a.balloon(*t, "")
+	}
+}
+
+// confirmUpdate demande confirmation puis lance la mise à jour élevée.
+func (a *app) confirmUpdate(to, notes string) {
+	if to == "" {
+		return
+	}
+	text := fmt.Sprintf("Mettre à jour Kura %s → %s ?\n\nConfiguration, secrets et planification restent inchangés ; "+
+		"la version actuelle est gardée et remise si la nouvelle échoue.\nWindows demandera les droits d'administrateur.", a.opt.Version, to)
+	if notes != "" {
+		text += "\n\nNotes de version : " + notes
+	}
+	if messageBox(a.hwnd, "Kura – mise à jour", text, mbYesNo|mbIconInfo) != idYes {
+		return
+	}
+	a.launchUpdate()
+}
+
+// launchUpdate : kura-agentw.exe self-update, élevé (invite UAC) ; il rend compte par
+// le canal de l'icône, puis la relance.
+func (a *app) launchUpdate() {
+	if err := shellExecute(a.hwnd, "runas", a.exe, "self-update --yes --from-tray", swHide); err != nil {
+		a.log.Info("mise à jour non lancée (invite UAC refusée ?)", "err", err)
+		return
+	}
+	a.log.Info("mise à jour lancée depuis l'icône")
+	a.updating, a.updatingSince = "démarrage", time.Now()
+	a.reload()
+}
+
+// checkUpdate : « Rechercher une mise à jour », sans élévation (self-update --check).
+func (a *app) checkUpdate() {
+	a.checkingMu.Lock()
+	if time.Since(a.checkingSince) < time.Minute {
+		a.checkingMu.Unlock()
+		return // recherche déjà en cours
+	}
+	a.checkingSince = time.Now()
+	a.checkingMu.Unlock()
+	defer func() {
+		a.checkingMu.Lock()
+		a.checkingSince = time.Time{}
+		a.checkingMu.Unlock()
+	}()
+	cmd := exec.Command(a.exe, "self-update", "--check", "--json", "--config", a.opt.ConfigFile)
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: windows.CREATE_NO_WINDOW}
+	out, _ := cmd.Output() // code 3 : version disponible ; la réponse JSON fait foi
+	var r struct {
+		Current  string `json:"current"`
+		Latest   string `json:"latest"`
+		Newer    bool   `json:"newer"`
+		Verified bool   `json:"verified"`
+		NotesURL string `json:"notes_url"`
+		Error    string `json:"error"`
+	}
+	err := json.Unmarshal(out, &r)
+	a.invoke(func() {
+		switch {
+		case err != nil:
+			messageBox(a.hwnd, "Kura – mise à jour", "Recherche impossible : réponse illisible de kura-agent.", mbOK|mbIconWarning)
+		case r.Error != "" && !r.Verified:
+			messageBox(a.hwnd, "Kura – mise à jour", "Recherche impossible :\n"+r.Error, mbOK|mbIconWarning)
+		case r.Newer && r.Verified:
+			text := fmt.Sprintf("Version %s disponible (attestation GitHub vérifiée), version en place %s.\n\nMettre à jour maintenant ? "+
+				"Windows demandera les droits d'administrateur.", r.Latest, r.Current)
+			if r.NotesURL != "" {
+				text += "\n\nNotes de version : " + r.NotesURL
+			}
+			if messageBox(a.hwnd, "Kura – mise à jour", text, mbYesNo|mbIconInfo) == idYes {
+				a.launchUpdate()
+			}
+		default:
+			messageBox(a.hwnd, "Kura – mise à jour", fmt.Sprintf("Kura est à jour (version %s).", r.Current), mbOK|mbIconInfo)
+		}
+	})
+}
+
+// restart relance l'icône depuis son exécutable, remplacé par la mise à jour : icône
+// retirée, canal et verrou de session rendus, nouvelle icône lancée, fin de celle-ci.
+func (a *app) restart() {
+	a.log.Info("relance de l'icône après mise à jour")
+	a.removeIcon()
+	a.mu.Lock()
+	l := a.listener
+	a.listener = nil
+	a.mu.Unlock()
+	if l != nil {
+		_ = l.Close()
+	}
+	if a.mutex != 0 {
+		_ = windows.CloseHandle(a.mutex)
+		a.mutex = 0
+	}
+	cmd := exec.Command(a.exe, "tray", "--config", a.opt.ConfigFile)
+	if err := cmd.Start(); err != nil {
+		a.log.Warn("relance de l'icône", "err", err)
+	} else {
+		_ = cmd.Process.Release()
+	}
+	procDestroyWindow.Call(a.hwnd)
 }

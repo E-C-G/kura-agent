@@ -55,6 +55,7 @@ func runSelfUpdate(args []string, stdout, stderr io.Writer, client *selfupdate.C
 	yes := fs.Bool("yes", false, "sans confirmation (obligatoire hors d'un terminal)")
 	rollback := fs.Bool("rollback", false, "remet la version d'avant la dernière mise à jour")
 	finish := fs.Bool("finish", false, "étape interne : lancée par la nouvelle version juste après le remplacement")
+	fromTray := fs.Bool("from-tray", false, "lancée par l'icône (après l'invite UAC)")
 	if err := fs.Parse(args); err != nil || fs.NArg() > 0 {
 		return 2
 	}
@@ -82,7 +83,10 @@ func runSelfUpdate(args []string, stdout, stderr io.Writer, client *selfupdate.C
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 		defer cancel()
 		u := newUpdater(client, stdout)
-		return u.run(ctx, updateOptions{tag: *tag, yes: *yes, rollback: *rollback})
+		if *fromTray {
+			fmt.Fprintln(stdout, "Mise à jour lancée depuis l'icône.")
+		}
+		return u.runAndNotify(ctx, updateOptions{tag: *tag, yes: *yes, rollback: *rollback})
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()

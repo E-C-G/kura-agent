@@ -29,6 +29,11 @@ const (
 	TypeClose       = "close"        // fermeture douce : Process, GracefulS → TypeClosed
 	TypeStart       = "start"        // relance : Process, Path → TypeStartedProc
 
+	// self-update → icônes
+	TypeUpdateProgress = "update_progress" // étape en cours : Message
+	TypeUpdateDone     = "update_done"     // fin : OK, Version (installée), Message
+	TypeRestart        = "restart"         // relancer l'icône depuis son exécutable (mis à jour)
+
 	// icône → run
 	TypeAnswer      = "answer"       // réponse au préavis : Choice
 	TypeClosed      = "closed"       // réponse à close : Remaining

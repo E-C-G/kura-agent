@@ -8,6 +8,9 @@ import (
 	"time"
 )
 
+// StatusFileName : fichier d'état des mises à jour, dans le dossier de données.
+const StatusFileName = "update.json"
+
 // Status : fichier update.json du dossier de données, lu par kura-agent status et
 // l'icône. Écrit par la vérification planifiée (Available, CheckedAt) et par
 // self-update (Last, Journal).
