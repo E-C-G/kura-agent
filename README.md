@@ -19,11 +19,11 @@ Console d'administration associée : [E-C-G/kura-ctl](https://github.com/E-C-G/k
 | 5 | Icône par session : état, préavis et fermeture douce d'Outlook, relance, annulation, suspension | **fait** |
 | 5 bis | `import` : clé d'un paquet `.kura` préparé par la console kura-ctl | **fait** |
 | 5 ter | `install --package` : poste installé en une fois depuis un paquet de la console, CLI AWS comprise | **fait** |
-| 6 | Restauration (V2) | à faire |
+| 6 | Restauration : lot 1, lecture seule (`restore --versions`, `--list`, état à une date) | **lot 1 fait** |
 | 7 | `self-update` : recherche et vérification de l'attestation GitHub, installation, retour arrière, icône | **fait** |
 
 Commandes disponibles : `run`, `validate`, `status`, `credentials`, `import`, `install`, `uninstall`,
-`suspend`, `tray`, `self-update`, `version`.
+`suspend`, `tray`, `self-update`, `restore`, `version`.
 
 ## Systèmes pris en charge
 
@@ -638,6 +638,40 @@ Proxy : la tâche planifiée tourne sous le compte système, sans le proxy de l'
 sinon les variables `HTTPS_PROXY` / `NO_PROXY` de l'environnement. Seule la section `update`
 est lue : une configuration invalide n'empêche pas la recherche.
 
+## Retrouver des fichiers : `kura-agent restore`
+
+Le bucket garde, grâce au versioning, chaque version remplacée ou supprimée pendant 90 jours
+(cycle de vie du modèle de bucket). `restore` lit ces versions avec la clé du poste
+(`profile.aws_credentials`, droits `ListBucketVersions`) et le SDK AWS pour Go, sans passer par
+la CLI. Console d'administration ; ce lot ne fait que lire, rien n'est écrit ni sur le disque ni
+dans le bucket.
+
+```powershell
+# historique d'un fichier : date, taille, version actuelle, suppression
+kura-agent restore "C:\Users\alice\Documents\Factures\2026.pdf" --versions
+
+# ce qui serait restauré : un dossier tel qu'à la dernière sauvegarde, ou à une date
+kura-agent restore "D:\Projets\Clients" --list
+kura-agent restore "D:\Projets\Clients" --list --at 2026-10-20          # fin de journée
+kura-agent restore "D:\Projets\Clients" --list --at "2026-10-20 18:00"  # heure locale
+kura-agent restore --all --list --at 2026-10-20                          # tous les jobs
+```
+
+Le chemin est rattaché au job dont la source le contient (la plus précise si des sources
+s'imbriquent) ; sa clé dans le bucket est la destination du job suivie du chemin relatif. Sous
+Windows la casse est ignorée, comme sur le disque. L'état à une date retient, fichier par fichier,
+la dernière version enregistrée au plus tard à cette date ; un fichier supprimé à cette date n'y
+figure pas. `--list` signale ce qui a changé depuis (« modifié depuis », « supprimé du poste le… »)
+et les noms qu'une restauration refuserait (`..`, noms réservés de Windows, caractères interdits).
+Au-delà de 90 jours, l'état peut être incomplet : un avertissement le rappelle. `--json` pour
+un traitement automatique.
+
+La restauration des fichiers (`--to DOSSIER`, puis `--in-place`) et la restauration de ses propres
+données depuis l'icône viendront dans les versions suivantes.
+
+Codes de sortie : 0 OK · 3 configuration illisible, chemin hors des sources des jobs, clé absente ·
+4 refusé (droits, options) · 5 bucket injoignable ou clé refusée.
+
 ## Codes de sortie de `run`
 
 | Code | Signification |
@@ -698,6 +732,7 @@ internal/awsinstall/ CLI AWS absente : MSI fourni ou téléchargé, signature Am
 internal/schedtask/ tâche \Kura\Sync : XML du Planificateur, schtasks
 internal/paths/     emplacements sur disque
 internal/selfupdate/ nouvelles versions : releases GitHub, attestation de release vérifiée (sigstore-go)
+internal/restore/   restauration : chemin → clé, versions du bucket (SDK AWS), état à une date
 ```
 
 `internal/runner` ne dépend d'aucune interface graphique : ses tests utilisent une fausse CLI AWS

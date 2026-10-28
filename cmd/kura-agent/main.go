@@ -59,6 +59,8 @@ Usage :
   kura-agent tray     [--config FICHIER]
   kura-agent self-update [--check] [--version vX.Y.Z] [--yes] [--json] [--config FICHIER]
   kura-agent self-update --rollback
+  kura-agent restore  CHEMIN --versions [--json] [--config FICHIER]
+  kura-agent restore  CHEMIN | --all  --list [--at DATE] [--json] [--config FICHIER]
   kura-agent version
 
 Commandes :
@@ -78,6 +80,10 @@ Commandes :
   self-update  installe la dernière version publiée sur GitHub, attestation de release
                vérifiée, en gardant la précédente (--rollback la remet) ; console
                d'administration. --check : recherche seule, sans droits (code 3 : disponible)
+  restore      retrouve des fichiers dans le bucket : --versions (historique d'un fichier),
+               --list (ce qui serait restauré, état à la date --at : AAAA-MM-JJ ou
+               "AAAA-MM-JJ HH:MM", 90 jours au plus) ; lecture seule ; console
+               d'administration
   version      affiche la version
 
 Codes de sortie de run : 0 OK · 1 avertissement · 2 erreur · 3 configuration invalide
@@ -114,6 +120,8 @@ func main() {
 		code = cmdUninstall(os.Args[2:])
 	case "self-update":
 		code = cmdSelfUpdate(os.Args[2:])
+	case "restore":
+		code = cmdRestore(os.Args[2:])
 	case "version", "--version", "-v":
 		fmt.Printf("kura-agent %s (commit %s, compilé le %s)\n", version, commit, date)
 	case "help", "--help", "-h":
