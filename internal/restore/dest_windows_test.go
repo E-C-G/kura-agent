@@ -64,3 +64,39 @@ func TestReplaceLockedFile(t *testing.T) {
 		t.Fatalf("restes : %v", entries)
 	}
 }
+
+func daclString(t *testing.T, p string) string {
+	t.Helper()
+	sd, err := windows.GetNamedSecurityInfo(p, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sd.String()
+}
+
+// Dossier à part : fichiers réservés aux administrateurs ; remplacement : ACL de l'actuel
+// reprise, protection comprise.
+func TestWindowsRights(t *testing.T) {
+	d := newDest(t)
+	d.Private = true
+	m := &memBucket{data: map[string][]byte{"v1": []byte("bonjour")}}
+	if err := d.Write(context.Background(), m, "a.txt", Version{Key: "k", VersionID: "v1", Size: 7}); err != nil {
+		t.Fatal(err)
+	}
+	if s := daclString(t, filepath.Join(d.Dir, "a.txt")); !strings.Contains(s, "D:P(A;;FA;;;SY)(A;;FA;;;BA)") {
+		t.Fatalf("fichier privé : %s", s)
+	}
+
+	d2 := newDest(t)
+	cur := filepath.Join(d2.Dir, "b.txt")
+	os.WriteFile(cur, []byte("actuel"), 0o644)
+	if err := setPrivate(cur); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d2.Replace(context.Background(), m, "b.txt", Version{Key: "k", VersionID: "v1", Size: 7}, "x"); err != nil {
+		t.Fatal(err)
+	}
+	if s := daclString(t, cur); !strings.Contains(s, "D:P(A;;FA;;;SY)(A;;FA;;;BA)") {
+		t.Fatalf("ACL non reprise : %s", s)
+	}
+}

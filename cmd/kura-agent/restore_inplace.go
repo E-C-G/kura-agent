@@ -110,7 +110,7 @@ func restoreInPlace(ctx context.Context, stdout, stderr io.Writer, d restoreDeps
 		fmt.Fprintf(stdout, "  laissés (présents)         : %d — --replace pour remplacer ceux qui diffèrent\n", nKeep)
 	}
 	if nRefused > 0 {
-		fmt.Fprintf(stdout, "  noms refusés               : %d\n", nRefused)
+		fmt.Fprintf(stdout, "  refusés (noms, quarantaine) : %d\n", nRefused)
 	}
 	if len(preFailed) > 0 {
 		fmt.Fprintf(stdout, "  illisibles ou bloqués      : %d\n", len(preFailed))

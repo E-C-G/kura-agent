@@ -11,6 +11,7 @@ import (
 	"io/fs"
 	"os"
 	"path"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -19,14 +20,32 @@ import (
 // écriture passe par os.Root (les liens qui mèneraient hors du dossier sont refusés par
 // le système, même posés pendant la restauration), et tout lien symbolique ou jonction
 // rencontré sur le chemin arrête le fichier concerné.
+//
+// Droits des fichiers restaurés : le bucket ne garde ni les droits ni les ACL d'origine.
+// Un fichier créé l'est donc en privé (Ubuntu, macOS : 0600, dossiers 0700 ; Windows :
+// droits du dossier qui le reçoit, ou administrateurs seuls avec Private) ; un fichier
+// remplacé reprend les droits du fichier actuel (mode et propriétaire, ou ACL).
 type Dest struct {
 	Dir string
 	// Stamp : date ajoutée au nom du fichier actuel gardé lors d'un remplacement
 	// (nom.avant-restauration-<Stamp>).
 	Stamp string
-	root  *os.Root
-	owner Owner
+	// Private : fichiers lisibles par les seuls administrateurs et SYSTEM (Windows ;
+	// ailleurs, Owner root et 0600 font de même). Restauration dans un dossier à part :
+	// elle mélange les fichiers de tous les comptes.
+	Private bool
+	root    *os.Root
+	owner   Owner
 }
+
+// Modes des fichiers et dossiers créés (Ubuntu, macOS).
+const (
+	fileMode = 0o600
+	dirMode  = 0o700
+)
+
+// full : chemin complet d'un nom relatif à la destination.
+func (d *Dest) full(name string) string { return filepath.Join(d.Dir, filepath.FromSlash(name)) }
 
 // Owner : propriétaire donné aux fichiers et dossiers créés (Ubuntu, macOS). Sous
 // Windows, ils héritent des droits du dossier qui les reçoit et Owner est ignoré.
@@ -85,10 +104,10 @@ func (d *Dest) mkdirs(rel string) error {
 				return fmt.Errorf("%s : un fichier occupe la place d'un dossier", cur)
 			}
 		case errors.Is(err, fs.ErrNotExist):
-			if err := d.root.Mkdir(cur, 0o755); err != nil && !errors.Is(err, fs.ErrExist) {
+			if err := d.root.Mkdir(cur, dirMode); err != nil && !errors.Is(err, fs.ErrExist) {
 				return err
 			}
-			if err := d.own(cur, 0o755); err != nil {
+			if err := d.own(cur, dirMode); err != nil {
 				return err
 			}
 		default:
@@ -196,6 +215,11 @@ func (d *Dest) Replace(ctx context.Context, g Getter, rel string, v Version, sta
 	if err != nil {
 		return "", err
 	}
+	// Le fichier remis reprend les droits de l'actuel (mode et propriétaire, ou ACL).
+	if err := copySecurity(d.full(rel), d.full(tmp)); err != nil {
+		_ = d.root.Remove(tmp)
+		return "", fmt.Errorf("droits du fichier actuel non reproduits, rien n'a changé : %w", err)
+	}
 	backup := ""
 	for i := 1; ; i++ {
 		backup = rel + ".avant-restauration-" + stamp
@@ -239,7 +263,7 @@ func (d *Dest) fetch(ctx context.Context, g Getter, rel string, v Version) (tmp 
 		return "", err
 	}
 	name := path.Join(dir, ".kura-restore-"+hex.EncodeToString(rnd[:])+".tmp")
-	f, err := d.root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	f, err := d.root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, fileMode)
 	if err != nil {
 		return "", err
 	}
@@ -280,8 +304,13 @@ func (d *Dest) fetch(ctx context.Context, g Getter, rel string, v Version) (tmp 
 			return "", err
 		}
 	}
-	if err = d.own(name, 0o644); err != nil {
+	if err = d.own(name, fileMode); err != nil {
 		return "", err
+	}
+	if d.Private {
+		if err = setPrivate(d.full(name)); err != nil {
+			return "", fmt.Errorf("droits du fichier restauré : %w", err)
+		}
 	}
 	return name, nil
 }

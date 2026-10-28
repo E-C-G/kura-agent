@@ -15,6 +15,7 @@ import (
 	"github.com/E-C-G/kura-agent/internal/lock"
 	"github.com/E-C-G/kura-agent/internal/report"
 	"github.com/E-C-G/kura-agent/internal/restore"
+	"github.com/E-C-G/kura-agent/internal/state"
 	"github.com/E-C-G/kura-agent/pkg/config"
 )
 
@@ -124,7 +125,7 @@ func TestRestoreToFolder(t *testing.T) {
 	if !fi.ModTime().Equal(restoreNow.AddDate(0, 0, -2)) {
 		t.Errorf("date %v", fi.ModTime())
 	}
-	if !strings.Contains(out, "2 fichier(s) restauré(s)") || !strings.Contains(out, "1 nom(s) refusé(s)") || !strings.Contains(out, "Journal : ") {
+	if !strings.Contains(out, "2 fichier(s) restauré(s)") || !strings.Contains(out, "1 refusé(s)") || !strings.Contains(out, "Journal : ") {
 		t.Errorf("%s", out)
 	}
 	// journal, état, bilan
@@ -300,5 +301,43 @@ func TestRestoreToWindowsDisplay(t *testing.T) {
 	}
 	if quoteArgs([]string{`C:\a b`, "--yes"}) != `"C:\a b" --yes` {
 		t.Fatal(quoteArgs([]string{`C:\a b`, "--yes"}))
+	}
+}
+
+// La quarantaine vaut pour toute restauration, pas seulement l'icône.
+func TestRestoreRefusesQuarantine(t *testing.T) {
+	b := newToBench(t)
+	var qerr error
+	b.d.quarantine = func() ([]state.QuarantineEntry, error) {
+		return []state.QuarantineEntry{{Prefix: "acme-srv01/home/Documents/sous dossier"}}, qerr
+	}
+	docs := filepath.Join(b.src, "Documents")
+	to := filepath.Join(b.dir, "R")
+	code, _, stderr := b.run(docs, "--to", to, "--yes")
+	if code != 0 || !strings.Contains(stderr, "1 fichier(s) en quarantaine") {
+		t.Fatalf("%d %q", code, stderr)
+	}
+	if got := readTree(t, to); got["Documents/sous dossier/b.txt"] != "" || got["Documents/a.txt"] == "" {
+		t.Fatalf("%v", got)
+	}
+	// après examen, sur demande expresse
+	to2 := filepath.Join(b.dir, "R2")
+	if code, _, _ := b.run(docs, "--to", to2, "--yes", "--include-quarantined"); code != 0 {
+		t.Fatal(code)
+	}
+	if got := readTree(t, to2); got["Documents/sous dossier/b.txt"] == "" {
+		t.Fatalf("%v", got)
+	}
+	// quarantaine illisible : refus, jamais une quarantaine vide
+	qerr = errors.New("abîmée")
+	if code, _, stderr := b.run(docs, "--to", filepath.Join(b.dir, "R3"), "--yes"); code != exitRestoreConfig || !strings.Contains(stderr, "Quarantaine illisible") {
+		t.Fatalf("%d %q", code, stderr)
+	}
+	var buf bytes.Buffer
+	p := filepath.Join(b.dir, "quarantine.json")
+	state.AddQuarantine(p, []string{"acme-srv01/home/Documents/j"}, restoreNow)
+	printQuarantine(&buf, p)
+	if !strings.Contains(buf.String(), "acme-srv01/home/Documents/j") || !strings.Contains(buf.String(), "à examiner") {
+		t.Fatalf("status : %s", buf.String())
 	}
 }

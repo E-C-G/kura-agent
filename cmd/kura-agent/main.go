@@ -526,6 +526,7 @@ func cmdStatus(args []string) int {
 		fmt.Println("aucune exécution enregistrée")
 		if !*asJSON {
 			printRestoreStatus(os.Stdout, paths.RestoreFile())
+			printQuarantine(os.Stdout, paths.QuarantineFile())
 			printUpdateStatus(os.Stdout)
 		}
 		return 0
@@ -538,6 +539,7 @@ func cmdStatus(args []string) int {
 	}
 	printSummary(os.Stdout, st)
 	printRestoreStatus(os.Stdout, paths.RestoreFile())
+	printQuarantine(os.Stdout, paths.QuarantineFile())
 	printUpdateStatus(os.Stdout)
 	return 0
 }

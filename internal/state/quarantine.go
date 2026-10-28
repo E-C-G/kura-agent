@@ -3,6 +3,7 @@ package state
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"strings"
@@ -41,7 +42,10 @@ func ReadQuarantine(path string) ([]QuarantineEntry, error) {
 func AddQuarantine(path string, prefixes []string, now time.Time) error {
 	entries, err := ReadQuarantine(path)
 	if err != nil {
-		entries = nil // fichier abîmé : réécrit, rien ne se perd des nouveaux préfixes
+		// Fichier abîmé : jamais réécrit (ses entrées seraient perdues). Les
+		// restaurations refusent tant qu'il est illisible ; à corriger par un
+		// administrateur.
+		return fmt.Errorf("%s illisible, préfixes %s non ajoutés : %w", path, strings.Join(prefixes, ", "), err)
 	}
 	seen := map[string]bool{}
 	for _, e := range entries {

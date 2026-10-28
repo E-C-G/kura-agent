@@ -354,8 +354,8 @@ func TestServeNeverServesAgentSecrets(t *testing.T) {
 	os.MkdirAll(docs, 0o755)
 	u := &fakeTrayUser{account: `ACME\\alice`, home: b.src, allowed: []string{b.src}}
 	w, code := startServe(t, b, u, func(sd *serveDeps) {
-		sd.quarantine = func() []state.QuarantineEntry {
-			return []state.QuarantineEntry{{Prefix: "acme-srv01/home/Documents/j"}}
+		sd.quarantine = func() ([]state.QuarantineEntry, error) {
+			return []state.QuarantineEntry{{Prefix: "acme-srv01/home/Documents/j"}}, nil
 		}
 		sd.agentDirs = []string{filepath.Join(docs, "agent")}
 	})

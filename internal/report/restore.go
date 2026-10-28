@@ -23,7 +23,7 @@ type RestoreInfo struct {
 	Replaced int        `json:"replaced"`     // en place, --replace : remplacés, l'actuel gardé à côté
 	Bytes    int64      `json:"bytes"`        // volume restauré
 	Skipped  int        `json:"skipped"`      // déjà restaurés (reprise), ou laissés en place
-	Ignored  int        `json:"ignored"`      // noms refusés, jamais écrits
+	Ignored  int        `json:"ignored"`      // refusés (noms interdits, quarantaine), jamais écrits
 	Failed   int        `json:"failed"`       // en échec
 	Result   string     `json:"result"`       // ok | partial | interrupted
 	ExitCode int        `json:"exit_code"`
@@ -59,7 +59,7 @@ func RestoreSummary(r RestoreInfo) string {
 		fmt.Fprintf(&b, ", %d déjà restauré(s)", r.Skipped)
 	}
 	if r.Ignored > 0 {
-		fmt.Fprintf(&b, ", %d nom(s) refusé(s)", r.Ignored)
+		fmt.Fprintf(&b, ", %d refusé(s)", r.Ignored)
 	}
 	if r.Failed > 0 {
 		fmt.Fprintf(&b, ", %d en échec", r.Failed)
