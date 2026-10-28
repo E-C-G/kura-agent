@@ -22,7 +22,7 @@ const (
 var (
 	kernel32         = windows.NewLazySystemDLL("kernel32.dll")
 	procReOpenFile   = kernel32.NewProc("ReOpenFile")
-	errNotAdminOwned = errors.New("dossier existant qui n'appartient ni aux Administrateurs ni à SYSTEM : choisir un dossier absent, il sera créé réservé aux administrateurs")
+	errNotAdminOwned = errors.New("dossier existant qui appartient à un autre compte : choisir un dossier absent, il sera créé réservé aux administrateurs")
 )
 
 // rights : descripteur de sécurité (DACL) d'un fichier.
@@ -96,9 +96,9 @@ func setTimes(f *os.File, t time.Time) error {
 	return windows.SetFileTime(windows.Handle(f.Fd()), nil, nil, &ft)
 }
 
-// stagingDir : dossier de travail privé des remplacements, créé vide à la racine de la
-// destination puis réservé aux administrateurs par son handle ; les temporaires y
-// naissent avec ces droits.
+// stagingDir : dossier de travail privé des remplacements, créé à la racine de la
+// destination, relativement à son handle (NtCreateFile), avec l'ACL des administrateurs
+// dès sa création ; les temporaires y naissent avec ces droits.
 func (d *Dest) stagingDir() (string, error) {
 	if d.staging != "" {
 		return d.staging, nil
@@ -108,20 +108,30 @@ func (d *Dest) stagingDir() (string, error) {
 		return "", err
 	}
 	name := ".kura-restore-" + hex.EncodeToString(rnd[:])
-	if err := d.root.Mkdir(name, 0o700); err != nil {
+	top, err := d.root.Open(".")
+	if err != nil {
 		return "", err
 	}
-	f, err := d.root.Open(name)
+	defer top.Close()
+	uname, err := windows.NewNTUnicodeString(name)
 	if err != nil {
-		_ = d.root.Remove(name)
 		return "", err
 	}
-	err = applyRights(f, sddl(privateDirSDDL))
-	f.Close()
-	if err != nil {
-		_ = d.root.Remove(name)
+	oa := windows.OBJECT_ATTRIBUTES{
+		RootDirectory:      windows.Handle(top.Fd()),
+		ObjectName:         uname,
+		Attributes:         windows.OBJ_CASE_INSENSITIVE,
+		SecurityDescriptor: sddl(privateDirSDDL).sd,
+	}
+	oa.Length = uint32(unsafe.Sizeof(oa))
+	var h windows.Handle
+	var iosb windows.IO_STATUS_BLOCK
+	if err := windows.NtCreateFile(&h, windows.SYNCHRONIZE|windows.FILE_LIST_DIRECTORY, &oa, &iosb, nil,
+		windows.FILE_ATTRIBUTE_DIRECTORY, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		windows.FILE_CREATE, windows.FILE_DIRECTORY_FILE|windows.FILE_SYNCHRONOUS_IO_NONALERT|windows.FILE_OPEN_REPARSE_POINT, 0, 0); err != nil {
 		return "", fmt.Errorf("dossier de travail : %w", err)
 	}
+	windows.CloseHandle(h)
 	d.staging = name
 	return name, nil
 }
@@ -156,9 +166,15 @@ func CreatePrivateDir(p string) error {
 	return windows.CreateDirectory(name, &sa)
 }
 
+// ownedBySelf : le propriétaire est le compte qui lance la restauration (administrateur).
+func ownedBySelf(owner *windows.SID) bool {
+	u, err := windows.GetCurrentProcessToken().GetTokenUser()
+	return err == nil && owner.Equals(u.User.Sid)
+}
+
 // SecureExistingDir rend privé un dossier --to existant (vide) : ouvert sans suivre de
-// point de reparse, il doit appartenir aux Administrateurs ou à SYSTEM (le propriétaire
-// pourrait sinon rouvrir ses droits), puis reçoit l'ACL privée par son handle.
+// point de reparse, il doit appartenir aux Administrateurs, à SYSTEM ou au compte qui
+// restaure (un autre propriétaire pourrait rouvrir ses droits), puis reçoit l'ACL privée par son handle.
 func SecureExistingDir(p string) error {
 	name, err := windows.UTF16PtrFromString(p)
 	if err != nil {
@@ -186,7 +202,7 @@ func SecureExistingDir(p string) error {
 	if err != nil {
 		return err
 	}
-	if !owner.IsWellKnown(windows.WinBuiltinAdministratorsSid) && !owner.IsWellKnown(windows.WinLocalSystemSid) {
+	if !owner.IsWellKnown(windows.WinBuiltinAdministratorsSid) && !owner.IsWellKnown(windows.WinLocalSystemSid) && !ownedBySelf(owner) {
 		return errNotAdminOwned
 	}
 	return applySD(h, sddl(privateDirSDDL))
