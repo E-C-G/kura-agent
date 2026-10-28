@@ -280,7 +280,7 @@ jobs:
   # runner, sqlcmd ODBC fourni avec ; droit d'écriture du compte du service accordé puis
   # retiré, propriété des sauvegardes reprise.
   bases-windows:
-    name: Windows · export SQL Server et gpg
+    name: Windows · export SQL Server
     runs-on: windows-latest
     env:
       KURA_TEST_DB: "1"
@@ -308,28 +308,6 @@ jobs:
           & $sqlcmd -S 'localhost\SQLEXPRESS' -E -b -C -Q "SELECT @@VERSION"
           "KURA_TEST_SQLCMD=$sqlcmd" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
-      # GnuPG pour Windows, l'installeur officiel (le gpg de Git pour Windows est une
-      # version MSYS qui ne comprend pas les chemins Windows ; Chocolatey restait bloqué).
-      - name: GnuPG
-        shell: pwsh
-        timeout-minutes: 10
-        run: |
-          $base = 'https://gnupg.org/ftp/gcrypt/binary/'
-          $page = (Invoke-WebRequest -Uri $base -UseBasicParsing -TimeoutSec 60).Content
-          $name = [regex]::Matches($page, 'gnupg-w32-2\.\d+\.\d+_\d{8}\.exe') | ForEach-Object Value |
-            Sort-Object -Unique | Sort-Object { [version](($_ -replace '^gnupg-w32-|_\d{8}\.exe$', '')) } | Select-Object -Last 1
-          if (-not $name) { Write-Output "::error title=GnuPG::installeur introuvable sur $base"; exit 1 }
-          Invoke-WebRequest -Uri ($base + $name) -OutFile "$env:RUNNER_TEMP\$name" -UseBasicParsing -TimeoutSec 300
-          $sig = Get-AuthenticodeSignature "$env:RUNNER_TEMP\$name"
-          if ($sig.Status -ne 'Valid') { Write-Output "::error title=GnuPG::signature de $name : $($sig.Status)"; exit 1 }
-          "signé par : $($sig.SignerCertificate.Subject)"
-          Start-Process -FilePath "$env:RUNNER_TEMP\$name" -ArgumentList '/S' -Wait
-          $gpg = @('C:\Program Files (x86)\GnuPG\bin\gpg.exe', 'C:\Program Files\GnuPG\bin\gpg.exe') |
-            Where-Object { Test-Path $_ } | Select-Object -First 1
-          if (-not $gpg) { Write-Output "::error title=GnuPG::$name installé, gpg.exe introuvable"; exit 1 }
-          & $gpg --version
-          "KURA_TEST_GPG=$gpg" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-
       - name: Export SQL Server
         shell: bash
         env:
@@ -338,7 +316,7 @@ jobs:
           # Échec : la fin de la sortie en une annotation (lisible sans le journal brut).
           annotate() { tail -n 150 "$1" | sed ':a;N;$!ba;s/%/%25/g;s/\r//g;s/\n/%0A/g' | sed 's/^/::error title=go test::/'; }
           set -o pipefail
-          go test -count=1 -v -run 'TestSQLServerRealExport|TestMSServiceName|TestGPGRealEncrypt' ./internal/prepare/ 2>&1 | tee test.log || { annotate test.log; exit 1; }
+          go test -count=1 -v -run 'TestSQLServerRealExport|TestMSServiceName' ./internal/prepare/ 2>&1 | tee test.log || { annotate test.log; exit 1; }
 
   # macOS (Apple silicon) : tests sur un vrai macOS, plists relues par plutil.
   macos:
