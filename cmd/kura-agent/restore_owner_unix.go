@@ -24,3 +24,7 @@ func destOwner(dir string) (restore.Owner, error) {
 	}
 	return restore.Owner{Set: os.Geteuid() == 0, UID: int(st.Uid), GID: int(st.Gid)}, nil
 }
+
+// inPlaceOwner : en place, chaque fichier prend le propriétaire et le groupe du dossier
+// qui le reçoit (sources de comptes différents).
+func inPlaceOwner() restore.Owner { return restore.Owner{Set: os.Geteuid() == 0, Inherit: true} }

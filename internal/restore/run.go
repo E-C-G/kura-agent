@@ -17,7 +17,8 @@ import (
 // Item est un fichier à restaurer : sa version et sa place sous la destination.
 type Item struct {
 	File
-	Out string // chemin sous la destination (séparateurs /)
+	Out     string // chemin sous la destination (séparateurs /)
+	Replace bool   // en place, --replace : remplace le fichier présent, gardé à côté
 }
 
 // MarkConflicts signale les fichiers qui ne peuvent pas coexister dans la destination :
@@ -73,9 +74,10 @@ func MarkConflicts(items []Item, foldCase bool) {
 // Outcome est le résultat d'un fichier.
 type Outcome struct {
 	Item    Item
-	Skipped bool  // déjà restauré (reprise)
-	Refused bool  // nom refusé (Problem) : jamais écrit
-	Err     error // nil : restauré
+	Skipped bool   // déjà restauré (reprise)
+	Refused bool   // nom refusé (Problem) : jamais écrit
+	Backup  string // remplacement : nom du fichier actuel gardé à côté
+	Err     error  // nil : restauré
 }
 
 // Restore lit et écrit les fichiers, workers à la fois. done est appelé pour chaque
@@ -100,6 +102,8 @@ func Restore(ctx context.Context, g Getter, d *Dest, items []Item, workers int, 
 					o.Skipped = true
 				} else if err := ctx.Err(); err != nil {
 					o.Err = err
+				} else if it.Replace {
+					o.Backup, o.Err = d.Replace(ctx, g, it.Out, it.Version, d.Stamp)
 				} else {
 					o.Err = d.Write(ctx, g, it.Out, it.Version)
 				}

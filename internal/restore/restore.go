@@ -27,6 +27,7 @@ type Version struct {
 	Size         int64
 	Latest       bool // version actuelle de la clé
 	Deleted      bool // marqueur de suppression
+	ETag         string
 }
 
 // Lister liste les versions et marqueurs de suppression sous un préfixe.

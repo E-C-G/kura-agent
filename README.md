@@ -19,7 +19,7 @@ Console d'administration associée : [E-C-G/kura-ctl](https://github.com/E-C-G/k
 | 5 | Icône par session : état, préavis et fermeture douce d'Outlook, relance, annulation, suspension | **fait** |
 | 5 bis | `import` : clé d'un paquet `.kura` préparé par la console kura-ctl | **fait** |
 | 5 ter | `install --package` : poste installé en une fois depuis un paquet de la console, CLI AWS comprise | **fait** |
-| 6 | Restauration : historique, état à une date (lot 1), restauration vers un dossier à part, journal, bilan (lot 2) ; en place (lot 3) et depuis l'icône (lot 4) à venir | **lots 1 et 2 faits** |
+| 6 | Restauration : historique, état à une date (lot 1), vers un dossier à part, journal, bilan (lot 2), en place (lot 3) ; depuis l'icône (lot 4) à venir | **lots 1 à 3 faits** |
 | 7 | `self-update` : recherche et vérification de l'attestation GitHub, installation, retour arrière, icône | **fait** |
 
 Commandes disponibles : `run`, `validate`, `status`, `credentials`, `import`, `install`, `uninstall`,
@@ -488,10 +488,12 @@ fichiers ; il n'est pas mis en attente s'il ne passe pas.
   "agent_version": "0.13.0",
   "sent_at": "2026-10-28T10:12:41Z",
   "account": "SRV01\\admin",
+  "mode": "to",
   "paths": ["D:\\Projets\\Clients"],
   "to": "E:\\Restauration",
   "at": "2026-10-20T23:59:59+02:00",
   "files": 37,
+  "replaced": 0,
   "bytes": 441344,
   "skipped": 0,
   "ignored": 0,
@@ -504,6 +506,7 @@ fichiers ; il n'est pas mis en attente s'il ne passe pas.
 }
 ```
 
+`mode` : `to` (dossier à part), `in_place` ou `replace` (`to` vaut alors `en place`) ;
 `result` : `ok`, `partial` (des fichiers en échec) ou `interrupted` ; `at` est absent pour
 l'état de la dernière sauvegarde.
 
@@ -693,6 +696,12 @@ kura-agent restore "D:\Projets\Clients" --list --at "2026-10-20 18:00"  # heure 
 kura-agent restore "D:\Projets\Clients" --at 2026-10-20 --to "E:\Restauration"
 kura-agent restore "C:\Users\alice\Documents\Factures\2026.pdf" --to "E:\Restauration"
 kura-agent restore --all --at 2026-10-20 --to "E:\Restauration" --yes   # tous les jobs
+
+# remettre en place les fichiers supprimés par erreur (ceux qui existent sont laissés)
+kura-agent restore "D:\Projets\Clients" --at 2026-10-20 --in-place --list   # le plan, sans rien écrire
+kura-agent restore "D:\Projets\Clients" --at 2026-10-20 --in-place
+# revenir à l'état du 20 : remplacer aussi ce qui a changé, l'actuel gardé à côté
+kura-agent restore "D:\Projets\Clients" --at 2026-10-20 --in-place --replace
 ```
 
 Le chemin est rattaché au job dont la source le contient (la plus précise si des sources
@@ -724,13 +733,26 @@ destination, espace libre), espace libre comparé au volume avec 10 % de marge, 
   saute ce qui est fait et ne relit que le reste ; une autre restauration vers ce dossier est
   refusée. Terminée sans échec, ces deux fichiers disparaissent.
 
+**`--in-place`** : remet sous la source de leur job les fichiers absents (supprimés par erreur) ;
+ceux qui existent sont laissés. Avec **`--replace`**, un fichier présent est comparé à la version
+(taille, puis empreinte : MD5, ou MD5 des parties de 8 Mio pour un gros fichier envoyé en
+plusieurs parties) ; s'il diffère, il est remplacé et l'actuel gardé à côté sous
+`nom.avant-restauration-AAAAMMJJ-HHMM`. Un fichier ouvert par une application (Outlook et son
+`.pst`) n'est pas remplacé : il est signalé en échec et rien ne change ; le restaurer avec
+`--to`, Outlook fermé ensuite pour le remettre. La restauration en place prend le verrou de la
+sauvegarde (`run.lock`) : refusée si une sauvegarde tourne, et la sauvegarde planifiée qui tombe
+pendant la restauration se termine en « déjà en cours » (rattrapage selon `run_if_missed`).
+`--list` avec `--in-place` montre le plan (remis, remplacés, laissés) sans prendre le verrou.
+Relancée, la même commande ne refait que ce qui manque. Sous Ubuntu et macOS, chaque fichier prend
+le propriétaire et le groupe du dossier qui le reçoit.
+
 Journal : `restore-AAAAMMJJ-HHMMSS.log` dans le dossier des journaux, une ligne par fichier
-(`OK`, `DÉJÀ`, `REFUSÉ`, `ÉCHEC`, avec version, date et taille), la commande et le compte.
+(`OK`, `REMPLACÉ`, `PRÉSENT`, `IDENTIQUE`, `DÉJÀ`, `REFUSÉ`, `ÉCHEC`, avec version, date et
+taille), la commande et le compte.
 `kura-agent status` affiche la dernière restauration. Chaque restauration est signalée au bilan
 (voir le webhook ci-dessus) ; `--versions` et `--list` ne le sont pas.
 
-La restauration en place (`--in-place`, `--replace`) et celle de ses propres données depuis
-l'icône viendront dans les versions suivantes.
+La restauration de ses propres données depuis l'icône viendra dans une version suivante.
 
 Codes de sortie : 0 restauration faite, ou rien à restaurer · 1 restauration partielle ou
 interrompue (relancer la même commande) · 3 configuration illisible, chemin hors des sources des

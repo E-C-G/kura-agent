@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/E-C-G/kura-agent/internal/creds"
+	"github.com/E-C-G/kura-agent/internal/lock"
 	"github.com/E-C-G/kura-agent/internal/paths"
 	"github.com/E-C-G/kura-agent/internal/report"
 	"github.com/E-C-G/kura-agent/internal/restore"
@@ -55,6 +56,10 @@ type restoreDeps struct {
 	report      func(ctx context.Context, cfg *config.Config, info report.RestoreInfo) error
 	workers     int
 	version     string
+
+	// lot 3 : restauration en place
+	lock         func() (func(), error) // verrou de la sauvegarde (run.lock)
+	inPlaceOwner func() restore.Owner
 }
 
 // restoreBucket : lecture seule, lister et lire des versions.
@@ -104,6 +109,11 @@ func realRestoreDeps() restoreDeps {
 		},
 		workers: 8,
 		version: version,
+		lock: func() (func(), error) {
+			r, err := lock.Acquire()
+			return func() { r() }, err
+		},
+		inPlaceOwner: inPlaceOwner,
 	}
 }
 
@@ -142,8 +152,8 @@ func runRestore(args []string, stdout, stderr io.Writer, d restoreDeps) int {
 	atFlag := fs.String("at", "", "date de l'état : AAAA-MM-JJ (fin de journée) ou \"AAAA-MM-JJ HH:MM\", heure locale")
 	all := fs.Bool("all", false, "tous les jobs de la configuration")
 	to := fs.String("to", "", "dossier où restaurer, absent ou vide, hors des sources des jobs")
-	inPlace := fs.Bool("in-place", false, "restauration en place (version suivante)")
-	replace := fs.Bool("replace", false, "avec --in-place : remplace les fichiers qui diffèrent (version suivante)")
+	inPlace := fs.Bool("in-place", false, "remet à leur place les fichiers absents ; ceux qui existent sont laissés")
+	replace := fs.Bool("replace", false, "avec --in-place : remplace aussi ceux qui diffèrent, l'actuel gardé à côté")
 	yes := fs.Bool("yes", false, "sans confirmation (obligatoire hors d'un terminal)")
 	asJSON := fs.Bool("json", false, "résultat en JSON")
 	cfgPath := fs.String("config", paths.ConfigFile(), "fichier de configuration installé")
@@ -166,12 +176,14 @@ func runRestore(args []string, stdout, stderr io.Writer, d restoreDeps) int {
 		return refuse("--versions ou --list, pas les deux")
 	case *versions && (*all || *atFlag != ""):
 		return refuse("--versions vaut pour un fichier, sans --all ni --at")
-	case *versions && *to != "":
-		return refuse("--versions n'écrit rien : sans --to")
-	case *inPlace || *replace:
-		return refuse("la restauration en place (--in-place, --replace) arrive avec la version suivante de kura-agent ; pour l'instant : --to DOSSIER")
-	case !*versions && !*list && *to == "":
-		return refuse("destination manquante : --to DOSSIER (ou --list pour voir ce qui serait restauré, --versions pour l'historique d'un fichier)")
+	case *versions && (*to != "" || *inPlace):
+		return refuse("--versions n'écrit rien : sans --to ni --in-place")
+	case *inPlace && *to != "":
+		return refuse("--to ou --in-place, pas les deux")
+	case *replace && !*inPlace:
+		return refuse("--replace s'emploie avec --in-place")
+	case !*versions && !*list && *to == "" && !*inPlace:
+		return refuse("destination manquante : --to DOSSIER, ou --in-place (ou --list pour voir ce qui serait restauré, --versions pour l'historique d'un fichier)")
 	}
 	if err := d.checkAdmin(); err != nil {
 		return refuse("%v", err)
@@ -231,6 +243,18 @@ func runRestore(args []string, stdout, stderr io.Writer, d restoreDeps) int {
 	if !at.IsZero() && now.Sub(at) > retention {
 		fmt.Fprintf(stderr, "Attention : au-delà de 90 jours, les versions remplacées ont été effacées par le cycle de vie du bucket : l'état du %s peut être incomplet.\n", at.Format("02/01/2006"))
 	}
+	// En place : le verrou de la sauvegarde est pris avant l'inventaire, pour que la
+	// sauvegarde planifiée ne tourne pas pendant la restauration (« déjà en cours »).
+	if *inPlace && !*list {
+		release, err := d.lock()
+		if err != nil {
+			if errors.Is(err, lock.ErrBusy) {
+				return refuse("une sauvegarde est en cours : relancer la restauration quand elle sera finie")
+			}
+			return refuse("verrou de la sauvegarde : %v", err)
+		}
+		defer release()
+	}
 	// Destination vérifiée avant toute lecture du bucket.
 	var dest *destCheck
 	if *to != "" && !*list {
@@ -250,6 +274,9 @@ func runRestore(args []string, stdout, stderr io.Writer, d restoreDeps) int {
 	}
 	if dest != nil {
 		return restoreTo(ctx, stdout, stderr, d, cfg, b, dest, reports, at, *all, *yes, *asJSON, args)
+	}
+	if *inPlace {
+		return restoreInPlace(ctx, stdout, stderr, d, cfg, b, reports, at, *replace, *list, *yes, *asJSON, args)
 	}
 	if *asJSON {
 		return printListJSON(stdout, reports, at, d.windows)

@@ -15,12 +15,14 @@ import (
 // RestoreInfo résume une restauration pour le bilan.
 type RestoreInfo struct {
 	Account  string     `json:"account"`      // compte qui a restauré
+	Mode     string     `json:"mode"`         // to (dossier à part) | in_place | replace
 	Paths    []string   `json:"paths"`        // chemins d'origine (ou les sources, --all)
 	To       string     `json:"to"`           // destination
 	At       *time.Time `json:"at,omitempty"` // date de l'état ; absent : dernière sauvegarde
-	Files    int        `json:"files"`        // restaurés
+	Files    int        `json:"files"`        // restaurés (remplacés compris)
+	Replaced int        `json:"replaced"`     // en place, --replace : remplacés, l'actuel gardé à côté
 	Bytes    int64      `json:"bytes"`        // volume restauré
-	Skipped  int        `json:"skipped"`      // déjà restaurés (reprise)
+	Skipped  int        `json:"skipped"`      // déjà restaurés (reprise), ou laissés en place
 	Ignored  int        `json:"ignored"`      // noms refusés, jamais écrits
 	Failed   int        `json:"failed"`       // en échec
 	Result   string     `json:"result"`       // ok | partial | interrupted

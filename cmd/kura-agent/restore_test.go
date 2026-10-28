@@ -132,7 +132,6 @@ func TestRestoreRefusals(t *testing.T) {
 		{`C:\a`},
 		{`C:\a`, "--versions", "--to", `E:\Restauration`},
 		{`C:\a`, "--to", `E:\Restauration`, "--in-place"},
-		{`C:\a`, "--in-place"},
 		{`C:\a`, "--replace"},
 		{`C:\a`, "--list", "--at", "hier"},
 	}
