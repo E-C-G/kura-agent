@@ -308,15 +308,25 @@ jobs:
           & $sqlcmd -S 'localhost\SQLEXPRESS' -E -b -C -Q "SELECT @@VERSION"
           "KURA_TEST_SQLCMD=$sqlcmd" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
-      # GnuPG : celui de Git pour Windows, déjà sur le runner (l'installation par
-      # Chocolatey restait bloquée). Les postes utilisent Gpg4win ; le contrôle des droits
-      # de l'outil et de son dossier est le même.
+      # GnuPG pour Windows, l'installeur officiel (le gpg de Git pour Windows est une
+      # version MSYS qui ne comprend pas les chemins Windows ; Chocolatey restait bloqué).
       - name: GnuPG
         shell: pwsh
-        timeout-minutes: 5
+        timeout-minutes: 10
         run: |
-          $gpg = 'C:\Program Files\Git\usr\bin\gpg.exe'
-          if (-not (Test-Path $gpg)) { Write-Output "::error title=gpg introuvable::$gpg"; exit 1 }
+          $base = 'https://gnupg.org/ftp/gcrypt/binary/'
+          $page = (Invoke-WebRequest -Uri $base -UseBasicParsing -TimeoutSec 60).Content
+          $name = [regex]::Matches($page, 'gnupg-w32-2\.\d+\.\d+_\d{8}\.exe') | ForEach-Object Value |
+            Sort-Object -Unique | Sort-Object { [version](($_ -replace '^gnupg-w32-|_\d{8}\.exe$', '')) } | Select-Object -Last 1
+          if (-not $name) { Write-Output "::error title=GnuPG::installeur introuvable sur $base"; exit 1 }
+          Invoke-WebRequest -Uri ($base + $name) -OutFile "$env:RUNNER_TEMP\$name" -UseBasicParsing -TimeoutSec 300
+          $sig = Get-AuthenticodeSignature "$env:RUNNER_TEMP\$name"
+          if ($sig.Status -ne 'Valid') { Write-Output "::error title=GnuPG::signature de $name : $($sig.Status)"; exit 1 }
+          "signé par : $($sig.SignerCertificate.Subject)"
+          Start-Process -FilePath "$env:RUNNER_TEMP\$name" -ArgumentList '/S' -Wait
+          $gpg = @('C:\Program Files (x86)\GnuPG\bin\gpg.exe', 'C:\Program Files\GnuPG\bin\gpg.exe') |
+            Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $gpg) { Write-Output "::error title=GnuPG::$name installé, gpg.exe introuvable"; exit 1 }
           & $gpg --version
           "KURA_TEST_GPG=$gpg" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
