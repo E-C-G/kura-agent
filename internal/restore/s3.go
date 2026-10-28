@@ -3,7 +3,9 @@ package restore
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
+	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -68,4 +70,43 @@ func (b *Bucket) ListVersions(ctx context.Context, prefix string) ([]Version, er
 		}
 		in.KeyMarker, in.VersionIdMarker = res.NextKeyMarker, res.NextVersionIdMarker
 	}
+}
+
+// Object est le contenu d'une version, à lire puis fermer.
+type Object struct {
+	Body io.ReadCloser
+	Size int64
+	// MD5 : empreinte de la version quand le bucket la connaît (envoi en une partie :
+	// l'ETag est alors le MD5 du contenu) ; vide sinon.
+	MD5 string
+}
+
+// Getter lit une version précise d'un objet.
+type Getter interface {
+	GetVersion(ctx context.Context, key, versionID string) (Object, error)
+}
+
+// GetVersion lit une version (GetObject avec versionId) : lecture seule.
+func (b *Bucket) GetVersion(ctx context.Context, key, versionID string) (Object, error) {
+	res, err := b.client.GetObject(ctx, &s3.GetObjectInput{Bucket: aws.String(b.Name), Key: aws.String(key),
+		VersionId: aws.String(versionID)})
+	if err != nil {
+		return Object{}, fmt.Errorf("lecture de %s (version %s) : %w", key, versionID, err)
+	}
+	return Object{Body: res.Body, Size: aws.ToInt64(res.ContentLength), MD5: etagMD5(aws.ToString(res.ETag))}, nil
+}
+
+// etagMD5 : l'ETag d'un envoi en une partie est le MD5 du contenu (32 chiffres
+// hexadécimaux) ; celui d'un envoi en plusieurs parties porte un tiret et ne l'est pas.
+func etagMD5(etag string) string {
+	e := strings.ToLower(strings.Trim(etag, `"`))
+	if len(e) != 32 {
+		return ""
+	}
+	for _, c := range e {
+		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+			return ""
+		}
+	}
+	return e
 }

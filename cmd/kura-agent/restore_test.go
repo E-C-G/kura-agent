@@ -1,10 +1,15 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"crypto/md5"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -13,12 +18,58 @@ import (
 )
 
 type fakeLister struct {
+	mu       sync.Mutex
 	versions []restore.Version
 	prefixes []string
 	err      error
+	gets     []string         // versions lues
+	getErr   map[string]error // version → erreur de lecture
+	corrupt  map[string]bool  // version → contenu altéré
+	block    chan struct{}    // non nil : chaque lecture attend
+}
+
+// content : contenu déterministe d'une version.
+func content(v restore.Version) []byte {
+	b := make([]byte, v.Size)
+	for i := range b {
+		b[i] = v.VersionID[i%len(v.VersionID)]
+	}
+	return b
+}
+
+func (f *fakeLister) GetVersion(ctx context.Context, key, id string) (restore.Object, error) {
+	f.mu.Lock()
+	f.gets = append(f.gets, id)
+	err := f.getErr[id]
+	bad := f.corrupt[id]
+	block := f.block
+	f.mu.Unlock()
+	if block != nil {
+		select {
+		case <-block:
+		case <-ctx.Done():
+			return restore.Object{}, ctx.Err()
+		}
+	}
+	if err != nil {
+		return restore.Object{}, err
+	}
+	for _, v := range f.versions {
+		if v.Key == key && v.VersionID == id {
+			c := content(v)
+			sum := md5.Sum(c)
+			if bad {
+				c[0] ^= 0xff
+			}
+			return restore.Object{Body: io.NopCloser(bytes.NewReader(c)), Size: v.Size, MD5: hex.EncodeToString(sum[:])}, nil
+		}
+	}
+	return restore.Object{}, errors.New("NoSuchVersion")
 }
 
 func (f *fakeLister) ListVersions(_ context.Context, prefix string) ([]restore.Version, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.prefixes = append(f.prefixes, prefix)
 	if f.err != nil {
 		return nil, f.err
@@ -56,7 +107,7 @@ func restoreFixture() (*fakeLister, restoreDeps, *bool) {
 			return nil
 		},
 		loadConfig: func(string) (*config.Config, error) { return cfg, nil },
-		bucket:     func(*config.Config) (restore.Lister, error) { return l, nil },
+		bucket:     func(*config.Config) (restoreBucket, error) { return l, nil },
 		now:        func() time.Time { return restoreNow },
 		windows:    true,
 	}
@@ -79,8 +130,10 @@ func TestRestoreRefusals(t *testing.T) {
 		{`C:\a`, "--versions", "--list"},
 		{`C:\a`, "--versions", "--at", "2026-10-01"},
 		{`C:\a`},
-		{`C:\a`, "--to", `E:\Restauration`},
+		{`C:\a`, "--versions", "--to", `E:\Restauration`},
+		{`C:\a`, "--to", `E:\Restauration`, "--in-place"},
 		{`C:\a`, "--in-place"},
+		{`C:\a`, "--replace"},
 		{`C:\a`, "--list", "--at", "hier"},
 	}
 	for _, args := range cases {
@@ -150,7 +203,7 @@ func TestRestoreList(t *testing.T) {
 		t.Fatalf("%d %s", code, stderr)
 	}
 	// dernière sauvegarde : Notes.txt supprimé n'y est pas
-	if !strings.Contains(out, "Factures/2026.pdf") || strings.Contains(out, "Notes.txt") || !strings.Contains(out, "1 fichier(s)") {
+	if !strings.Contains(out, `Factures\2026.pdf`) || strings.Contains(out, "Notes.txt") || !strings.Contains(out, "1 fichier(s)") {
 		t.Errorf("%s", out)
 	}
 	if l.prefixes[0] != "acme-portable01/documents" {
@@ -207,7 +260,7 @@ func TestRestoreBucketError(t *testing.T) {
 	if code, _, stderr := restoreRun(d, `D:\Projets`, "--list"); code != exitRestoreBucket || !strings.Contains(stderr, "AccessDenied") {
 		t.Fatalf("%d %q", code, stderr)
 	}
-	d.bucket = func(*config.Config) (restore.Lister, error) { return nil, errors.New("profile.aws_credentials absent") }
+	d.bucket = func(*config.Config) (restoreBucket, error) { return nil, errors.New("profile.aws_credentials absent") }
 	if code, _, _ := restoreRun(d, `D:\Projets`, "--list"); code != exitRestoreConfig {
 		t.Fatalf("clé absente : %d", code)
 	}
