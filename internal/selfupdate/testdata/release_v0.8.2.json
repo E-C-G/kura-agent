@@ -1,0 +1,53 @@
+{
+ "tag_name": "v0.8.2",
+ "name": "kura-agent 0.8.2",
+ "draft": false,
+ "prerelease": false,
+ "immutable": true,
+ "published_at": "2026-10-28T06:08:32Z",
+ "html_url": "https://github.com/E-C-G/kura-agent/releases/tag/v0.8.2",
+ "assets": [
+  {
+   "name": "kura-agent_0.8.2_amd64.deb",
+   "size": 2563532,
+   "digest": "sha256:8f29f5ba2e24f465aa74f2eb1141df5e36e1d0cf9ab73fd30a6ff9c4d730f6b9",
+   "browser_download_url": "https://github.com/E-C-G/kura-agent/releases/download/v0.8.2/kura-agent_0.8.2_amd64.deb"
+  },
+  {
+   "name": "kura-agent_0.8.2_arm64.deb",
+   "size": 2180636,
+   "digest": "sha256:4555392a8b13f1f5502747f8d10f401a3c7330abbcd487f6d860a8cf771657b2",
+   "browser_download_url": "https://github.com/E-C-G/kura-agent/releases/download/v0.8.2/kura-agent_0.8.2_arm64.deb"
+  },
+  {
+   "name": "kura-agent_0.8.2_darwin_amd64.tar.gz",
+   "size": 3268481,
+   "digest": "sha256:1120a7ed8c133fd786f4aa67fe19abea1886201b3c86787ed696f15194e0e82d",
+   "browser_download_url": "https://github.com/E-C-G/kura-agent/releases/download/v0.8.2/kura-agent_0.8.2_darwin_amd64.tar.gz"
+  },
+  {
+   "name": "kura-agent_0.8.2_darwin_arm64.tar.gz",
+   "size": 2999689,
+   "digest": "sha256:751d6556bdba2db6ed72e2293ee7f8fa3f4b9ae8e261a49e51841ece33ce5068",
+   "browser_download_url": "https://github.com/E-C-G/kura-agent/releases/download/v0.8.2/kura-agent_0.8.2_darwin_arm64.tar.gz"
+  },
+  {
+   "name": "kura-agent_0.8.2_windows_amd64.exe",
+   "size": 8246272,
+   "digest": "sha256:2539b14df07e01de6a81e0bb6b0acf7276554c7aeace22dd1b31a81fef6b5781",
+   "browser_download_url": "https://github.com/E-C-G/kura-agent/releases/download/v0.8.2/kura-agent_0.8.2_windows_amd64.exe"
+  },
+  {
+   "name": "kura-agent_0.8.2_windows_amd64.zip",
+   "size": 6593042,
+   "digest": "sha256:bc1d1e62dbb67f56fa58a8fd174e4e0c51ab15feea53af2bddfb5a5b0346c1fb",
+   "browser_download_url": "https://github.com/E-C-G/kura-agent/releases/download/v0.8.2/kura-agent_0.8.2_windows_amd64.zip"
+  },
+  {
+   "name": "SHA256SUMS",
+   "size": 594,
+   "digest": "sha256:4c262b52461ae7024f63d75a53fc6458704673c72d09be2a9141e353a0b344e3",
+   "browser_download_url": "https://github.com/E-C-G/kura-agent/releases/download/v0.8.2/SHA256SUMS"
+  }
+ ]
+}

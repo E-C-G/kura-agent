@@ -20,9 +20,10 @@ Console d'administration associée : [E-C-G/kura-ctl](https://github.com/E-C-G/k
 | 5 bis | `import` : clé d'un paquet `.kura` préparé par la console kura-ctl | **fait** |
 | 5 ter | `install --package` : poste installé en une fois depuis un paquet de la console, CLI AWS comprise | **fait** |
 | 6 | Restauration (V2) | à faire |
+| 7 | `self-update` : lot 1, `--check` (recherche et vérification de l'attestation GitHub) | **fait** |
 
 Commandes disponibles : `run`, `validate`, `status`, `credentials`, `import`, `install`, `uninstall`,
-`suspend`, `tray`, `version`.
+`suspend`, `tray`, `self-update`, `version`.
 
 ## Systèmes pris en charge
 
@@ -566,6 +567,39 @@ toute la passe était à refaire. L'agent lance `aws.exe` avec `AWS_RETRY_MODE=s
 20 s, pendant environ 2 minutes. Au-delà, l'agent relance la commande entière (2 nouvelles
 tentatives à 5 min d'intervalle, voir plus haut).
 
+## Nouvelles versions : `kura-agent self-update`
+
+```text
+kura-agent self-update --check [--version vX.Y.Z] [--json] [--config FICHIER]
+```
+
+`--check` cherche la dernière release de `E-C-G/kura-agent` (ou celle de `--version`) et vérifie
+l'archive de ce système (Windows : `.zip`, Ubuntu : `.deb`, macOS : `.tar.gz`), sans rien
+télécharger d'autre ni rien modifier ; pas besoin de droits d'administrateur. L'installation par
+`self-update` arrive avec la 0.10.0.
+
+Une release n'est acceptée que si elle est publiée, ni brouillon ni préversion, **immuable**
+(réglage « releases immuables » du dépôt), et si son **attestation de release** couvre
+l'archive : GitHub signe pour chaque release immuable la liste des fichiers avec leur empreinte
+SHA-256, le tag et le commit. L'agent la récupère par l'API des attestations et la vérifie avec
+`sigstore-go`, comme `gh release verify` : certificat jusqu'à la racine de confiance de GitHub
+embarquée (`internal/selfupdate/github_trusted_root.json`), horodatage signé par GitHub, identité
+`https://dotcom.releases.github.com`, puis dépôt, tag, nom et empreinte de l'archive.
+
+GitHub ajoute une autorité à sa racine environ tous les six mois. Le workflow
+`trust-root.yml` compare chaque semaine la copie embarquée à celle du dépôt TUF de GitHub et
+échoue quand elle est périmée : publier alors un agent avec la nouvelle racine. Un agent resté
+sans mise à jour au-delà d'un changement d'autorité refuse les releases suivantes et se met à
+jour une fois à la main.
+
+Codes de sortie : 0 à jour (ou version de développement) · 3 version plus récente disponible ·
+4 refusé · 5 recherche ou vérification en échec (rien n'est modifié).
+
+Proxy : la tâche planifiée tourne sous le compte système, sans le proxy de l'utilisateur.
+`update.proxy` dans la configuration (`http://proxy.example.com:3128`, sans identifiants) ;
+sinon les variables `HTTPS_PROXY` / `NO_PROXY` de l'environnement. Seule la section `update`
+est lue : une configuration invalide n'empêche pas la recherche.
+
 ## Codes de sortie de `run`
 
 | Code | Signification |
@@ -625,6 +659,7 @@ internal/setup/     ACL, copie des fichiers, icône au démarrage, ancien compte
 internal/awsinstall/ CLI AWS absente : MSI fourni ou téléchargé, signature Amazon vérifiée, msiexec
 internal/schedtask/ tâche \Kura\Sync : XML du Planificateur, schtasks
 internal/paths/     emplacements sur disque
+internal/selfupdate/ nouvelles versions : releases GitHub, attestation de release vérifiée (sigstore-go)
 ```
 
 `internal/runner` ne dépend d'aucune interface graphique : ses tests utilisent une fausse CLI AWS

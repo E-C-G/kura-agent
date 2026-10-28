@@ -30,6 +30,15 @@ type Config struct {
 	Tray      Tray       `yaml:"tray"`
 	Notify    Notify     `yaml:"notify"`
 	Logging   Logging    `yaml:"logging"`
+	Update    Update     `yaml:"update"`
+}
+
+// Update règle la recherche des nouvelles versions de l'agent (kura-agent self-update).
+type Update struct {
+	// Proxy : proxy HTTP(S) vers GitHub, ex. http://proxy.example.com:3128. La tâche
+	// planifiée tourne sous SYSTEM, sans le proxy de l'utilisateur. Vide : variables
+	// HTTPS_PROXY / NO_PROXY de l'environnement, sinon connexion directe.
+	Proxy string `yaml:"proxy"`
 }
 
 // Profile décrit la destination Wasabi et l'outil de copie.
@@ -380,4 +389,21 @@ func ReadTray(path string) (Tray, error) {
 		return Tray{}, err
 	}
 	return doc.Tray, nil
+}
+
+// ReadUpdate lit la seule section update, même si le reste du fichier ne passe pas
+// la validation : la recherche d'une nouvelle version (qui peut corriger l'erreur) ne
+// doit pas en dépendre.
+func ReadUpdate(path string) (Update, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return Update{}, err
+	}
+	var doc struct {
+		Update Update `yaml:"update"`
+	}
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		return Update{}, err
+	}
+	return doc.Update, nil
 }
