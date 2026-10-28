@@ -61,6 +61,7 @@ Usage :
   kura-agent self-update --rollback
   kura-agent restore  CHEMIN --versions [--json] [--config FICHIER]
   kura-agent restore  CHEMIN | --all  --list [--at DATE] [--json] [--config FICHIER]
+  kura-agent restore  CHEMIN | --all  --to DOSSIER [--at DATE] [--yes] [--json] [--config FICHIER]
   kura-agent version
 
 Commandes :
@@ -80,10 +81,10 @@ Commandes :
   self-update  installe la dernière version publiée sur GitHub, attestation de release
                vérifiée, en gardant la précédente (--rollback la remet) ; console
                d'administration. --check : recherche seule, sans droits (code 3 : disponible)
-  restore      retrouve des fichiers dans le bucket : --versions (historique d'un fichier),
-               --list (ce qui serait restauré, état à la date --at : AAAA-MM-JJ ou
-               "AAAA-MM-JJ HH:MM", 90 jours au plus) ; lecture seule ; console
-               d'administration
+  restore      restaure des fichiers depuis le bucket, tels qu'à la dernière sauvegarde
+               ou à la date --at (AAAA-MM-JJ ou "AAAA-MM-JJ HH:MM", 90 jours au plus),
+               dans un dossier --to absent ou vide ; --versions : historique d'un
+               fichier ; --list : ce qui serait restauré ; console d'administration
   version      affiche la version
 
 Codes de sortie de run : 0 OK · 1 avertissement · 2 erreur · 3 configuration invalide
@@ -518,6 +519,7 @@ func cmdStatus(args []string) int {
 	if st == nil {
 		fmt.Println("aucune exécution enregistrée")
 		if !*asJSON {
+			printRestoreStatus(os.Stdout, paths.RestoreFile())
 			printUpdateStatus(os.Stdout)
 		}
 		return 0
@@ -529,6 +531,7 @@ func cmdStatus(args []string) int {
 		return 0
 	}
 	printSummary(os.Stdout, st)
+	printRestoreStatus(os.Stdout, paths.RestoreFile())
 	printUpdateStatus(os.Stdout)
 	return 0
 }

@@ -19,7 +19,7 @@ Console d'administration associée : [E-C-G/kura-ctl](https://github.com/E-C-G/k
 | 5 | Icône par session : état, préavis et fermeture douce d'Outlook, relance, annulation, suspension | **fait** |
 | 5 bis | `import` : clé d'un paquet `.kura` préparé par la console kura-ctl | **fait** |
 | 5 ter | `install --package` : poste installé en une fois depuis un paquet de la console, CLI AWS comprise | **fait** |
-| 6 | Restauration : lot 1, lecture seule (`restore --versions`, `--list`, état à une date) | **lot 1 fait** |
+| 6 | Restauration : historique, état à une date (lot 1), restauration vers un dossier à part, journal, bilan (lot 2) ; en place (lot 3) et depuis l'icône (lot 4) à venir | **lots 1 et 2 faits** |
 | 7 | `self-update` : recherche et vérification de l'attestation GitHub, installation, retour arrière, icône | **fait** |
 
 Commandes disponibles : `run`, `validate`, `status`, `credentials`, `import`, `install`, `uninstall`,
@@ -473,6 +473,40 @@ L'agent envoie en `POST` un bilan JSON à la fin de chaque exécution réelle :
 - Côté broker, prévoir aussi un contrôle quotidien « aucun bilan réussi depuis 48 h », que l'agent
   ne peut pas faire lui-même quand le serveur est éteint.
 
+Après chaque restauration (`kura-agent restore … --to`), le webhook reçoit un message à part,
+sans effet sur le suivi des sauvegardes ; healthchecks reçoit le même résumé sur `<url>/log`
+(journal du check, ni succès ni échec). Le message porte les chemins demandés, pas la liste des
+fichiers ; il n'est pas mis en attente s'il ne passe pas.
+
+```json
+{
+  "event": "restore_finished",
+  "type": "restore",
+  "host": "SRV01",
+  "profile": "acme-srv01",
+  "bucket": "acme-srv01",
+  "agent_version": "0.13.0",
+  "sent_at": "2026-10-28T10:12:41Z",
+  "account": "SRV01\\admin",
+  "paths": ["D:\\Projets\\Clients"],
+  "to": "E:\\Restauration",
+  "at": "2026-10-20T23:59:59+02:00",
+  "files": 37,
+  "bytes": 441344,
+  "skipped": 0,
+  "ignored": 0,
+  "failed": 0,
+  "result": "ok",
+  "exit_code": 0,
+  "log": "C:\\ProgramData\\Kura\\logs\\restore-20261028-111203.log",
+  "started_at": "2026-10-28T11:12:03+01:00",
+  "ended_at": "2026-10-28T11:12:40+01:00"
+}
+```
+
+`result` : `ok`, `partial` (des fichiers en échec) ou `interrupted` ; `at` est absent pour
+l'état de la dernière sauvegarde.
+
 ### Secrets : `kura-agent credentials`
 
 `profile.aws_credentials`, `notify.report.url` et `notify.report.token` acceptent une référence
@@ -638,13 +672,13 @@ Proxy : la tâche planifiée tourne sous le compte système, sans le proxy de l'
 sinon les variables `HTTPS_PROXY` / `NO_PROXY` de l'environnement. Seule la section `update`
 est lue : une configuration invalide n'empêche pas la recherche.
 
-## Retrouver des fichiers : `kura-agent restore`
+## Restaurer : `kura-agent restore`
 
 Le bucket garde, grâce au versioning, chaque version remplacée ou supprimée pendant 90 jours
 (cycle de vie du modèle de bucket). `restore` lit ces versions avec la clé du poste
-(`profile.aws_credentials`, droits `ListBucketVersions`) et le SDK AWS pour Go, sans passer par
-la CLI. Console d'administration ; ce lot ne fait que lire, rien n'est écrit ni sur le disque ni
-dans le bucket.
+(`profile.aws_credentials`, droits `ListBucketVersions` et `GetObjectVersion`) et le SDK AWS pour
+Go, sans passer par la CLI. Console d'administration (`sudo` sous Ubuntu et macOS). Rien n'est
+jamais écrit dans le bucket : seules des lectures partent.
 
 ```powershell
 # historique d'un fichier : date, taille, version actuelle, suppression
@@ -654,7 +688,11 @@ kura-agent restore "C:\Users\alice\Documents\Factures\2026.pdf" --versions
 kura-agent restore "D:\Projets\Clients" --list
 kura-agent restore "D:\Projets\Clients" --list --at 2026-10-20          # fin de journée
 kura-agent restore "D:\Projets\Clients" --list --at "2026-10-20 18:00"  # heure locale
-kura-agent restore --all --list --at 2026-10-20                          # tous les jobs
+
+# restaurer dans un dossier à part
+kura-agent restore "D:\Projets\Clients" --at 2026-10-20 --to "E:\Restauration"
+kura-agent restore "C:\Users\alice\Documents\Factures\2026.pdf" --to "E:\Restauration"
+kura-agent restore --all --at 2026-10-20 --to "E:\Restauration" --yes   # tous les jobs
 ```
 
 Le chemin est rattaché au job dont la source le contient (la plus précise si des sources
@@ -662,15 +700,42 @@ s'imbriquent) ; sa clé dans le bucket est la destination du job suivie du chemi
 Windows la casse est ignorée, comme sur le disque. L'état à une date retient, fichier par fichier,
 la dernière version enregistrée au plus tard à cette date ; un fichier supprimé à cette date n'y
 figure pas. `--list` signale ce qui a changé depuis (« modifié depuis », « supprimé du poste le… »)
-et les noms qu'une restauration refuserait (`..`, noms réservés de Windows, caractères interdits).
-Au-delà de 90 jours, l'état peut être incomplet : un avertissement le rappelle. `--json` pour
-un traitement automatique.
+et les noms qu'une restauration refuserait (`..`, noms réservés de Windows, caractères interdits,
+deux noms qui ne diffèrent que par la casse). Au-delà de 90 jours, l'état peut être incomplet : un
+avertissement le rappelle. `--json` pour un traitement automatique.
 
-La restauration des fichiers (`--to DOSSIER`, puis `--in-place`) et la restauration de ses propres
-données depuis l'icône viendront dans les versions suivantes.
+**`--to DOSSIER`** : un dossier absent (créé) ou vide, hors des sources des jobs (la copie
+partirait sinon à la sauvegarde suivante). Un dossier restauré y arrive sous son nom
+(`E:\Restauration\Clients\…`), un fichier directement, et avec `--all` chaque job dans un
+sous-dossier nommé d'après lui. Avant toute lecture : résumé (fichiers, volume, date de l'état,
+destination, espace libre), espace libre comparé au volume avec 10 % de marge, puis confirmation
+(`--yes` obligatoire hors d'un terminal). Ensuite :
 
-Codes de sortie : 0 OK · 3 configuration illisible, chemin hors des sources des jobs, clé absente ·
-4 refusé (droits, options) · 5 bucket injoignable ou clé refusée.
+- 8 fichiers lus à la fois ; chacun est écrit dans un fichier temporaire du dossier final, sa
+  taille comparée à celle de la version (et son empreinte MD5 pour un envoi en une partie), puis
+  renommé à son nom ; rien n'est jamais écrasé ;
+- toutes les écritures passent par `os.Root` : rien ne sort de la destination, et un lien
+  symbolique ou une jonction rencontré arrête le fichier concerné (signalé en échec) ;
+- un fichier restauré porte la date de la sauvegarde qui l'a envoyé (la CLI AWS ne garde pas la
+  date d'origine) ; sous Windows il hérite des droits du dossier, sous Ubuntu et macOS il prend
+  le propriétaire et le groupe du dossier qui le reçoit (0644, dossiers 0755) ;
+- interrompue (Ctrl+C, coupure) ou terminée avec des fichiers en échec, la restauration laisse
+  `.kura-restore.json` et `.kura-restore.done` dans la destination : la même commande relancée
+  saute ce qui est fait et ne relit que le reste ; une autre restauration vers ce dossier est
+  refusée. Terminée sans échec, ces deux fichiers disparaissent.
+
+Journal : `restore-AAAAMMJJ-HHMMSS.log` dans le dossier des journaux, une ligne par fichier
+(`OK`, `DÉJÀ`, `REFUSÉ`, `ÉCHEC`, avec version, date et taille), la commande et le compte.
+`kura-agent status` affiche la dernière restauration. Chaque restauration est signalée au bilan
+(voir le webhook ci-dessus) ; `--versions` et `--list` ne le sont pas.
+
+La restauration en place (`--in-place`, `--replace`) et celle de ses propres données depuis
+l'icône viendront dans les versions suivantes.
+
+Codes de sortie : 0 restauration faite, ou rien à restaurer · 1 restauration partielle ou
+interrompue (relancer la même commande) · 3 configuration illisible, chemin hors des sources des
+jobs, clé absente · 4 refusé (droits, options, destination, confirmation, espace disque) ·
+5 bucket injoignable ou clé refusée, rien n'a été écrit.
 
 ## Codes de sortie de `run`
 
@@ -698,12 +763,15 @@ C:\ProgramData\Kura\
 ├── status.json              état courant, réécrit atomiquement
 ├── history.jsonl            une ligne par exécution
 ├── suspend.json             suspension en cours (kura-agent suspend)
+├── restore.json             dernière restauration (kura-agent status)
 ├── credentials\             secrets chiffrés (administrateurs seulement)
 ├── pending\                 bilans webhook en attente de renvoi
-└── logs\runs\2026-10-24_2230\
-    ├── run.log              déroulé de l'exécution
-    ├── data.log             commandes et sortie brute d'aws pour le job "data"
-    └── outlook.log
+└── logs\
+    ├── restore-20261028-111203.log   une restauration, une ligne par fichier
+    └── runs\2026-10-24_2230\
+        ├── run.log          déroulé de l'exécution
+        ├── data.log         commandes et sortie brute d'aws pour le job "data"
+        └── outlook.log
 ```
 
 `KURA_DATA_DIR` remplace `C:\ProgramData\Kura` (tests, développement).
@@ -732,7 +800,7 @@ internal/awsinstall/ CLI AWS absente : MSI fourni ou téléchargé, signature Am
 internal/schedtask/ tâche \Kura\Sync : XML du Planificateur, schtasks
 internal/paths/     emplacements sur disque
 internal/selfupdate/ nouvelles versions : releases GitHub, attestation de release vérifiée (sigstore-go)
-internal/restore/   restauration : chemin → clé, versions du bucket (SDK AWS), état à une date
+internal/restore/   restauration : chemin → clé, versions du bucket (SDK AWS), état à une date, écriture confinée
 ```
 
 `internal/runner` ne dépend d'aucune interface graphique : ses tests utilisent une fausse CLI AWS

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -15,7 +16,9 @@ import (
 
 	"github.com/E-C-G/kura-agent/internal/creds"
 	"github.com/E-C-G/kura-agent/internal/paths"
+	"github.com/E-C-G/kura-agent/internal/report"
 	"github.com/E-C-G/kura-agent/internal/restore"
+	"github.com/E-C-G/kura-agent/internal/selfupdate"
 	"github.com/E-C-G/kura-agent/internal/setup"
 	"github.com/E-C-G/kura-agent/pkg/config"
 )
@@ -36,16 +39,35 @@ const retention = 90 * 24 * time.Hour
 type restoreDeps struct {
 	checkAdmin func() error
 	loadConfig func(path string) (*config.Config, error)
-	bucket     func(cfg *config.Config) (restore.Lister, error)
+	bucket     func(cfg *config.Config) (restoreBucket, error)
 	now        func() time.Time
 	windows    bool
+	foldCase   bool // système de fichiers insensible à la casse (Windows, macOS)
+
+	// lot 2 : restauration vers --to
+	interactive bool
+	confirm     func(prompt string) (bool, error)
+	freeSpace   func(dir string) (uint64, error)
+	owner       func(dir string) (restore.Owner, error)
+	logsDir     string
+	statusFile  string
+	account     func() string
+	report      func(ctx context.Context, cfg *config.Config, info report.RestoreInfo) error
+	workers     int
+	version     string
+}
+
+// restoreBucket : lecture seule, lister et lire des versions.
+type restoreBucket interface {
+	restore.Lister
+	restore.Getter
 }
 
 func realRestoreDeps() restoreDeps {
 	return restoreDeps{
 		checkAdmin: setup.CheckAdmin,
 		loadConfig: func(p string) (*config.Config, error) { return config.Load(p, config.LoadOptions{}) },
-		bucket: func(cfg *config.Config) (restore.Lister, error) {
+		bucket: func(cfg *config.Config) (restoreBucket, error) {
 			if cfg.Profile.AWSCredentials == "" {
 				return nil, errors.New("profile.aws_credentials absent : la restauration lit la clé du poste dans le coffre (credential:<nom>)")
 			}
@@ -59,8 +81,29 @@ func realRestoreDeps() restoreDeps {
 			}
 			return restore.NewBucket(cfg.Profile.Endpoint, cfg.Profile.Region, cfg.Profile.Bucket, k.AccessKeyID, k.SecretAccessKey, nil), nil
 		},
-		now:     time.Now,
-		windows: runtime.GOOS == "windows",
+		now:         time.Now,
+		windows:     runtime.GOOS == "windows",
+		foldCase:    runtime.GOOS == "windows" || runtime.GOOS == "darwin",
+		interactive: stdinIsTerminal(),
+		confirm: func(prompt string) (bool, error) {
+			fmt.Fprint(os.Stderr, prompt)
+			line, err := readLine()
+			if err != nil {
+				return false, err
+			}
+			a := strings.ToLower(strings.TrimSpace(line))
+			return a == "o" || a == "oui" || a == "y" || a == "yes", nil
+		},
+		freeSpace:  selfupdate.FreeSpace,
+		owner:      destOwner,
+		logsDir:    paths.LogsDir(),
+		statusFile: paths.RestoreFile(),
+		account:    currentAccount,
+		report: func(ctx context.Context, cfg *config.Config, info report.RestoreInfo) error {
+			return report.Restore(ctx, cfg.Notify.Report, vault(), reportOptions(cfg), info)
+		},
+		workers: 8,
+		version: version,
 	}
 }
 
@@ -98,10 +141,10 @@ func runRestore(args []string, stdout, stderr io.Writer, d restoreDeps) int {
 	list := fs.Bool("list", false, "ce qui serait restauré (fichiers, tailles, total), sans rien écrire")
 	atFlag := fs.String("at", "", "date de l'état : AAAA-MM-JJ (fin de journée) ou \"AAAA-MM-JJ HH:MM\", heure locale")
 	all := fs.Bool("all", false, "tous les jobs de la configuration")
-	to := fs.String("to", "", "destination à part (version suivante)")
+	to := fs.String("to", "", "dossier où restaurer, absent ou vide, hors des sources des jobs")
 	inPlace := fs.Bool("in-place", false, "restauration en place (version suivante)")
 	replace := fs.Bool("replace", false, "avec --in-place : remplace les fichiers qui diffèrent (version suivante)")
-	fs.Bool("yes", false, "sans confirmation")
+	yes := fs.Bool("yes", false, "sans confirmation (obligatoire hors d'un terminal)")
 	asJSON := fs.Bool("json", false, "résultat en JSON")
 	cfgPath := fs.String("config", paths.ConfigFile(), "fichier de configuration installé")
 	pos, flags := splitPositional(args, map[string]bool{"at": true, "to": true, "config": true})
@@ -123,10 +166,12 @@ func runRestore(args []string, stdout, stderr io.Writer, d restoreDeps) int {
 		return refuse("--versions ou --list, pas les deux")
 	case *versions && (*all || *atFlag != ""):
 		return refuse("--versions vaut pour un fichier, sans --all ni --at")
-	case *to != "" || *inPlace || *replace:
-		return refuse("la restauration des fichiers (--to, --in-place) arrive avec la version suivante de kura-agent ; pour l'instant : --versions et --list")
-	case !*versions && !*list:
-		return refuse("la restauration des fichiers arrive avec la version suivante de kura-agent ; pour l'instant : --versions (historique d'un fichier) ou --list (ce qui serait restauré)")
+	case *versions && *to != "":
+		return refuse("--versions n'écrit rien : sans --to")
+	case *inPlace || *replace:
+		return refuse("la restauration en place (--in-place, --replace) arrive avec la version suivante de kura-agent ; pour l'instant : --to DOSSIER")
+	case !*versions && !*list && *to == "":
+		return refuse("destination manquante : --to DOSSIER (ou --list pour voir ce qui serait restauré, --versions pour l'historique d'un fichier)")
 	}
 	if err := d.checkAdmin(); err != nil {
 		return refuse("%v", err)
@@ -175,34 +220,55 @@ func runRestore(args []string, stdout, stderr io.Writer, d restoreDeps) int {
 		fmt.Fprintln(stderr, err)
 		return exitRestoreConfig
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+	listCtx, cancel := context.WithTimeout(ctx, 30*time.Minute)
 	defer cancel()
 
 	if *versions {
-		return restoreVersions(ctx, stdout, stderr, b, targets[0], d.windows, *asJSON)
+		return restoreVersions(listCtx, stdout, stderr, b, targets[0], d.windows, *asJSON)
 	}
 	if !at.IsZero() && now.Sub(at) > retention {
 		fmt.Fprintf(stderr, "Attention : au-delà de 90 jours, les versions remplacées ont été effacées par le cycle de vie du bucket : l'état du %s peut être incomplet.\n", at.Format("02/01/2006"))
 	}
+	// Destination vérifiée avant toute lecture du bucket.
+	var dest *destCheck
+	if *to != "" && !*list {
+		var code int
+		if dest, code = checkDest(stderr, d, cfg, *to, targets, at); dest == nil {
+			return code
+		}
+	}
 	var reports []listReport
 	for _, t := range targets {
-		vs, err := listTarget(ctx, b, t, d.windows)
+		vs, err := listTarget(listCtx, b, t, d.windows)
 		if err != nil {
 			fmt.Fprintln(stderr, err)
 			return exitRestoreBucket
 		}
 		reports = append(reports, listReport{target: t, files: restore.StateAt(vs, t, at, d.windows)})
 	}
+	if dest != nil {
+		return restoreTo(ctx, stdout, stderr, d, cfg, b, dest, reports, at, *all, *yes, *asJSON, args)
+	}
 	if *asJSON {
-		return printListJSON(stdout, reports, at)
+		return printListJSON(stdout, reports, at, d.windows)
 	}
 	for i, r := range reports {
 		if i > 0 {
 			fmt.Fprintln(stdout)
 		}
-		printList(stdout, r, at)
+		printList(stdout, r, at, d.windows)
 	}
 	return exitRestoreOK
+}
+
+// dispPath : chemin tel que le système l'écrit (\ sous Windows).
+func dispPath(p string, windows bool) string {
+	if windows {
+		return strings.ReplaceAll(p, "/", `\`)
+	}
+	return p
 }
 
 // absLocal rend absolu un chemin relatif au dossier courant. Un chemin Windows déjà
@@ -244,7 +310,7 @@ type listReport struct {
 
 func restoreVersions(ctx context.Context, stdout, stderr io.Writer, b restore.Lister, t restore.Target, foldCase, asJSON bool) int {
 	if t.Root {
-		fmt.Fprintf(stderr, "Refusé : %s est la source entière du job %s ; --versions vaut pour un fichier, --list pour un dossier.\n", t.Local, t.Job.ID)
+		fmt.Fprintf(stderr, "Refusé : %s est la source entière du job %s ; --versions vaut pour un fichier, --list pour un dossier.\n", dispPath(t.Local, foldCase), t.Job.ID)
 		return exitRestoreRefused
 	}
 	vs, err := listTarget(ctx, b, t, foldCase)
@@ -254,7 +320,7 @@ func restoreVersions(ctx context.Context, stdout, stderr io.Writer, b restore.Li
 	}
 	h := restore.History(vs, t.Key, foldCase)
 	if len(h) == 0 && hasBelow(vs, t, foldCase) {
-		fmt.Fprintf(stderr, "Refusé : %s est un dossier ; --versions vaut pour un fichier, --list pour un dossier.\n", t.Local)
+		fmt.Fprintf(stderr, "Refusé : %s est un dossier ; --versions vaut pour un fichier, --list pour un dossier.\n", dispPath(t.Local, foldCase))
 		return exitRestoreRefused
 	}
 	if asJSON {
@@ -270,7 +336,7 @@ func restoreVersions(ctx context.Context, stdout, stderr io.Writer, b restore.Li
 			Job      string `json:"job"`
 			Key      string `json:"key"`
 			Versions []jv   `json:"versions"`
-		}{Path: t.Local, Job: t.Job.ID, Key: t.Key, Versions: []jv{}}
+		}{Path: dispPath(t.Local, foldCase), Job: t.Job.ID, Key: t.Key, Versions: []jv{}}
 		for _, v := range h {
 			out.Versions = append(out.Versions, jv{Date: v.LastModified, Size: v.Size, Deleted: v.Deleted, Current: v.Latest, VersionID: v.VersionID})
 		}
@@ -279,7 +345,7 @@ func restoreVersions(ctx context.Context, stdout, stderr io.Writer, b restore.Li
 		_ = enc.Encode(out)
 		return exitRestoreOK
 	}
-	fmt.Fprintf(stdout, "Historique de %s (job %s, clé %s)\n", t.Local, t.Job.ID, t.Key)
+	fmt.Fprintf(stdout, "Historique de %s (job %s, clé %s)\n", dispPath(t.Local, foldCase), t.Job.ID, t.Key)
 	if len(h) == 0 {
 		fmt.Fprintln(stdout, "Aucune version : jamais sauvegardé, exclu par le job, ou effacé depuis plus de 90 jours.")
 		return exitRestoreOK
@@ -317,12 +383,12 @@ func hasBelow(vs []restore.Version, t restore.Target, foldCase bool) bool {
 	return false
 }
 
-func printList(w io.Writer, r listReport, at time.Time) {
+func printList(w io.Writer, r listReport, at time.Time, windows bool) {
 	when := "à la dernière sauvegarde"
 	if !at.IsZero() {
 		when = "au " + at.Local().Format("02/01/2006 15:04")
 	}
-	fmt.Fprintf(w, "État de %s %s (job %s) :\n", r.target.Local, when, r.target.Job.ID)
+	fmt.Fprintf(w, "État de %s %s (job %s) :\n", dispPath(r.target.Local, windows), when, r.target.Job.ID)
 	if len(r.files) == 0 {
 		fmt.Fprintln(w, "  aucun fichier à cette date.")
 		return
@@ -339,7 +405,7 @@ func printList(w io.Writer, r listReport, at time.Time) {
 		case f.NewerSince:
 			note = "  (modifié depuis)"
 		}
-		fmt.Fprintf(w, "  %-60s %10s  sauvegardé le %s%s\n", f.Rel, humanSize(f.Version.Size),
+		fmt.Fprintf(w, "  %-60s %10s  sauvegardé le %s%s\n", dispPath(f.Rel, windows), humanSize(f.Version.Size),
 			f.Version.LastModified.Local().Format("02/01/2006 15:04"), note)
 	}
 	fmt.Fprintf(w, "%d fichier(s), %s.", len(r.files), humanSize(restore.Total(r.files)))
@@ -349,7 +415,7 @@ func printList(w io.Writer, r listReport, at time.Time) {
 	fmt.Fprintln(w)
 }
 
-func printListJSON(w io.Writer, reports []listReport, at time.Time) int {
+func printListJSON(w io.Writer, reports []listReport, at time.Time, windows bool) int {
 	type jf struct {
 		Path         string     `json:"path"`
 		Size         int64      `json:"size"`
@@ -373,9 +439,9 @@ func printListJSON(w io.Writer, reports []listReport, at time.Time) int {
 		out.At = &at
 	}
 	for _, r := range reports {
-		t := jt{Path: r.target.Local, Job: r.target.Job.ID, Files: []jf{}, Total: restore.Total(r.files)}
+		t := jt{Path: dispPath(r.target.Local, windows), Job: r.target.Job.ID, Files: []jf{}, Total: restore.Total(r.files)}
 		for _, f := range r.files {
-			t.Files = append(t.Files, jf{Path: f.Rel, Size: f.Version.Size, BackedUp: f.Version.LastModified,
+			t.Files = append(t.Files, jf{Path: dispPath(f.Rel, windows), Size: f.Version.Size, BackedUp: f.Version.LastModified,
 				VersionID: f.Version.VersionID, DeletedSince: f.DeletedSince, NewerSince: f.NewerSince, Problem: f.Problem})
 		}
 		out.Targets = append(out.Targets, t)

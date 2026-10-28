@@ -94,18 +94,23 @@ func (w *webhook) deliver(ctx context.Context, p Payload) error {
 	if err != nil {
 		return permanentError{err}
 	}
+	return send(ctx, w.opt, w.url, body, w.headers(p.SentAt, body))
+}
+
+// headers : type, et jeton ou signature HMAC du corps.
+func (w *webhook) headers(sent time.Time, body []byte) http.Header {
 	h := http.Header{"Content-Type": {"application/json"}}
 	if w.token != "" {
 		if w.hmac {
 			// La signature suffit : le jeton lui-même ne voyage pas.
-			ts := strconv.FormatInt(p.SentAt.Unix(), 10)
+			ts := strconv.FormatInt(sent.Unix(), 10)
 			h.Set("X-Kura-Timestamp", ts)
 			h.Set("X-Kura-Signature", "sha256="+Sign(w.token, ts, body))
 		} else {
 			h.Set("X-Kura-Token", w.token)
 		}
 	}
-	return send(ctx, w.opt, w.url, body, h)
+	return h
 }
 
 // Sign calcule la signature HMAC-SHA256 de « <timestamp>.<corps> » avec le jeton.
