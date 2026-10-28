@@ -47,12 +47,10 @@ type serveDeps struct {
 	restoreDeps
 	sessions func() ([]int, error)
 	dial     func(session int) (io.ReadWriteCloser, trayUser, error)
-	// created : date de création d'un dossier (NTFS) ; false si inconnue.
-	created func(dir string) (time.Time, bool)
-	poll    time.Duration // recherche des fenêtres ouvertes
-	idle    time.Duration // connexion sans demande : fermée
-	linger  time.Duration // plus aucune fenêtre : fin du processus
-	logw    io.Writer
+	poll     time.Duration // recherche des fenêtres ouvertes
+	idle     time.Duration // connexion sans demande : fermée
+	linger   time.Duration // plus aucune fenêtre : fin du processus
+	logw     io.Writer
 }
 
 const (
@@ -318,13 +316,9 @@ func (ts *traySession) list(ctx context.Context, peer *ipc.Peer, m ipc.Msg, rd *
 	t, _ := restore.Resolve(ts.cfg, dir, ts.sd.windows)
 	lctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer cancel()
-	var vs []restore.Version
-	if _, statErr := os.Lstat(dir); statErr == nil {
-		vs, err = listTarget(lctx, ts.b, t, ts.sd.windows)
-	} else {
-		// Dossier disparu : préfixe exact seulement (pas de relecture du job entier).
-		vs, err = ts.b.ListVersions(lctx, t.Prefix())
-	}
+	// Préfixe exact seulement, jamais de relecture du job entier depuis l'icône : le
+	// sélecteur de dossiers donne la casse du disque, celle des clés.
+	vs, err := ts.b.ListVersions(lctx, t.Prefix())
 	if err != nil {
 		ts.logf("%s : liste de %s : %v", ts.u.Account(), dir, err)
 		fail("Bucket injoignable : %v", err)
@@ -406,9 +400,10 @@ func (ts *traySession) reach(dir string) (string, bool) {
 //     ouvert en liste et en écriture : le sous-dossier privé d'un dossier commun
 //     n'apparaît pas ;
 //   - un fichier encore présent lui est lisible ;
-//   - hors de son profil, un fichier supprimé n'apparaît que si son dossier existait
-//     déjà quand cette version a été sauvegardée : un dossier supprimé puis recréé par
-//     un autre compte ne rend pas visibles les fichiers d'avant.
+//   - hors de son profil, seuls les fichiers encore présents (et lisibles) : un fichier
+//     supprimé d'un dossier commun a pu appartenir à un autre compte, et rien sur le
+//     disque ne le prouve (un dossier se recrée, sa date se modifie) ; il se restaure
+//     par l'administrateur, en ligne de commande.
 func (ts *traySession) visible(base string, files []restore.File) ([]restore.File, bool) {
 	home := ts.u.Home()
 	parentOf := func(f restore.File) string {
@@ -465,11 +460,8 @@ func (ts *traySession) visible(base string, files []restore.File) ([]restore.Fil
 		ok := reachOf[p] != "" && dirOK[reachOf[p]]
 		if lp, isPresent := present[i]; ok && isPresent {
 			ok = readOK[lp]
-		} else if ok && !within(home, p, ts.sd.windows) && ts.sd.created != nil {
-			// Supprimé, hors du profil : le dossier doit être plus ancien que la version.
-			if c, known := ts.sd.created(p); known && c.After(f.Version.LastModified) {
-				ok = false
-			}
+		} else if ok && !within(home, p, ts.sd.windows) {
+			ok = false // supprimé, hors du profil
 		}
 		if ok {
 			out = append(out, f)

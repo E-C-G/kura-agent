@@ -264,13 +264,15 @@ func TestServeScopeSharedFolder(t *testing.T) {
 	docs := filepath.Join(b.src, "Documents")
 	private := filepath.Join(docs, "sous dossier")
 	os.MkdirAll(private, 0o755)
+	os.WriteFile(filepath.Join(docs, "a.txt"), []byte("actuel"), 0o644)
+	os.WriteFile(filepath.Join(private, "b.txt"), []byte("privé"), 0o644)
 	u := &fakeTrayUser{account: `ACME\alice`, allowed: []string{b.src}, denied: []string{private}}
 	w, code := startServe(t, b, u)
 	<-w.hello
 
 	m := ipc.Msg{Type: ipc.TypeRestoreList, Path: docs, Restore: &ipc.RestoreData{Req: 7}}
 	r := w.request(t, m)
-	if r.Restore.Total != 2 || !strings.Contains(r.Message, "pas accessibles") || r.Restore.Req != 7 {
+	if r.Restore.Total != 1 || !strings.Contains(r.Message, "pas accessibles") || r.Restore.Req != 7 {
 		t.Fatalf("liste : %q %+v", r.Message, r.Restore)
 	}
 	w.mu.Lock()
@@ -296,46 +298,40 @@ func TestServeScopeSharedFolder(t *testing.T) {
 	<-code
 }
 
-// Fichier présent illisible pour le compte, dossier recréé après la sauvegarde : masqués.
-func TestServeScopeReadAndRecreated(t *testing.T) {
+// Hors du profil : seuls les fichiers présents et lisibles ; dans le profil, aussi les
+// fichiers supprimés.
+func TestServeScopeReadAndDeleted(t *testing.T) {
 	b := newToBench(t)
 	cfg, _ := b.d.loadConfig("")
 	cfg.Tray.Users = []string{"alice"}
 	docs := filepath.Join(b.src, "Documents")
-	sub := filepath.Join(docs, "sous dossier")
-	os.MkdirAll(sub, 0o755)
+	os.MkdirAll(filepath.Join(docs, "sous dossier"), 0o755)
 	a := filepath.Join(docs, "a.txt")
 	os.WriteFile(a, []byte("actuel"), 0o644)
-	u := &fakeTrayUser{account: `ACME\alice`, allowed: []string{b.src}, unreadable: []string{a}}
-	// « sous dossier » recréé hier : b.txt, sauvegardé il y a 10 jours, ne doit pas apparaître.
-	created := func(d string) (time.Time, bool) {
-		if d == sub {
-			return restoreNow.AddDate(0, 0, -1), true
+	os.WriteFile(filepath.Join(docs, "sous dossier", "b.txt"), []byte("actuel"), 0o644)
+	list := func(u *fakeTrayUser, req int) []string {
+		w, code := startServe(t, b, u)
+		<-w.hello
+		r := w.request(t, ipc.Msg{Type: ipc.TypeRestoreList, Path: docs, Restore: &ipc.RestoreData{Req: req}})
+		w.mu.Lock()
+		var rels []string
+		for _, f := range w.files[req] {
+			rels = append(rels, f.Rel)
 		}
-		return restoreNow.AddDate(-1, 0, 0), true
+		w.mu.Unlock()
+		if r.Restore.Total != len(rels) {
+			t.Fatalf("total %d, reçus %v", r.Restore.Total, rels)
+		}
+		w.peer.Close()
+		<-code
+		return rels
 	}
-	w, code := startServe(t, b, u, func(sd *serveDeps) { sd.created = created })
-	<-w.hello
-	r := w.request(t, ipc.Msg{Type: ipc.TypeRestoreList, Path: docs, Restore: &ipc.RestoreData{Req: 3}})
-	w.mu.Lock()
-	var rels []string
-	for _, f := range w.files[3] {
-		rels = append(rels, f.Rel)
+	// dossier commun (pas de profil) : a.txt illisible masqué, évasion (supprimé) masqué
+	if rels := list(&fakeTrayUser{account: `ACME\alice`, allowed: []string{b.src}, unreadable: []string{a}}, 3); strings.Join(rels, ",") != "sous dossier/b.txt" {
+		t.Fatalf("hors du profil : %v", rels)
 	}
-	w.mu.Unlock()
-	if r.Restore.Total != 1 || len(rels) != 1 || rels[0] != "../évasion.txt" {
-		t.Fatalf("visibles : %v (%q)", rels, r.Message)
+	// profil du compte : les fichiers supprimés apparaissent aussi
+	if rels := list(&fakeTrayUser{account: `ACME\alice`, home: b.src, allowed: []string{b.src}, unreadable: []string{a}}, 4); strings.Join(rels, ",") != "../évasion.txt,sous dossier/b.txt" {
+		t.Fatalf("profil : %v", rels)
 	}
-	// dans le profil du compte, la règle du dossier recréé ne s'applique pas
-	w.peer.Close()
-	<-code
-	u2 := &fakeTrayUser{account: `ACME\alice`, home: b.src, allowed: []string{b.src}, unreadable: []string{a}}
-	w, code = startServe(t, b, u2, func(sd *serveDeps) { sd.created = created })
-	<-w.hello
-	r = w.request(t, ipc.Msg{Type: ipc.TypeRestoreList, Path: docs, Restore: &ipc.RestoreData{Req: 4}})
-	if r.Restore.Total != 2 {
-		t.Fatalf("profil : %d (%q)", r.Restore.Total, r.Message)
-	}
-	w.peer.Close()
-	<-code
 }

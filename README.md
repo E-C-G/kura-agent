@@ -374,9 +374,10 @@ jeton du processus de l'icône (pris lors de sa vérification) : le compte doit 
 dossier commun n'apparaît pas, ni le profil d'un autre compte), et, s'il est encore présent, le lire ;
 un dossier disparu n'est restaurable depuis l'icône que dans le profil du compte (ailleurs, il a pu
 appartenir à un autre compte : restauration par l'administrateur, en ligne de commande) ; hors du
-profil, un fichier supprimé n'apparaît que si son dossier existait déjà lors de sa sauvegarde (un
-dossier supprimé puis recréé ne rend pas visibles les fichiers d'avant) ; seuls les dossiers des
-disques du poste sont proposés (pas de partage réseau) ; les fichiers sont écrits **en son nom** (emprunt
+profil, seuls les fichiers encore présents sont proposés (versions antérieures) : un fichier
+supprimé d'un dossier commun a pu appartenir à un autre compte et rien sur le disque ne le prouve,
+il se restaure par l'administrateur ; seuls les dossiers des disques du poste sont proposés (pas de
+partage réseau) ; les fichiers sont écrits **en son nom** (emprunt
 d'identité), donc à lui et seulement là où il pourrait écrire lui-même, et jamais à la place d'un
 fichier existant, même apparu pendant la restauration. Le compte ne voit jamais la clé. La date est
 bornée à 90 jours par la tâche elle-même. Pas de verrou de la sauvegarde depuis l'icône (rien n'y

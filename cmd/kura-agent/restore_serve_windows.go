@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"syscall"
 	"time"
 
 	"golang.org/x/sys/windows"
@@ -127,19 +126,6 @@ func (u *winTrayUser) CanReadAll(files []string) []error {
 	return out
 }
 
-// dirCreated : date de création d'un dossier (NTFS).
-func dirCreated(dir string) (time.Time, bool) {
-	fi, err := os.Lstat(dir)
-	if err != nil {
-		return time.Time{}, false
-	}
-	a, ok := fi.Sys().(*syscall.Win32FileAttributeData)
-	if !ok {
-		return time.Time{}, false
-	}
-	return time.Unix(0, a.CreationTime.Nanoseconds()), true
-}
-
 // canWriteHere : contrôle sur le thread courant, qui porte déjà l'identité du compte.
 func canWriteHere(dir string) error {
 	{
@@ -206,10 +192,9 @@ func realServeDeps() (serveDeps, func()) {
 			}
 			return conn, u, nil
 		},
-		created: dirCreated,
-		poll:    2 * time.Second,
-		idle:    30 * time.Minute,
-		linger:  90 * time.Second,
-		logw:    logw,
+		poll:   2 * time.Second,
+		idle:   30 * time.Minute,
+		linger: 90 * time.Second,
+		logw:   logw,
 	}, closeLog
 }

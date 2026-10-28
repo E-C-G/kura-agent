@@ -12,6 +12,7 @@ import (
 	"os"
 	"path"
 	"strings"
+	"time"
 )
 
 // Dest écrit les fichiers restaurés sous un dossier, sans jamais en sortir : chaque
@@ -151,7 +152,14 @@ func (d *Dest) Write(ctx context.Context, g Getter, rel string, v Version) error
 // exclusive, puis le temporaire est retiré. Sur un système de fichiers sans liens
 // physiques (FAT, exFAT), dernier contrôle puis renommage.
 func (d *Dest) place(tmp, rel string) error {
-	defer d.root.Remove(tmp) // sans effet une fois renommé
+	defer func() { // sans effet une fois renommé ; un antivirus peut le tenir un instant
+		for i := 0; i < 5; i++ {
+			if err := d.root.Remove(tmp); err == nil || errors.Is(err, fs.ErrNotExist) {
+				return
+			}
+			time.Sleep(200 * time.Millisecond)
+		}
+	}()
 	err := d.root.Link(tmp, rel)
 	switch {
 	case err == nil:
