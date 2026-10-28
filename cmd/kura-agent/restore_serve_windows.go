@@ -14,6 +14,8 @@ import (
 	"github.com/E-C-G/kura-agent/internal/ipc"
 	"github.com/E-C-G/kura-agent/internal/paths"
 	"github.com/E-C-G/kura-agent/internal/procs"
+	"github.com/E-C-G/kura-agent/internal/setup"
+	"github.com/E-C-G/kura-agent/internal/state"
 )
 
 // winTrayUser : compte de l'icône, d'après le jeton de son processus (copié en jeton
@@ -192,9 +194,14 @@ func realServeDeps() (serveDeps, func()) {
 			}
 			return conn, u, nil
 		},
-		poll:   2 * time.Second,
-		idle:   30 * time.Minute,
-		linger: 90 * time.Second,
-		logw:   logw,
+		quarantine: func() []state.QuarantineEntry {
+			q, _ := state.ReadQuarantine(paths.QuarantineFile())
+			return q
+		},
+		agentDirs: []string{paths.DataDir(), paths.ConfigDir(), paths.LogsDir(), paths.CredentialsDir(), setup.ProgramDir()},
+		poll:      2 * time.Second,
+		idle:      30 * time.Minute,
+		linger:    90 * time.Second,
+		logw:      logw,
 	}, closeLog
 }

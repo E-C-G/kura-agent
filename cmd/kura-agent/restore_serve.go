@@ -14,6 +14,7 @@ import (
 
 	"github.com/E-C-G/kura-agent/internal/ipc"
 	"github.com/E-C-G/kura-agent/internal/restore"
+	"github.com/E-C-G/kura-agent/internal/state"
 	"github.com/E-C-G/kura-agent/pkg/config"
 )
 
@@ -47,10 +48,15 @@ type serveDeps struct {
 	restoreDeps
 	sessions func() ([]int, error)
 	dial     func(session int) (io.ReadWriteCloser, trayUser, error)
-	poll     time.Duration // recherche des fenêtres ouvertes
-	idle     time.Duration // connexion sans demande : fermée
-	linger   time.Duration // plus aucune fenêtre : fin du processus
-	logw     io.Writer
+	// quarantine : préfixes jamais servis (liens apparus pendant une sauvegarde).
+	quarantine func() []state.QuarantineEntry
+	// agentDirs : dossiers de l'agent (données, coffre, programme) : rien dessous n'est
+	// servi depuis l'icône.
+	agentDirs []string
+	poll      time.Duration // recherche des fenêtres ouvertes
+	idle      time.Duration // connexion sans demande : fermée
+	linger    time.Duration // plus aucune fenêtre : fin du processus
+	logw      io.Writer
 }
 
 const (
@@ -337,7 +343,7 @@ func (ts *traySession) list(ctx context.Context, peer *ipc.Peer, m ipc.Msg, rd *
 		fail("%s est un fichier : choisir le dossier qui le contient.", dir)
 		return
 	}
-	files, hidden := ts.visible(dir, files)
+	files, hidden := ts.visible(dir, t.Key, files)
 	var notes []string
 	if hidden {
 		notes = append(notes, "Certains fichiers ou dossiers ne vous sont pas accessibles : ils ne sont pas listés.")
@@ -404,8 +410,9 @@ func (ts *traySession) reach(dir string) (string, bool) {
 //     supprimé d'un dossier commun a pu appartenir à un autre compte, et rien sur le
 //     disque ne le prouve (un dossier se recrée, sa date se modifie) ; il se restaure
 //     par l'administrateur, en ligne de commande.
-func (ts *traySession) visible(base string, files []restore.File) ([]restore.File, bool) {
+func (ts *traySession) visible(base, keyBase string, files []restore.File) ([]restore.File, bool) {
 	home := ts.u.Home()
+	files, hidden := ts.notForbidden(base, keyBase, files)
 	parentOf := func(f restore.File) string {
 		p := filepath.Join(base, filepath.FromSlash(path.Dir(f.Rel)))
 		if !within(base, p, ts.sd.windows) {
@@ -454,7 +461,6 @@ func (ts *traySession) visible(base string, files []restore.File) ([]restore.Fil
 		readOK[paths[i]] = err == nil
 	}
 	var out []restore.File
-	hidden := false
 	for i, f := range files {
 		p := parentOf(f)
 		ok := reachOf[p] != "" && dirOK[reachOf[p]]
@@ -468,6 +474,37 @@ func (ts *traySession) visible(base string, files []restore.File) ([]restore.Fil
 		} else {
 			hidden = true
 		}
+	}
+	return out, hidden
+}
+
+// notForbidden écarte, avant tout contrôle de droits, ce que l'icône ne sert jamais :
+//   - les préfixes en quarantaine (envoyés à travers un lien apparu pendant une
+//     sauvegarde) ;
+//   - tout chemin sous un dossier de l'agent (données, coffre, configuration, journaux,
+//     programme) ;
+//   - les fichiers du coffre et les paquets de la console (*.secret, *.kura), où qu'ils
+//     soient : un lien suivi par une sauvegarde a pu les faire entrer dans une source.
+func (ts *traySession) notForbidden(base, keyBase string, files []restore.File) ([]restore.File, bool) {
+	var q []state.QuarantineEntry
+	if ts.sd.quarantine != nil {
+		q = ts.sd.quarantine()
+	}
+	var out []restore.File
+	hidden := false
+	for _, f := range files {
+		key := strings.Trim(keyBase+"/"+f.Rel, "/")
+		lp := filepath.Join(base, filepath.FromSlash(f.Rel))
+		name := strings.ToLower(path.Base(f.Rel))
+		bad := state.Quarantined(q, key) || strings.HasSuffix(name, ".secret") || strings.HasSuffix(name, ".kura")
+		for _, d := range ts.sd.agentDirs {
+			bad = bad || within(d, lp, ts.sd.windows)
+		}
+		if bad {
+			hidden = true
+			continue
+		}
+		out = append(out, f)
 	}
 	return out, hidden
 }
@@ -494,6 +531,11 @@ func (ts *traySession) allowed(p string) (string, error) {
 	}
 	if _, err := restore.Resolve(ts.cfg, dir, ts.sd.windows); err != nil {
 		return "", fmt.Errorf("%s n'est pas sauvegardé par Kura.", dir)
+	}
+	for _, d := range ts.sd.agentDirs {
+		if within(d, dir, ts.sd.windows) {
+			return "", fmt.Errorf("%s : dossier de Kura, non restaurable depuis l'icône.", dir)
+		}
 	}
 	ne, ok := ts.reach(dir)
 	if !ok {
@@ -534,7 +576,7 @@ func (ts *traySession) run(ctx context.Context, peer *ipc.Peer, m ipc.Msg, rd *i
 		done(ipc.RestoreData{}, err.Error())
 		return
 	}
-	chosen, _ = ts.visible(l.path, chosen)
+	chosen, _ = ts.visible(l.path, l.target.Key, chosen)
 	if len(chosen) == 0 {
 		done(ipc.RestoreData{}, "Ces fichiers ne vous sont plus accessibles.")
 		return

@@ -287,6 +287,9 @@ func cmdRun(args []string) int {
 		Reporter:    rep,
 		AWSEnv:      awsEnv,
 		Trays:       hub,
+		Quarantine: func(p []string) error {
+			return state.AddQuarantine(paths.QuarantineFile(), p, time.Now())
+		},
 	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)

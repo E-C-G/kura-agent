@@ -78,6 +78,10 @@ type Deps struct {
 	// Trays dialogue avec les icônes des sessions (ipc.Hub) ; nil = aucune icône :
 	// préavis par simple attente puis arrêt forcé, pas de relance.
 	Trays Trays
+	// Quarantine note les préfixes du bucket envoyés à travers un lien ou une jonction
+	// apparu pendant la synchronisation : la restauration depuis l'icône les refuse.
+	// nil : rien n'est noté.
+	Quarantine func(prefixes []string) error
 
 	Now        func() time.Time                                 // défaut : time.Now
 	Sleep      func(ctx context.Context, d time.Duration) error // défaut : attente annulable
@@ -633,10 +637,11 @@ func (r *run) job(ctx context.Context, j config.Job, preOK map[string]bool) (js 
 	defer jobLog.Close()
 
 	if r.opt.DryRun {
-		counts, ok := r.preflight(ctx, j, jobLog, log, &js)
+		counts, jr, ok := r.preflight(ctx, j, jobLog, log, &js)
 		if !ok {
 			return js
 		}
+		j = jr
 		if counts == nil { // job sans garde-fou : simulation dédiée
 			c, ok := r.simulate(ctx, j, jobLog, log, &js)
 			if !ok {
@@ -654,11 +659,34 @@ func (r *run) job(ctx context.Context, j config.Job, preOK map[string]bool) (js 
 	// avant CHAQUE tentative : entre deux essais espacés de plusieurs minutes, le disque
 	// a pu être démonté ou vidé, et --delete le propagerait au bucket.
 	for attempt := 0; ; attempt++ {
-		if _, ok := r.preflight(ctx, j, jobLog, log, &js); !ok {
+		_, jr, ok := r.preflight(ctx, j, jobLog, log, &js)
+		if !ok {
 			return js
 		}
 		fmt.Fprintf(jobLog, "== synchronisation %s (tentative %d) ==\n", r.d.Now().Format(time.RFC3339), attempt+1)
-		counts, code, err := r.syncOnce(ctx, j, false, jobLog)
+		counts, code, err := r.syncOnce(ctx, jr, false, jobLog)
+		if len(counts.Linked) > 0 {
+			// Un lien ou une jonction est apparu pendant la synchronisation et aws l'a
+			// suivi : ce qui est passé par lui ne vient pas de la source. Job en erreur,
+			// préfixes en quarantaine (jamais servis depuis l'icône).
+			var prefixes []string
+			for _, rel := range counts.Linked {
+				prefixes = append(prefixes, strings.Trim(strings.Trim(j.Destination, "/")+"/"+rel, "/"))
+			}
+			if r.d.Quarantine != nil {
+				if qerr := r.d.Quarantine(prefixes); qerr != nil {
+					log.Error("quarantaine non enregistrée", "err", qerr)
+				}
+			}
+			js.Attempts++
+			js.ExitCode = code
+			js.Uploaded, js.Deleted, js.Skipped = counts.Uploaded, counts.Deleted, counts.Skipped
+			js.Result = state.ResultError
+			js.Message = fmt.Sprintf("lien ou jonction apparu pendant la sauvegarde (%s) : fichiers envoyés à travers lui mis en quarantaine, "+
+				"jamais restaurés depuis l'icône ; à examiner (qui a créé ce lien ?)", strings.Join(counts.Linked, ", "))
+			log.Error("lien apparu pendant la sauvegarde", "liens", counts.Linked, "préfixes", prefixes)
+			break
+		}
 		js.Attempts++
 		js.ExitCode = code
 		js.Uploaded, js.Deleted, js.Skipped = counts.Uploaded, counts.Deleted, counts.Skipped
@@ -702,25 +730,39 @@ func (r *run) job(ctx context.Context, j config.Job, preOK map[string]bool) (js 
 // preflight vérifie la source puis, pour un job avec delete, applique le garde-fou :
 // comptage, simulation, seuils. Il renvoie les comptes de la simulation (nil si le job
 // n'a pas de garde-fou) et false si le job doit s'arrêter, js étant alors renseigné.
-func (r *run) preflight(ctx context.Context, j config.Job, out io.Writer, log *slog.Logger, js *state.JobStatus) (*awscli.Counts, bool) {
+//
+// Le parcours de la source relève aussi les liens symboliques et jonctions : chacun est
+// ajouté aux exclusions du job renvoyé, celui à passer à aws (qui, sous Windows, suit
+// les jonctions malgré --no-follow-symlinks : un utilisateur ferait sinon sauvegarder,
+// puis restaurer, le coffre de l'agent ou le profil d'un autre compte).
+func (r *run) preflight(ctx context.Context, j config.Job, out io.Writer, log *slog.Logger, js *state.JobStatus) (*awscli.Counts, config.Job, bool) {
 	if st, err := os.Stat(j.Source); err != nil || !st.IsDir() {
 		js.Result, js.Message = state.ResultError, fmt.Sprintf("source %q inaccessible", j.Source)
 		log.Error("source inaccessible", "source", j.Source, "err", err)
-		return nil, false
+		return nil, j, false
 	}
 	if err := guard.CheckSourceNotLink(j.Source); err != nil {
 		js.Result, js.Message = state.ResultError, err.Error()
 		log.Error("source refusée", "source", j.Source, "err", err)
-		return nil, false
+		return nil, j, false
 	}
-	if !j.Delete || j.Guard == nil {
-		return nil, true
-	}
-	census, err := guard.CountFiles(j.Source, j.Exclude)
+	census, err := guard.Scan(j.Source, j.Exclude)
 	if err != nil {
 		js.Result, js.Message = state.ResultError, err.Error()
-		log.Error("garde-fou : comptage impossible", "err", err)
-		return nil, false
+		log.Error("parcours de la source impossible", "err", err)
+		return nil, j, false
+	}
+	if len(census.Links) > 0 {
+		excl := append([]string(nil), j.Exclude...)
+		for _, l := range census.Links {
+			excl = append(excl, guard.ExcludePattern(l)...)
+		}
+		j.Exclude = excl
+		fmt.Fprintf(out, "== %d lien(s) ou jonction(s) non suivi(s), exclu(s) : %s ==\n", len(census.Links), strings.Join(census.Links, ", "))
+		log.Info("liens et jonctions exclus de la sauvegarde", "nombre", len(census.Links), "liens", census.Links)
+	}
+	if !j.Delete || j.Guard == nil {
+		return nil, j, true
 	}
 	if census.Unreadable > 0 {
 		log.Info("garde-fou : éléments illisibles ignorés au comptage", "nombre", census.Unreadable)
@@ -728,18 +770,18 @@ func (r *run) preflight(ctx context.Context, j config.Job, out io.Writer, log *s
 	counts, ok := r.simulate(ctx, j, out, log, js)
 	if !ok {
 		js.Message = "garde-fou non évaluable : " + js.Message
-		return nil, false
+		return nil, j, false
 	}
 	dec := guard.Evaluate(*j.Guard, census.Files, counts.Deleted)
 	log.Info("garde-fou", "fichiers_source", census.Files, "suppressions_prévues", counts.Deleted, "bloqué", dec.Blocked)
 	if !dec.Blocked {
-		return &counts, true
+		return &counts, j, true
 	}
 	// --force-deletes lève les plafonds de suppressions, jamais le minimum de fichiers :
 	// une source vide ou démontée n'est pas un cas à forcer.
 	if r.opt.ForceDeletes && dec.Kind != guard.TooFewFiles {
 		log.Warn("garde-fou levé par --force-deletes", "raison", dec.Reason)
-		return &counts, true
+		return &counts, j, true
 	}
 	js.Result, js.Deleted = state.ResultGuard, counts.Deleted
 	js.Message = dec.Reason
@@ -747,7 +789,7 @@ func (r *run) preflight(ctx context.Context, j config.Job, out io.Writer, log *s
 		js.Message += " ; après vérification : kura-agent run --job " + j.ID + " --force-deletes"
 	}
 	log.Error("garde-fou : job bloqué, rien n'est modifié dans le bucket", "raison", dec.Reason)
-	return nil, false
+	return nil, j, false
 }
 
 // simulate lance aws s3 sync --dryrun, avec nouvelles tentatives sur les erreurs passagères.
@@ -791,6 +833,11 @@ func (r *run) syncOnce(ctx context.Context, j config.Job, dryRun bool, out io.Wr
 	fmt.Fprintf(out, "$ %s %s\n", r.d.AWSCLI, strings.Join(quoteArgs(args), " "))
 	c := awscli.NewCounter(out)
 	c.Excluded = awscli.ExcludeMatcher(j.Source, j.Exclude)
+	if !dryRun {
+		// Chaque fichier envoyé est contrôlé : un lien posé après le parcours préalable
+		// est repéré au passage.
+		c.Linked = func(local string) (string, bool) { return guard.LinkUnder(j.Source, local) }
+	}
 	env := append(awscli.Env(r.cfg.Profile), r.d.AWSEnv...)
 	code, err := r.d.Exec.Run(ctx, r.d.AWSCLI, args, env, c)
 	fmt.Fprintf(out, "== code de sortie %d ==\n", code)

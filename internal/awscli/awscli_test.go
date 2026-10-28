@@ -1,6 +1,7 @@
 package awscli
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 
@@ -64,7 +65,7 @@ func TestCounterCountsAcrossChunks(t *testing.T) {
 		c.Write([]byte(ch))
 	}
 	got := c.Counts()
-	if got != (Counts{Uploaded: 2, Deleted: 2, Skipped: 1}) {
+	if !reflect.DeepEqual(got, Counts{Uploaded: 2, Deleted: 2, Skipped: 1}) {
 		t.Errorf("comptes = %+v", got)
 	}
 	if sink.String() != strings.Join(chunks, "") {
@@ -116,5 +117,41 @@ func TestExcludeMatcherUnix(t *testing.T) {
 		if got := m(path); got != want {
 			t.Errorf("%s : %v, attendu %v", path, got, want)
 		}
+	}
+}
+
+// Chaque fichier envoyé est contrôlé : un lien apparu en cours de route est relevé une fois.
+func TestCounterLinked(t *testing.T) {
+	c := NewCounter(nil)
+	var seen []string
+	c.Linked = func(p string) (string, bool) {
+		seen = append(seen, p)
+		if strings.Contains(p, `\j\`) {
+			return "Outlook/j", true
+		}
+		return "", false
+	}
+	c.Write([]byte("upload: C:\\Users\\alice\\Outlook\\a.pst to s3://b/k/a.pst\n" +
+		"upload: C:\\Users\\alice\\Outlook\\j\\x.secret to s3://b/k/j/x.secret\n" +
+		"upload: C:\\Users\\alice\\Outlook\\j\\y.secret to s3://b/k/j/y.secret\n"))
+	got := c.Counts()
+	if got.Uploaded != 3 || len(got.Linked) != 1 || got.Linked[0] != "Outlook/j" {
+		t.Fatalf("%+v", got)
+	}
+	if seen[0] != `C:\Users\alice\Outlook\a.pst` {
+		t.Fatalf("chemin extrait : %q", seen[0])
+	}
+}
+
+// Les motifs d'exclusion d'un lien relevé écartent le lien et tout ce qui passe par lui.
+func TestLinkExcludePatternsMatch(t *testing.T) {
+	m := excludeMatcher(`C:\Users\alice\Outlook`, []string{"j [[]1]", "j [[]1]/*"}, true)
+	for _, p := range []string{`C:\Users\alice\Outlook\j [1]`, `C:\Users\alice\Outlook\j [1]\wasabi.secret`, `c:\users\alice\outlook\J [1]\a\b`} {
+		if !m(p) {
+			t.Errorf("%s non exclu", p)
+		}
+	}
+	if m(`C:\Users\alice\Outlook\j1\a`) || m(`C:\Users\alice\Outlook\alice.pst`) {
+		t.Error("exclusion trop large")
 	}
 }
