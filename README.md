@@ -557,6 +557,15 @@ crc32, actual checksum Type: null`. L'agent lance donc toujours `aws.exe` avec
 (somme de contrôle seulement quand l'opération l'exige, comme avant 2.23), et ne transmet plus
 `profile.checksum_algorithm`, accepté mais ignoré. L'intégrité du transfert reste assurée par TLS.
 
+### Coupures réseau
+
+Une coupure de quelques dizaines de secondes au milieu du listage d'un gros dossier faisait
+abandonner `aws` (« Could not connect to the endpoint URL ») après ses 3 essais par défaut, et
+toute la passe était à refaire. L'agent lance `aws.exe` avec `AWS_RETRY_MODE=standard` et
+`AWS_MAX_ATTEMPTS=10` : chaque requête est réessayée, avec une pause croissante plafonnée à
+20 s, pendant environ 2 minutes. Au-delà, l'agent relance la commande entière (2 nouvelles
+tentatives à 5 min d'intervalle, voir plus haut).
+
 ## Codes de sortie de `run`
 
 | Code | Signification |

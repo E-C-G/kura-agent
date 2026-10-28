@@ -36,7 +36,8 @@ func TestSyncArgsMatchCurrentScript(t *testing.T) {
 func TestEnvNeverPagesAndSetsProfile(t *testing.T) {
 	env := Env(config.Profile{AWSProfile: "wasabi"})
 	if strings.Join(env, " ") != "AWS_PAGER= PYTHONUTF8=1 PYTHONIOENCODING=utf-8 "+
-		"AWS_REQUEST_CHECKSUM_CALCULATION=WHEN_REQUIRED AWS_RESPONSE_CHECKSUM_VALIDATION=WHEN_REQUIRED AWS_PROFILE=wasabi" {
+		"AWS_REQUEST_CHECKSUM_CALCULATION=WHEN_REQUIRED AWS_RESPONSE_CHECKSUM_VALIDATION=WHEN_REQUIRED "+
+		"AWS_RETRY_MODE=standard AWS_MAX_ATTEMPTS=10 AWS_PROFILE=wasabi" {
 		t.Errorf("environnement inattendu : %v", env)
 	}
 }

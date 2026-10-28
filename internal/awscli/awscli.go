@@ -61,6 +61,12 @@ func Env(p config.Profile) []string {
 		// l'exige, comme avant ; l'intégrité du transfert reste assurée par TLS.
 		"AWS_REQUEST_CHECKSUM_CALCULATION=WHEN_REQUIRED",
 		"AWS_RESPONSE_CHECKSUM_VALIDATION=WHEN_REQUIRED",
+		// Coupure réseau de quelques dizaines de secondes au milieu d'un long listage :
+		// avec les 3 essais par défaut, aws abandonne (« Could not connect to the
+		// endpoint URL ») et la passe entière, parfois longue de 20 minutes, est à
+		// refaire. 10 essais, pause croissante plafonnée à 20 s : environ 2 minutes.
+		"AWS_RETRY_MODE=standard",
+		"AWS_MAX_ATTEMPTS=10",
 	}
 	if p.AWSProfile != "" {
 		env = append(env, "AWS_PROFILE="+p.AWSProfile)

@@ -431,6 +431,32 @@ func TestDryRunTouchesNothing(t *testing.T) {
 	}
 }
 
+// Une simulation qui réussit à la seconde tentative (erreur réseau passagère) ne
+// laisse pas le job, ni l'exécution, en erreur.
+func TestDryRunRetrySucceeds(t *testing.T) {
+	b := newBench(t)
+	flaky := func(dry bool, n int) (string, int) {
+		if n == 0 {
+			return "fatal error: Could not connect to the endpoint URL\n", 1
+		}
+		return "(dryrun) upload: a to b\n", 0
+	}
+	b.aws.behave["DATA"] = flaky
+	b.aws.behave["C/alice/Outlook"] = flaky
+	st := b.run(context.Background(), Options{DryRun: true})
+	if st.ExitCode != ExitOK || st.Result != state.ResultOK {
+		t.Fatalf("simulation réussie à la seconde tentative : code %d, %s", st.ExitCode, st.Result)
+	}
+	for _, id := range []string{"data", "outlook"} {
+		if j := b.job(st, id); j.Result != state.ResultOK || j.Uploaded != 1 || j.Attempts != 2 || !strings.HasPrefix(j.Message, "simulation :") {
+			t.Errorf("job %s : %+v", id, j)
+		}
+	}
+	if b.aws.dry("DATA") != 2 || b.aws.dry("C/alice/Outlook") != 2 {
+		t.Errorf("appels de simulation : %d %d", b.aws.dry("DATA"), b.aws.dry("C/alice/Outlook"))
+	}
+}
+
 func TestCancelDuringNotice(t *testing.T) {
 	b := newBench(t)
 	b.procs.running = []procs.Process{{PID: 9, Name: "outlook.exe"}}
