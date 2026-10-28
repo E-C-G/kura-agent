@@ -113,7 +113,9 @@ func nearestExisting(dir string) string {
 	}
 }
 
-// mkdirOwned crée dir et ses parents manquants avec le propriétaire du dossier existant.
+// mkdirOwned crée dir et ses parents manquants (0700), puis leur donne le propriétaire o
+// (lchown : ne suit pas un lien posé entre-temps ; aucun chmod par chemin). Le dernier
+// dossier est créé privé (Windows : ACL des administrateurs dès sa création).
 func mkdirOwned(dir string, o restore.Owner) error {
 	var missing []string
 	for p := dir; ; {
@@ -129,13 +131,14 @@ func mkdirOwned(dir string, o restore.Owner) error {
 	}
 	for i := len(missing) - 1; i >= 0; i-- {
 		p := missing[i]
-		if err := os.Mkdir(p, 0o700); err != nil && !errors.Is(err, fs.ErrExist) {
-			return err
+		mk := func(p string) error { return os.Mkdir(p, 0o700) }
+		if i == 0 {
+			mk = restore.CreatePrivateDir
+		}
+		if err := mk(p); err != nil {
+			return err // y compris « existe déjà » : apparu entre-temps, pas créé par nous
 		}
 		if o.Set {
-			if err := os.Chmod(p, 0o700); err != nil {
-				return err
-			}
 			if err := os.Lchown(p, o.UID, o.GID); err != nil {
 				return err
 			}
@@ -223,7 +226,13 @@ func restoreTo(ctx context.Context, stdout, stderr io.Writer, d restoreDeps, cfg
 	if err != nil {
 		return refuse("propriétaire de %s : %v", disp(dc.dir), err)
 	}
-	if err := mkdirOwned(dc.dir, owner); err != nil {
+	if dc.exists {
+		// Dossier vide existant : réservé aux administrateurs avant d'y écrire (Windows ;
+		// refusé s'il appartient à un autre compte).
+		if err := restore.SecureExistingDir(dc.dir); err != nil {
+			return refuse("%s : %v", disp(dc.dir), err)
+		}
+	} else if err := mkdirOwned(dc.dir, owner); err != nil {
 		return refuse("création de %s : %v", disp(dc.dir), err)
 	}
 	dest, err := restore.OpenDest(dc.dir, owner)
