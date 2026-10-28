@@ -19,6 +19,7 @@ var commandNeeds = map[string][]platform.Feature{
 	"validate":    {platform.Vault},
 	"credentials": {platform.Vault},
 	"import":      {platform.Vault},
+	"restore":     {platform.Vault},
 	"install":     {platform.Install, platform.Scheduling, platform.Vault, platform.AWSCLISetup}, // icône : si elle existe
 	"uninstall":   {platform.Install, platform.Scheduling},
 	"suspend":     {platform.Scheduling},
