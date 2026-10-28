@@ -1,0 +1,49 @@
+name: Racine de confiance GitHub
+
+# L'agent vérifie l'attestation de chaque release (kura-agent self-update) avec la
+# racine de confiance de GitHub embarquée (internal/selfupdate/github_trusted_root.json).
+# GitHub y ajoute une autorité tous les six mois environ : ce contrôle échoue dès que la
+# copie embarquée n'est plus à jour, pour publier un agent qui connaît la nouvelle
+# autorité avant que les releases ne soient signées par elle.
+
+on:
+  schedule:
+    - cron: "17 6 * * 1" # chaque lundi
+  pull_request:
+    paths:
+      - internal/selfupdate/github_trusted_root.json
+      - .github/workflows/trust-root.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  compare:
+    name: Racine embarquée à jour
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Comparer avec le dépôt TUF de GitHub
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # Une ligne par instance (Sigstore public, GitHub) ; on garde celle de GitHub.
+          gh attestation trusted-root > "$RUNNER_TEMP/roots.jsonl"
+          python3 - "$RUNNER_TEMP/roots.jsonl" internal/selfupdate/github_trusted_root.json <<'PY'
+          import json, sys
+          roots = [json.loads(l) for l in open(sys.argv[1]) if l.strip()]
+          gh = [r for r in roots if r.get("certificateAuthorities") and
+                all(ca.get("uri") == "fulcio.githubapp.com" for ca in r["certificateAuthorities"])]
+          if len(gh) != 1:
+              sys.exit("::error::racine de GitHub introuvable dans gh attestation trusted-root")
+          embedded = json.load(open(sys.argv[2]))
+          if gh[0] != embedded:
+              print("::error title=Racine de confiance périmée::GitHub a changé sa racine de confiance. "
+                    "Remplacer internal/selfupdate/github_trusted_root.json par la sortie de "
+                    "'gh attestation trusted-root' (ligne de fulcio.githubapp.com) et publier une version de l'agent.")
+              sys.exit(1)
+          print("racine embarquée à jour :", len(embedded["certificateAuthorities"]), "autorités")
+          PY

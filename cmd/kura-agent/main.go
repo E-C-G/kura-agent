@@ -57,6 +57,7 @@ Usage :
   kura-agent uninstall [--purge]
   kura-agent suspend  DURÉE | tomorrow | off
   kura-agent tray     [--config FICHIER]
+  kura-agent self-update --check [--version vX.Y.Z] [--json] [--config FICHIER]
   kura-agent version
 
 Commandes :
@@ -73,6 +74,8 @@ Commandes :
   uninstall    retire la tâche, le compte et l'exécutable ; --purge efface aussi les données
   suspend      suspend la planification (ex. 1h, tomorrow = demain 08:00) ; off pour reprendre
   tray         icône de la barre de notification (kura-agentw.exe, lancée à l'ouverture de session)
+  self-update  --check : cherche une version plus récente sur GitHub et vérifie son
+               attestation de release, sans rien modifier (code 3 : mise à jour disponible)
   version      affiche la version
 
 Codes de sortie de run : 0 OK · 1 avertissement · 2 erreur · 3 configuration invalide
@@ -107,6 +110,8 @@ func main() {
 		code = cmdTray(os.Args[2:])
 	case "uninstall":
 		code = cmdUninstall(os.Args[2:])
+	case "self-update":
+		code = cmdSelfUpdate(os.Args[2:])
 	case "version", "--version", "-v":
 		fmt.Printf("kura-agent %s (commit %s, compilé le %s)\n", version, commit, date)
 	case "help", "--help", "-h":

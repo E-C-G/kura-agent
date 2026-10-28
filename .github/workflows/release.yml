@@ -250,3 +250,19 @@ jobs:
             dist/kura-agent_*.deb \
             dist/kura-agent_*_darwin_*.tar.gz \
             dist/SHA256SUMS
+
+      # kura-agent self-update n'accepte qu'une release immuable dont l'attestation,
+      # signée par GitHub, couvre l'archive de chaque système : contrôle juste après
+      # la publication (réglage « releases immuables » du dépôt désactivé, par exemple).
+      - name: Release immuable et attestée
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          immutable="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" --jq .immutable)"
+          if [[ "$immutable" != "true" ]]; then
+            echo "::error title=Release non immuable::self-update la refusera ; activer « releases immuables » (Settings > General > Releases) puis republier."
+            exit 1
+          fi
+          gh release verify "$TAG" --repo "$GITHUB_REPOSITORY"

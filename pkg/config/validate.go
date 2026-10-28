@@ -217,6 +217,17 @@ func (c *Config) Validate(opt ValidateOptions) error {
 	checkAccounts("tray.users", c.Tray.Users)
 	checkAccounts("tray.allow_run_now", c.Tray.AllowRunNow)
 
+	// update
+	if px := c.Update.Proxy; px != "" {
+		u, err := url.Parse(px)
+		switch {
+		case err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" || u.Path != "" && u.Path != "/" || u.RawQuery != "":
+			add("update.proxy", "URL de proxy attendue, ex. http://proxy.example.com:3128 ; reçu %q", px)
+		case u.User != nil:
+			add("update.proxy", "identifiants interdits dans l'URL du proxy (fichier lisible) : proxy sans authentification ou filtré par adresse")
+		}
+	}
+
 	// notify
 	for i, t := range c.Notify.ToastOn {
 		if !validToasts[t] {

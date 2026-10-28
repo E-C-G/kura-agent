@@ -255,6 +255,20 @@ func TestReportTypes(t *testing.T) {
 	}
 }
 
+func TestUpdateProxy(t *testing.T) {
+	base := strings.Replace(minimal, "%s", "E:/", 1)
+	for _, px := range []string{"http://proxy.example.com:3128", "https://proxy.example.com", "http://10.0.0.1:8080/"} {
+		if err := parseWith(t, base+"update:\n  proxy: "+px+"\n", LoadOptions{}); err != nil {
+			t.Errorf("%s refusé : %v", px, err)
+		}
+	}
+	for _, px := range []string{"proxy.example.com:3128", "socks5://proxy:1080", "http://alice:secret@proxy:3128", "http://proxy:3128/chemin", "http://"} {
+		if err := parseWith(t, base+"update:\n  proxy: "+px+"\n", LoadOptions{}); err == nil || !strings.Contains(err.Error(), "update.proxy") {
+			t.Errorf("%s accepté : %v", px, err)
+		}
+	}
+}
+
 // La clé notify.webhook de la v0.1.0 reste lue : une config existante continue de fonctionner.
 func TestLegacyWebhookKey(t *testing.T) {
 	base := strings.Replace(minimal, "%s", "E:/", 1)

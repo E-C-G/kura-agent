@@ -35,6 +35,12 @@ notify:
     type: healthchecks
     url: credential:hc-url
 
+# Recherche des nouvelles versions (kura-agent self-update --check) : connexion à
+# api.github.com. La tâche planifiée tourne sous le compte système, sans le proxy de
+# l'utilisateur : indiquer ici le proxy HTTP(S) s'il y en a un (sans identifiants).
+# update:
+#   proxy: http://proxy.example.com:3128
+
 logging:
   level: info
   retention_days: 90
