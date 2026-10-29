@@ -456,3 +456,18 @@ func TestCopyOneNeverLeavesSource(t *testing.T) {
 		t.Fatalf("fichier lu à travers le lien : %q", data)
 	}
 }
+
+// Un fichier produit de plus de LargeFile : avertissement, le résultat est gardé.
+func TestLargeFileWarning(t *testing.T) {
+	old := LargeFile
+	LargeFile = 2
+	t.Cleanup(func() { LargeFile = old })
+	f := newFixture(t, filepath.Join(t.TempDir(), "zip"))
+	ps := f.run(t, &fakeZip{}, okTool)
+	if ps.Result != state.ResultWarning || !strings.Contains(ps.Message, "courrier.zip (") || !strings.Contains(ps.Message, "renvoyé en entier") {
+		t.Fatalf("%+v", ps)
+	}
+	if _, err := os.Stat(filepath.Join(f.staging, "courrier", "courrier.zip")); err != nil {
+		t.Fatal("résultat non gardé malgré un simple avertissement")
+	}
+}

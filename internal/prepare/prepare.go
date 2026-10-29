@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -24,6 +25,10 @@ import (
 	"github.com/E-C-G/kura-agent/internal/state"
 	"github.com/E-C-G/kura-agent/pkg/config"
 )
+
+// LargeFile : au-delà, un fichier produit par une préparation donne un avertissement :
+// il repart en entier à chaque sauvegarde, et chaque version reste 90 jours dans le bucket.
+var LargeFile int64 = 10 << 30 // variable : abaissée en test
 
 // MinFree : espace que les préparations laissent toujours libre sur le disque de la zone
 // de préparation, qui est sous Windows le disque système : plein, il bloquerait le poste
@@ -198,6 +203,15 @@ func Run(ctx context.Context, cfg *config.Config, p config.Prepare, d Deps) (ps 
 	if err != nil {
 		return fail("%v", err)
 	}
+	if big := largeFiles(tmp); len(big) > 0 {
+		msg := fmt.Sprintf("%s de plus de %s : renvoyé en entier à chaque sauvegarde, chaque version gardée 90 jours ; scinder ou espacer",
+			strings.Join(big, ", "), humanSize(uint64(LargeFile)))
+		if ps.Message != "" {
+			msg = ps.Message + " ; " + msg
+		}
+		ps.Result, ps.Message = state.ResultWarning, msg
+		log.Warn("gros fichier produit", "fichiers", big)
+	}
 	if err := os.Rename(tmp, final); err != nil {
 		return fail("mise en place du résultat : %v", err)
 	}
@@ -236,6 +250,22 @@ func watchSpace(ctx context.Context, d Deps, hint string) (watched context.Conte
 		<-finished
 		cancel(nil)
 	}
+}
+
+// largeFiles : fichiers de dir (chemins relatifs, avec leur taille) de plus de LargeFile.
+func largeFiles(dir string) []string {
+	var out []string
+	filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		if fi, err := d.Info(); err == nil && fi.Size() > LargeFile {
+			rel, _ := filepath.Rel(dir, p)
+			out = append(out, fmt.Sprintf("%s (%s)", filepath.ToSlash(rel), humanSize(uint64(fi.Size()))))
+		}
+		return nil
+	})
+	return out
 }
 
 // interruption décrit pourquoi ctx s'est arrêté.

@@ -728,6 +728,10 @@ jobs:
 - **Outlook.** Avec `depends_on_pre_task`, Outlook reste fermé le temps de la copie de la source
   seulement : il est relancé avant l'archive et l'envoi, qui ne lisent que la copie (sauf si un
   autre job en dépend encore).
+- **Gros fichiers.** Un fichier produit par une préparation (archive, export, chiffré) de plus de
+  10 Go donne un avertissement au bilan (code 1) : il repart en entier à chaque sauvegarde et
+  chaque version est gardée 90 jours dans le bucket. Le scinder (plusieurs préparations, `databases`)
+  ou espacer ses sauvegardes.
 - **Nom stable.** Le résultat s'appelle toujours `<id>.zip` : l'historique vient des versions du
   bucket (90 jours) et `restore --at` s'y applique tel quel.
 - **Zone de préparation.** `C:\ProgramData\Kura\staging` (SYSTEM et Administrateurs seuls),
@@ -892,8 +896,10 @@ jobs:
 - **Destinataires.** Sans `recipients`, ceux de `encryption.gpg` ou `encryption.age` ; avec, les
   siens seulement (sans fusion). Aucun destinataire nulle part : refusé. Une clé de `encryption`
   qu'aucune préparation n'utilise : avertissement de `validate`. Chaque fichier est lisible par
-  chacune des clés : en prévoir deux (éditeur et client), dont une copie hors ligne ; perdre toutes
-  les clés privées rend les sauvegardes illisibles.
+  chacune des clés. Les clés privées sont gardées par le client seul : ni l'agent, ni la console,
+  ni l'éditeur n'en détiennent, et personne d'autre ne peut déchiffrer. Le client en garde une
+  copie hors ligne (ou déclare une seconde clé à lui) : perdre toutes les clés privées rend les
+  sauvegardes illisibles, sans recours.
 - **age**, intégré à l'agent (`filippo.io/age`, rien à installer) : clés `age1…`, hybrides
   post-quantiques `age1pq1…` (pas mêlées à des clés classiques), ou SSH (`ssh-ed25519`, `ssh-rsa`).
   Une identité privée (`AGE-SECRET-KEY-…`) ou une clé matérielle (plugin) est refusée à la lecture
