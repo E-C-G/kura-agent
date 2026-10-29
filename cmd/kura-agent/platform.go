@@ -82,6 +82,9 @@ func configMissing(cfg *config.Config, supported func(platform.Feature) bool, de
 		if p.Type == config.PrepareDBExport && p.Engine == config.EngineSQLServer && !supported(platform.SQLServerExport) {
 			errs = append(errs, fmt.Errorf("prepare[%d] (%s) : %w", i, p.ID, platform.NotImplemented(platform.SQLServerExport)))
 		}
+		if p.Type == config.PrepareDocker && !supported(platform.DockerVolume) {
+			errs = append(errs, fmt.Errorf("prepare[%d] (%s) : %w", i, p.ID, platform.NotImplemented(platform.DockerVolume)))
+		}
 	}
 	return errors.Join(errs...)
 }

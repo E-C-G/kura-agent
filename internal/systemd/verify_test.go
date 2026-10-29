@@ -20,17 +20,19 @@ func TestUnitsVerifiedBySystemd(t *testing.T) {
 	s := sched("hourly", "22:30", "mon", "sun")
 	s.RunIfMissed = true
 	s.MaxDuration.Duration = 3 * time.Hour
-	u, err := Generate(s, Params{Command: "/usr/bin/true", User: "kura-agent"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	dir := t.TempDir()
-	svc, tim := filepath.Join(dir, ServiceName), filepath.Join(dir, TimerName)
-	os.WriteFile(svc, []byte(u.Service), 0o644)
-	os.WriteFile(tim, []byte(u.Timer), 0o644)
-	out, err := exec.Command("systemd-analyze", "verify", "--man=no", svc, tim).CombinedOutput()
-	if err != nil || strings.TrimSpace(string(out)) != "" {
-		t.Fatalf("systemd-analyze verify : %v\n%s", err, out)
+	for _, withDocker := range []bool{false, true} {
+		u, err := Generate(s, Params{Command: "/usr/bin/true", User: "kura-agent", Docker: withDocker})
+		if err != nil {
+			t.Fatal(err)
+		}
+		dir := t.TempDir()
+		svc, tim := filepath.Join(dir, ServiceName), filepath.Join(dir, TimerName)
+		os.WriteFile(svc, []byte(u.Service), 0o644)
+		os.WriteFile(tim, []byte(u.Timer), 0o644)
+		out, err := exec.Command("systemd-analyze", "verify", "--man=no", svc, tim).CombinedOutput()
+		if err != nil || strings.TrimSpace(string(out)) != "" {
+			t.Fatalf("systemd-analyze verify (docker %v) : %v\n%s", withDocker, err, out)
+		}
 	}
 }
 

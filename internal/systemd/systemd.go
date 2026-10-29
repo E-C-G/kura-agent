@@ -39,6 +39,9 @@ const (
 type Params struct {
 	Command string // chemin de kura-agent, ex. /usr/bin/kura-agent
 	User    string // compte d'exécution, ex. kura-agent
+	// Docker : le service rejoint le groupe docker (socket de l'API), pour geler les
+	// conteneurs d'une préparation docker_volume. Le compte, lui, n'y est jamais ajouté.
+	Docker bool
 }
 
 // Units : contenu des deux fichiers d'unité.
@@ -133,6 +136,16 @@ func sortDays(ds []string) []string {
 	return out
 }
 
+// dockerGroup : ligne du groupe docker, pour le seul service, quand il en a besoin.
+func dockerGroup(on bool) string {
+	if !on {
+		return ""
+	}
+	return "# Socket de l'API Docker : gel des conteneurs (docker_volume, pause). Équivaut aux\n" +
+		"# droits root sur la machine ; retiré quand la configuration n'en a plus besoin.\n" +
+		"SupplementaryGroups=docker\n"
+}
+
 // Generate renvoie le service et le timer.
 func Generate(s config.Schedule, p Params) (Units, error) {
 	if p.Command == "" || !strings.HasPrefix(p.Command, "/") || strings.ContainsAny(p.Command, " \t\n\"'\\$%") {
@@ -166,7 +179,7 @@ SuccessExitStatus=1
 TimeoutStartSec=%d
 User=%s
 Group=%s
-Environment=HOME=/var/lib/kura
+%sEnvironment=HOME=/var/lib/kura
 # Secrets : /etc/credstore.encrypted/kura.*, déchiffrés par systemd dans
 # $CREDENTIALS_DIRECTORY, lisibles par ce service seul.
 ImportCredential=kura.*
@@ -187,7 +200,7 @@ ProtectHome=read-only
 PrivateTmp=yes
 Nice=10
 IOSchedulingClass=idle
-`, p.Command, int((limit + Margin).Seconds()), p.User, p.User)
+`, p.Command, int((limit + Margin).Seconds()), p.User, p.User, dockerGroup(p.Docker))
 
 	var tim strings.Builder
 	tim.WriteString(`# Géré par kura-agent install / uninstall : ne pas modifier à la main.

@@ -65,6 +65,16 @@ func TestGenerate(t *testing.T) {
 			t.Errorf("timer sans %q", w)
 		}
 	}
+	if strings.Contains(u.Service, "SupplementaryGroups") {
+		t.Error("groupe docker sans docker_volume")
+	}
+	d, err := Generate(s, Params{Command: "/usr/bin/kura-agent", User: "kura-agent", Docker: true})
+	if err != nil || !strings.Contains(d.Service, "Group=kura-agent\n# Socket de l'API Docker") || !strings.Contains(d.Service, "\nSupplementaryGroups=docker\n") {
+		t.Errorf("groupe docker du service :\n%s", d.Service)
+	}
+	if d.Timer != u.Timer {
+		t.Error("timer changé par le groupe docker")
+	}
 	for _, p := range []Params{{Command: "kura-agent", User: "kura-agent"}, {Command: "/usr/bin/kura agent", User: "kura-agent"},
 		{Command: "/usr/bin/kura-agent", User: ""}, {Command: "/usr/bin/kura-agent", User: "root\nExecStartPre=/bin/sh"}} {
 		if _, err := Generate(s, p); err == nil {

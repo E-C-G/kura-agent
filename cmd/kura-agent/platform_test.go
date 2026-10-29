@@ -70,4 +70,8 @@ func TestConfigMissing(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "prepare[1] (gestion-db)") || strings.Contains(err.Error(), "compta-db") {
 		t.Fatalf("export SQL Server hors Windows : %v", err)
 	}
+	dv := &config.Config{Prepare: []config.Prepare{{ID: "appli", Type: config.PrepareDocker}}}
+	if err := configMissing(dv, none, false); err == nil || !strings.Contains(err.Error(), "Docker Engine sous Linux") {
+		t.Fatalf("docker_volume hors Linux : %v", err)
+	}
 }

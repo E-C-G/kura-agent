@@ -110,7 +110,17 @@ const (
 	PrepareDBExport = "db_export"
 	PrepareGPG      = "gpg"
 	PrepareAge      = "age"
+	PrepareDocker   = "docker_volume"
 )
+
+// Valeurs par défaut de docker_volume.
+const (
+	DockerSocket   = "/var/run/docker.sock"
+	DockerDataRoot = "/var/lib/docker"
+)
+
+// Paused : la préparation docker_volume gèle les conteneurs (pause absent : oui).
+func (p Prepare) Paused() bool { return p.Pause == nil || *p.Pause }
 
 // Prepare est une préparation : avant les jobs, elle écrit un résultat (archive, export,
 // chiffré) dans la zone de préparation de l'agent, sous un dossier à son id ; un job
@@ -152,6 +162,15 @@ type Prepare struct {
 	// seulement, les destinataires de la section encryption.
 	Input      string      `yaml:"input"`
 	Recipients []Recipient `yaml:"recipients"`
+
+	// docker_volume (Linux) : volumes Docker nommés, un <volume>.tar.gz chacun. Pause
+	// (défaut vrai) gèle les conteneurs qui les montent le temps de la lecture, au plus
+	// MaxPause ; Socket est alors celui de l'API Docker. Sans pause, l'agent lit
+	// <DataRoot>/volumes/<nom>/_data sans parler à Docker.
+	Volumes  []string `yaml:"volumes"`
+	Pause    *bool    `yaml:"pause"`
+	MaxPause Duration `yaml:"max_pause"`
+	DataRoot string   `yaml:"data_root"`
 
 	// Unavailable : la source ne se résout pas sur cette machine (compte supprimé) ; la
 	// préparation échoue avec ce message, les autres continuent. Rempli par Expand.
@@ -448,6 +467,17 @@ func (c *Config) ApplyDefaults() {
 				if p.Instance == "" {
 					p.Instance = "localhost"
 				}
+			}
+		}
+		if p.Type == PrepareDocker {
+			if p.MaxPause.Duration == 0 {
+				p.MaxPause.Duration = 15 * time.Minute
+			}
+			if p.Paused() && p.Socket == "" {
+				p.Socket = DockerSocket
+			}
+			if !p.Paused() && p.DataRoot == "" {
+				p.DataRoot = DockerDataRoot
 			}
 		}
 		if p.Type == PrepareZip {

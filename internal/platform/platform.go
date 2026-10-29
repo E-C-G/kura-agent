@@ -13,6 +13,7 @@
 //	icône et canal vers l'icône   tray, ipc                       oui       non (à venir)
 //	fermeture d'applications      procs (pré-tâches)              oui       non (à venir)
 //	export SQL Server             prepare (db_export sqlserver)   oui       non (à venir)
+//	volumes Docker                prepare (docker_volume)         non       Linux
 //
 // Hors Windows, une fonction non encore écrite renvoie une NotImplementedError, et les
 // commandes qui en ont besoin s'arrêtent dès le départ avec un message clair. Les
@@ -39,10 +40,11 @@ const (
 	Tray                               // icône par session et canal vers elle
 	AppControl                         // fermeture et relance d'applications (pré-tâches)
 	SQLServerExport                    // export SQL Server par sqlcmd (préparation db_export)
+	DockerVolume                       // archive de volumes Docker (préparation docker_volume)
 )
 
 // All : toutes les fonctions, dans l'ordre d'affichage.
-var All = []Feature{Scheduling, Vault, Install, AWSCLISetup, Tray, AppControl, SQLServerExport}
+var All = []Feature{Scheduling, Vault, Install, AWSCLISetup, Tray, AppControl, SQLServerExport, DockerVolume}
 
 var labels = map[Feature]string{
 	Scheduling:      "planification",
@@ -52,6 +54,7 @@ var labels = map[Feature]string{
 	Tray:            "icône",
 	AppControl:      "fermeture d'applications",
 	SQLServerExport: "export SQL Server",
+	DockerVolume:    "volumes Docker",
 }
 
 func (f Feature) String() string {
@@ -71,6 +74,9 @@ type NotImplementedError struct {
 }
 
 func (e *NotImplementedError) Error() string {
+	if e.Feature == DockerVolume {
+		return fmt.Sprintf("%s : non pris en charge sous %s (Docker Engine sous Linux uniquement)", e.Feature, e.OS)
+	}
 	return fmt.Sprintf("%s : non pris en charge sous %s dans cette version (Windows uniquement pour l'instant)", e.Feature, e.OS)
 }
 

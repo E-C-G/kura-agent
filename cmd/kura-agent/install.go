@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/user"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -591,7 +592,14 @@ func installLinuxTimer(sys system, cfg *config.Config, exe string, step func(str
 	if len(cfg.Tray.AllowRunNow) > 0 {
 		fmt.Fprintln(sys.out, "Attention : tray.allow_run_now ignoré sous Linux pour l'instant (lancement : sudo systemctl start "+systemd.ServiceName+").")
 	}
-	units, err := systemd.Generate(cfg.Schedule, systemd.Params{Command: exe, User: setup.ServiceAccount})
+	withDocker := needsDockerGroup(cfg)
+	if withDocker {
+		if _, err := user.LookupGroup("docker"); err != nil {
+			return fail(exitInstallConfig, "docker_volume avec pause : groupe docker introuvable (Docker Engine installé ?) ; ou pause: false")
+		}
+		step("socket Docker : groupe docker donné au seul service %s (gel des conteneurs ; équivaut aux droits root)", systemd.ServiceName)
+	}
+	units, err := systemd.Generate(cfg.Schedule, systemd.Params{Command: exe, User: setup.ServiceAccount, Docker: withDocker})
 	if err != nil {
 		return fail(exitInstallConfig, "planification : %v", err)
 	}

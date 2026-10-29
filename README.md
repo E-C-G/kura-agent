@@ -22,6 +22,7 @@ Console d'administration associée : [E-C-G/kura-ctl](https://github.com/E-C-G/k
 | 6 | Restauration : historique, état à une date (lot 1), vers un dossier à part, journal, bilan (lot 2), en place (lot 3), depuis l'icône pour ses propres fichiers (lot 4) | **fait** |
 | 7 | `self-update` : recherche et vérification de l'attestation GitHub, installation, retour arrière, icône | **fait** |
 | 8 | Préparations avant les jobs : archive zip (lot 1) ; exports de bases (lot 2), chiffrement gpg et age (lot 3) | **fait** |
+| 9 | Volumes Docker (`docker_volume`, Linux) : gel des conteneurs, archive, reprise après un arrêt brutal (lot 1) ; console (lot 2) | lot 1 **fait** |
 
 Commandes disponibles : `run`, `validate`, `status`, `credentials`, `import`, `install`, `uninstall`,
 `suspend`, `tray`, `self-update`, `restore`, `version`.
@@ -44,6 +45,7 @@ séparées, un fichier par système, et recensées dans `internal/platform` :
 | icône et canal vers l'icône | `tray`, `ipc` | oui | non pris en charge |
 | fermeture d'applications | `procs` (pré-tâches) | oui | non pris en charge |
 | export SQL Server | `prepare` (`db_export`, `engine: sqlserver`) | oui | non pris en charge (PostgreSQL, MySQL : oui) |
+| volumes Docker | `prepare` (`docker_volume`), `docker` | non pris en charge | Linux : oui (Docker Engine, root) ; macOS : non pris en charge |
 
 Hors Windows, une commande qui a besoin d'une fonction absente s'arrête tout de suite et dit ce
 qui manque. Sous Linux, toutes les commandes fonctionnent sauf `tray` (avec `sudo` pour le coffre
@@ -673,7 +675,7 @@ toute la passe était à refaire. L'agent lance `aws.exe` avec `AWS_RETRY_MODE=s
 20 s, pendant environ 2 minutes. Au-delà, l'agent relance la commande entière (2 nouvelles
 tentatives à 5 min d'intervalle, voir plus haut).
 
-## Préparations : archive zip, export de bases et chiffrement avant les jobs
+## Préparations : archive zip, export de bases, volumes Docker et chiffrement avant les jobs
 
 Une préparation écrit, avant les jobs, un fichier que la synchronisation seule ne sait pas
 sauvegarder proprement ; un job ordinaire l'envoie ensuite en prenant `${STAGING:<id>}` pour
@@ -828,6 +830,65 @@ jobs:
 - **`validate`** vérifie les outils et, pour une préparation avec `user`, se connecte et liste les
   bases qui seront exportées ; sans `user` (authentification du système), la connexion n'est
   vérifiée qu'à la première exécution, sous le compte de la tâche.
+
+### Volumes Docker (`docker_volume`, Linux)
+
+Une préparation `docker_volume` archive des volumes Docker nommés, chacun en `<volume>.tar.gz`,
+pour Docker Engine sous Linux (démon root) ; Docker Desktop, Docker rootless, Podman et Windows
+ne sont pas pris en charge. Par défaut (`pause: true`), les conteneurs en marche qui montent ces
+volumes sont gelés (`docker pause`, gel des processus par le cgroup) le temps de la lecture, puis
+dégelés : la copie est figée, comme après une coupure de courant, ce que les bases savent reprendre
+(PostgreSQL, MySQL, MariaDB rejouent leur journal au démarrage).
+
+```yaml
+prepare:
+  - id: appli
+    type: docker_volume
+    volumes: [appli_db, appli_uploads]   # noms des volumes (docker volume ls)
+    exclude: ["*/cache/*"]               # chemins relatifs au volume
+    pause: true                          # défaut ; false : lecture sans gel, avertissement
+    max_pause: 15m                       # défaut 15 min : au-delà, lecture arrêtée, dégel, échec
+    timeout: 1h
+    # socket: /var/run/docker.sock       # défaut, avec pause
+  - id: appli-chiffre
+    type: age
+    input: appli                         # chaque archive chiffrée au fil de l'eau
+  - id: certificats
+    type: docker_volume
+    volumes: [traefik_certs]
+    pause: false                         # rien à geler : lu sous data_root, sans l'API Docker
+    # data_root: /var/lib/docker         # défaut, sans pause
+
+jobs:
+  - id: appli
+    source: "${STAGING:appli-chiffre}"
+    destination: DOCKER/APPLI
+```
+
+- **Gel.** Le volume est trouvé par l'API Docker (pilote `local` seulement, emplacement
+  `…/volumes/<nom>/_data`). Les conteneurs en marche qui le montent sont notés dans
+  `docker-paused.json`, puis gelés ; l'agent vérifie qu'ils le sont avant de lire. Un conteneur déjà
+  en pause est laissé tel quel ; un conteneur arrêté n'a rien à geler. Le dégel se fait toujours :
+  fin de lecture, échec, `max_pause` dépassé, annulation. Si l'agent est tué pendant le gel,
+  l'exécution suivante dégèle d'abord les conteneurs encore en pause notés dans
+  `docker-paused.json` et le signale (avertissement). Le bilan donne les conteneurs gelés et la
+  durée du gel (`status.json`, `kura-agent status`).
+- **Sans gel** (`pause: false`) : le volume est lu directement sous `data_root`, sans l'API Docker ;
+  un conteneur peut écrire pendant la lecture, d'où un avertissement à chaque exécution. À réserver
+  aux volumes que rien n'écrit (certificats, configuration).
+- **Archive** écrite par l'agent : propriétaires numériques, droits, dates ; liens symboliques
+  gardés comme liens (jamais suivis), liens physiques gardés ; tubes, sockets et périphériques
+  laissés de côté (avertissement). Tout est lu sous le volume (`os.Root`). L'archive est relue en
+  entier après le dégel. Un fichier changé pendant la lecture, ou un volume vide, donne un
+  avertissement.
+- **Socket.** Avec le gel, l'agent parle au socket de l'API Docker (`/var/run/docker.sock`, à root,
+  groupe `root` ou `docker`, pas modifiable par tous). `kura-agent install` ajoute alors le groupe
+  `docker` au seul service (`SupplementaryGroups=docker`) : c'est l'équivalent des droits root sur
+  la machine, retiré à la réinstallation quand la configuration n'en a plus besoin. `validate`
+  contrôle le socket, la version de l'API (1.41 ou plus), chaque volume et les conteneurs à geler.
+- **Restaurer** : arrêter les conteneurs, puis, en root, extraire dans le volume
+  (`tar -xzpf appli_db.tar.gz --numeric-owner -C /var/lib/docker/volumes/appli_db/_data`) et
+  redémarrer.
 
 ### Chiffrement (`gpg`, `age`)
 
@@ -1107,6 +1168,7 @@ C:\ProgramData\Kura\
 ├── history.jsonl            une ligne par exécution
 ├── suspend.json             suspension en cours (kura-agent suspend)
 ├── restore.json             dernière restauration (kura-agent status)
+├── docker-paused.json       conteneurs gelés par la préparation en cours (Linux, docker_volume)
 ├── credentials\             secrets chiffrés (administrateurs seulement)
 ├── staging\                 préparations (archives) le temps d'une exécution, vidée à la fin
 ├── pending\                 bilans webhook en attente de renvoi
