@@ -9,7 +9,7 @@ import (
 func TestSupportTable(t *testing.T) {
 	want := map[string]map[Feature]bool{
 		"windows": {Scheduling: true, Vault: true, Install: true, AWSCLISetup: true, Tray: true, AppControl: true, SQLServerExport: true},
-		"linux":   {Install: true, Scheduling: true, Vault: true, AWSCLISetup: true},
+		"linux":   {Install: true, Scheduling: true, Vault: true, AWSCLISetup: true, DockerVolume: true},
 		"darwin":  {Install: true, Scheduling: true, Vault: true, AWSCLISetup: true},
 	}[runtime.GOOS]
 	for _, f := range All {

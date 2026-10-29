@@ -50,6 +50,10 @@ func runAge(ctx context.Context, cfg *config.Config, p config.Prepare, d Deps, t
 	if in, ok := cfg.PrepareByID(p.Input); ok && in.Type == config.PrepareDBExport {
 		return runDB(ctx, cfg, in, d, tmp, ps, log, seal)
 	}
+	if in, ok := cfg.PrepareByID(p.Input); ok && in.Type == config.PrepareDocker {
+		// Archive chiffrée pendant la lecture : jamais en clair dans la zone.
+		return runDocker(ctx, cfg, in, d, tmp, ps, log, seal)
+	}
 	return encryptAll(ctx, p, d, tmp, ps, &ageSealer{seal: seal})
 }
 

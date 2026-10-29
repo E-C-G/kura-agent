@@ -27,6 +27,7 @@ import (
 	"github.com/E-C-G/kura-agent/internal/lock"
 	"github.com/E-C-G/kura-agent/internal/paths"
 	"github.com/E-C-G/kura-agent/internal/platform"
+	"github.com/E-C-G/kura-agent/internal/prepare"
 	"github.com/E-C-G/kura-agent/internal/procs"
 	"github.com/E-C-G/kura-agent/internal/report"
 	"github.com/E-C-G/kura-agent/internal/runner"
@@ -294,6 +295,7 @@ func cmdRun(args []string) int {
 		PrepareExec: execx.System{},
 		AgentDirs:   agentDirs(),
 		Secret:      vault().Resolve,
+		PausedFile:  paths.DockerPausedFile(),
 	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -389,6 +391,12 @@ func cmdValidate(args []string) int {
 	}
 	for _, w := range cfg.Warnings() {
 		fmt.Printf("ATTENTION %s\n", w)
+	}
+	for _, c := range checkDockerVolumes(cfg) {
+		check("volumes Docker de "+c.ID, c.Err)
+		if c.Err == nil {
+			fmt.Printf("       %s\n", c.Detail)
+		}
 	}
 	for _, k := range checkGPGKeys(cfg) {
 		check("clés gpg de "+k.ID, k.Err)
@@ -573,7 +581,27 @@ func cmdStatus(args []string) int {
 	printRestoreStatus(os.Stdout, paths.RestoreFile())
 	printQuarantine(os.Stdout, paths.QuarantineFile())
 	printUpdateStatus(os.Stdout)
+	printDockerPaused(os.Stdout, paths.DockerPausedFile())
 	return 0
+}
+
+// printDockerPaused signale les conteneurs qu'une exécution interrompue a laissés gelés
+// (l'exécution suivante les dégèle ; sinon docker unpause).
+func printDockerPaused(w io.Writer, file string) {
+	data, err := os.ReadFile(file)
+	if err != nil {
+		return
+	}
+	var list []prepare.PausedEntry
+	if json.Unmarshal(data, &list) != nil || len(list) == 0 {
+		return
+	}
+	names := make([]string, len(list))
+	for i, e := range list {
+		names[i] = e.Name
+	}
+	fmt.Fprintf(w, "  attention : conteneur(s) peut-être resté(s) gelé(s) depuis le %s : %s\n             la prochaine exécution les dégèle ; tout de suite : sudo docker unpause %s\n",
+		list[0].At.Local().Format("02/01/2006 15:04"), strings.Join(names, ", "), strings.Join(names, " "))
 }
 
 var resultLabel = map[string]string{
@@ -611,6 +639,12 @@ func printSummary(w io.Writer, st *state.Status) {
 		}
 		if len(p.Recipients) > 0 {
 			fmt.Fprintf(w, "\n             chiffré pour : %s", strings.Join(p.Recipients, ", "))
+		}
+		for _, v := range p.Volumes {
+			fmt.Fprintf(w, "\n             volume %s : %s", v.Name, humanSize(v.Size))
+		}
+		if len(p.Paused) > 0 {
+			fmt.Fprintf(w, "\n             gelés %.0f s : %s", p.PauseS, strings.Join(p.Paused, ", "))
 		}
 		if p.Message != "" {
 			fmt.Fprintf(w, "\n             %s", p.Message)

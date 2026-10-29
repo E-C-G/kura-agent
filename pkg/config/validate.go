@@ -158,7 +158,8 @@ func (c *Config) Validate(opt ValidateOptions) error {
 
 	// prepare
 	prepares := map[string]int{}
-	consumed := map[string]string{} // préparation chiffrée → préparation qui la chiffre
+	consumed := map[string]string{}      // préparation chiffrée → préparation qui la chiffre
+	dockerVolumes := map[string]string{} // volume Docker → préparation qui l'archive
 	for i, pr := range c.Prepare {
 		f := fmt.Sprintf("prepare[%d]", i)
 		switch _, dup := prepares[pr.ID]; {
@@ -220,10 +221,15 @@ func (c *Config) Validate(opt ValidateOptions) error {
 			}
 		case PrepareGPG, PrepareAge:
 			validateEncrypt(c, pr, f, prepares, consumed, opt, add)
+		case PrepareDocker:
+			validateDocker(pr, f, dockerVolumes, add)
 		case "":
-			add(f+".type", "obligatoire (zip, db_export, gpg, age)")
+			add(f+".type", "obligatoire (zip, db_export, gpg, age, docker_volume)")
 		default:
-			add(f+".type", "type %q inconnu (zip, db_export, gpg, age)", pr.Type)
+			add(f+".type", "type %q inconnu (zip, db_export, gpg, age, docker_volume)", pr.Type)
+		}
+		if pr.Type != PrepareDocker && (len(pr.Volumes) > 0 || pr.Pause != nil || pr.MaxPause.Duration != 0 || pr.DataRoot != "") {
+			add(f, "volumes, pause, max_pause et data_root sont réservés à docker_volume")
 		}
 	}
 	usedPrepares := map[string]bool{}
@@ -493,8 +499,8 @@ func validateEncrypt(c *Config, pr Prepare, f string, prepares map[string]int, c
 		switch {
 		case !ok:
 			add(f+".input", "%q : aucune préparation de ce nom avant celle-ci (l'entrée doit la précéder)", pr.Input)
-		case c.Prepare[i].Type != PrepareZip && c.Prepare[i].Type != PrepareDBExport:
-			add(f+".input", "%q : seul le résultat d'un zip ou d'un db_export se chiffre (pas de double chiffrement)", pr.Input)
+		case c.Prepare[i].Type != PrepareZip && c.Prepare[i].Type != PrepareDBExport && c.Prepare[i].Type != PrepareDocker:
+			add(f+".input", "%q : seul le résultat d'un zip, d'un db_export ou d'un docker_volume se chiffre (pas de double chiffrement)", pr.Input)
 		case consumed[pr.Input] != "":
 			add(f+".input", "%q est déjà chiffrée par %s", pr.Input, consumed[pr.Input])
 		default:
@@ -522,6 +528,57 @@ func validateEncrypt(c *Config, pr Prepare, f string, prepares map[string]int, c
 	}
 	if pr.Type == PrepareGPG && c.Tools.GPG == "" {
 		add(f+".type", "gpg demande tools.gpg : chemin absolu de gpg (GnuPG 2.2 ou plus récent), installé sur le poste")
+	}
+}
+
+// volumePattern : nom de volume Docker (même règle que Docker).
+var volumePattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]*$`)
+
+// validateDocker vérifie une préparation docker_volume.
+func validateDocker(pr Prepare, f string, seen map[string]string, add func(field, format string, a ...any)) {
+	if pr.Source != "" || pr.Engine != "" || pr.Host != "" || pr.Port != 0 || pr.Instance != "" || pr.User != "" ||
+		pr.Password != "" || len(pr.Databases) > 0 || pr.Verify || pr.Level != "" || pr.OnLocked != "" ||
+		pr.Input != "" || len(pr.Recipients) > 0 {
+		add(f, "docker_volume prend volumes, pause, max_pause, socket, data_root, exclude et timeout ; les autres clés n'y ont pas cours")
+	}
+	if pr.DependsOnPreTask != "" {
+		add(f+".depends_on_pre_task", "sans objet pour docker_volume : pause gèle les conteneurs")
+	}
+	if len(pr.Volumes) == 0 {
+		add(f+".volumes", "au moins un volume Docker, par son nom")
+	}
+	for i, v := range pr.Volumes {
+		switch other, dup := seen[v]; {
+		case len(v) > 255 || !volumePattern.MatchString(v):
+			add(fmt.Sprintf("%s.volumes[%d]", f, i), "%q : nom de volume Docker invalide (lettres, chiffres, '_', '.', '-')", v)
+		case dup && other == pr.ID:
+			add(fmt.Sprintf("%s.volumes[%d]", f, i), "%q déjà listé", v)
+		case dup:
+			add(fmt.Sprintf("%s.volumes[%d]", f, i), "%q déjà archivé par la préparation %s", v, other)
+		default:
+			seen[v] = pr.ID
+		}
+	}
+	if pr.Paused() {
+		if pr.DataRoot != "" {
+			add(f+".data_root", "seulement avec pause: false (l'API Docker donne l'emplacement des volumes)")
+		}
+		if !strings.HasPrefix(pr.Socket, "/") {
+			add(f+".socket", "chemin absolu du socket de l'API Docker attendu, reçu %q", pr.Socket)
+		}
+	} else {
+		if pr.Socket != "" {
+			add(f+".socket", "seulement avec pause: true (sans gel, l'agent ne parle pas à Docker)")
+		}
+		if !strings.HasPrefix(pr.DataRoot, "/") {
+			add(f+".data_root", "chemin absolu attendu, reçu %q", pr.DataRoot)
+		}
+	}
+	switch {
+	case pr.MaxPause.Duration < 0:
+		add(f+".max_pause", "durée négative")
+	case pr.Timeout.Duration > 0 && pr.MaxPause.Duration > pr.Timeout.Duration:
+		add(f+".max_pause", "%s : au plus timeout (%s)", pr.MaxPause.Duration, pr.Timeout.Duration)
 	}
 }
 

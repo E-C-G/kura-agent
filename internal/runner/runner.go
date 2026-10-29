@@ -97,6 +97,11 @@ type Deps struct {
 	FreeSpace func(dir string) (uint64, error)
 	// Secret lit un secret du coffre (credential:<nom>) : mot de passe d'une base.
 	Secret func(ref string) (string, error)
+	// docker_volume : client de l'API Docker, contrôle du socket (nil : ceux de
+	// prepare), fichier de reprise des conteneurs gelés (vide : ni note ni reprise).
+	Docker      func(socket string) prepare.DockerAPI
+	CheckSocket func(socket string) error
+	PausedFile  string
 
 	Now        func() time.Time                                 // défaut : time.Now
 	Sleep      func(ctx context.Context, d time.Duration) error // défaut : attente annulable
@@ -225,6 +230,7 @@ func Run(ctx context.Context, cfg *config.Config, opt Options, d Deps) (state.St
 		}
 	}
 	r.initHolds(jobs)
+	r.recoverPaused(runCtx)
 	r.stagingReady = r.openStaging(jobs)
 	for _, id := range r.neededPrepares(jobs) {
 		if p, _ := cfg.PrepareByID(id); r.prepareDep(p) == "" {
@@ -272,6 +278,10 @@ func Run(ctx context.Context, cfg *config.Config, opt Options, d Deps) (state.St
 	}
 	for _, p := range r.st.Prepares {
 		results = append(results, p.Result)
+	}
+	if r.recovered != "" {
+		results = append(results, state.ResultWarning)
+		r.st.Message = r.recovered
 	}
 	overall := state.Worst(results...)
 	if overall == state.ResultSkipped {
@@ -367,6 +377,8 @@ type run struct {
 	prepSkipped  map[string]bool
 	prepUsers    map[string]int // jobs choisis qui n'ont pas encore envoyé chaque résultat
 	stagingReady error
+	// recovered : conteneurs dégelés (ou à dégeler) au démarrage ; avertissement.
+	recovered string
 }
 
 func (r *run) save() {
@@ -425,7 +437,7 @@ func (r *run) prepareDep(p config.Prepare) string {
 // l'entrée ne tourne pas à part.
 func (r *run) streams(p config.Prepare) bool {
 	in, ok := r.cfg.PrepareByID(p.Input)
-	return ok && p.Type == config.PrepareAge && in.Type == config.PrepareDBExport
+	return ok && p.Type == config.PrepareAge && (in.Type == config.PrepareDBExport || in.Type == config.PrepareDocker)
 }
 
 // holdDep : pré-tâche dont le programme doit rester fermé pendant p (la sienne, ou celle
@@ -459,6 +471,27 @@ func (r *run) neededPrepares(jobs []config.Job) []string {
 		}
 	}
 	return out
+}
+
+// recoverPaused dégèle les conteneurs qu'une exécution interrompue a laissés gelés
+// (docker_volume) ; un dégel fait ou impossible se voit au bilan (avertissement).
+func (r *run) recoverPaused(ctx context.Context) {
+	if r.d.PausedFile == "" || r.opt.DryRun {
+		return
+	}
+	if _, err := os.Stat(r.d.PausedFile); err != nil {
+		return
+	}
+	d := prepare.Deps{Docker: r.d.Docker, CheckSocket: r.d.CheckSocket}
+	thawed, err := prepare.RecoverPaused(ctx, r.d.PausedFile, d.Client)
+	switch {
+	case err != nil:
+		r.recovered = fmt.Sprintf("conteneurs laissés gelés par une exécution interrompue, dégel impossible : %v", err)
+		r.log.Error("reprise du gel", "err", err)
+	case len(thawed) > 0:
+		r.recovered = "conteneurs laissés gelés par une exécution interrompue, dégelés au démarrage : " + strings.Join(thawed, ", ")
+		r.log.Warn("reprise du gel", "conteneurs", thawed)
+	}
 }
 
 // openStaging prépare la zone de préparation : créée ou vérifiée si un job choisi en a
@@ -548,6 +581,7 @@ func (r *run) runPrepare(ctx context.Context, p config.Prepare, preOK map[string
 			CheckTool: r.d.PrepareCheckTool, Out: out, Log: r.log, Now: r.d.Now,
 			FreeSpace: r.d.FreeSpace, Copied: func() { r.releasePrepareHold(p) },
 			LastSize: r.st.PrepareLastSize[p.ID], Secret: r.d.Secret,
+			Docker: r.d.Docker, CheckSocket: r.d.CheckSocket, PausedFile: r.d.PausedFile,
 		})
 		if ps.Result == state.ResultOK || ps.Result == state.ResultWarning {
 			r.update(func(st *state.Status) {

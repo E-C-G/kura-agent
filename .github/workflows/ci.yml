@@ -276,6 +276,40 @@ jobs:
           set -o pipefail
           go test -count=1 -v -run 'TestMySQLRealExport' ./internal/prepare/ 2>&1 | tee test.log || { annotate test.log; exit 1; }
 
+  # Préparation docker_volume contre le Docker Engine du runner (root) : gel d'un conteneur
+  # qui écrit sans cesse, reprise après un agent tué, puis vraie base PostgreSQL écrite
+  # pendant la sauvegarde, restaurée dans un volume neuf et redémarrée.
+  docker-linux:
+    name: Linux · volumes Docker
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.mod
+
+      - name: Modules
+        run: go mod download
+
+      - name: Gel, reprise et restauration
+        run: |
+          # Échec : la fin de la sortie en une annotation (lisible sans le journal brut).
+          annotate() { tail -n 150 "$1" | sed ':a;N;$!ba;s/%/%25/g;s/\r//g;s/\n/%0A/g' | sed 's/^/::error title=go test::/'; }
+          set -o pipefail
+          docker version --format 'Docker {{.Server.Version}} (API {{.Server.APIVersion}})'
+          ls -l /var/run/docker.sock
+          mkdir -p "$RUNNER_TEMP/img"
+          CGO_ENABLED=0 go build -o "$RUNNER_TEMP/img/ecrivain" ./internal/prepare/testdata/ecrivain
+          tar -C "$RUNNER_TEMP/img" -c . | docker import - kura/ecrivain:test
+          docker pull -q postgres:16-alpine
+          go test -c -o "$RUNNER_TEMP/prepare.test" ./internal/prepare/
+          cd internal/prepare
+          sudo KURA_DOCKER_TEST=1 KURA_DOCKER_WRITER="kura/ecrivain:test /ecrivain" KURA_DOCKER_PG=postgres:16-alpine \
+            "$RUNNER_TEMP/prepare.test" -test.count=1 -test.v -test.run 'TestDockerReal' 2>&1 | tee "$RUNNER_TEMP/test.log" || { annotate "$RUNNER_TEMP/test.log"; exit 1; }
+          grep -q -- '--- PASS: TestDockerRealPostgres' "$RUNNER_TEMP/test.log" || { echo "::error::test PostgreSQL non joué"; exit 1; }
+
   # Export SQL Server : SQL Server 2022 Express (instance SQLEXPRESS) installé sur le
   # runner, sqlcmd ODBC fourni avec ; droit d'écriture du compte du service accordé puis
   # retiré, propriété des sauvegardes reprise.

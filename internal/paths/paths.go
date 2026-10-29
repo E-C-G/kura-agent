@@ -75,6 +75,10 @@ func PendingDir() string { return filepath.Join(DataDir(), "pending") }
 // pendant une sauvegarde).
 func QuarantineFile() string { return filepath.Join(DataDir(), "quarantine.json") }
 
+// DockerPausedFile : conteneurs gelés par une préparation docker_volume, notés avant le
+// gel pour être dégelés par l'exécution suivante si l'agent est tué entre-temps.
+func DockerPausedFile() string { return filepath.Join(DataDir(), "docker-paused.json") }
+
 // RestoreFile : dernière restauration (kura-agent status).
 func RestoreFile() string { return filepath.Join(DataDir(), "restore.json") }
 

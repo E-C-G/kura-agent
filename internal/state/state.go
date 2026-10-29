@@ -91,8 +91,19 @@ type PrepareStatus struct {
 	Databases []string `json:"databases,omitempty"`
 	// Recipients : destinataires du chiffrement (gpg : empreintes ; age : clés publiques).
 	Recipients []string `json:"recipients,omitempty"`
-	DurationS  float64  `json:"duration_s"`
-	Message    string   `json:"message,omitempty"`
+	// docker_volume : volumes archivés, conteneurs gelés et durée du gel.
+	Volumes   []VolumeStatus `json:"volumes,omitempty"`
+	Paused    []string       `json:"paused,omitempty"`
+	PauseS    float64        `json:"pause_s,omitempty"`
+	DurationS float64        `json:"duration_s"`
+	Message   string         `json:"message,omitempty"`
+}
+
+// VolumeStatus : un volume Docker archivé.
+type VolumeStatus struct {
+	Name    string `json:"name"`
+	Size    int64  `json:"size"`    // octets de l'archive
+	Entries int    `json:"entries"` // fichiers, dossiers et liens
 }
 
 // JobStatus résume un job.

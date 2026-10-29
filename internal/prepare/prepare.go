@@ -63,6 +63,8 @@ func spaceHint(p config.Prepare) string {
 		return "prévoir deux fois la taille de la source"
 	case config.PrepareDBExport:
 		return "prévoir la taille des exports"
+	case config.PrepareDocker:
+		return "prévoir la taille des volumes"
 	}
 	return "prévoir la taille des fichiers chiffrés, en plus de leur clair"
 }
@@ -111,6 +113,12 @@ type Deps struct {
 
 	// Secret lit un secret du coffre (credential:<nom>) : mot de passe d'une base.
 	Secret func(ref string) (string, error)
+
+	// docker_volume : client de l'API Docker (défaut docker.New), contrôle du socket
+	// (défaut docker.CheckSocket), fichier de reprise des conteneurs gelés (vide : aucun).
+	Docker      func(socket string) DockerAPI
+	CheckSocket func(socket string) error
+	PausedFile  string
 
 	// Copied, s'il est donné, est appelé une fois la copie de la source terminée,
 	// réussie ou non : un programme fermé pour elle (pre_tasks) peut alors être relancé
@@ -197,6 +205,8 @@ func Run(ctx context.Context, cfg *config.Config, p config.Prepare, d Deps) (ps 
 		err = runAge(ctx, cfg, p, d, tmp, &ps, log)
 	case config.PrepareGPG:
 		err = runGPG(ctx, cfg, p, d, tmp, &ps, log)
+	case config.PrepareDocker:
+		err = runDocker(ctx, cfg, p, d, tmp, &ps, log, nil)
 	default:
 		err = fmt.Errorf("type %q non pris en charge par cette version de l'agent", p.Type)
 	}

@@ -2,9 +2,14 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
+
+	"github.com/E-C-G/kura-agent/internal/docker"
 
 	"github.com/E-C-G/kura-agent/internal/execx"
 	"github.com/E-C-G/kura-agent/internal/paths"
@@ -82,6 +87,91 @@ var checkGPGKeys = func(cfg *config.Config) []keyCheck {
 		out = append(out, keyCheck{ID: p.ID, Fingerprints: fprs, Warnings: warns, Err: err})
 	}
 	return out
+}
+
+// dockerCheck : volumes d'une préparation docker_volume, vérifiés par validate.
+type dockerCheck struct {
+	ID, Detail string
+	Err        error
+}
+
+// checkDockerVolumes vérifie, pour chaque préparation docker_volume, le socket et l'API
+// (gel), puis la présence de chaque volume et les conteneurs qui le montent ; sans gel,
+// la présence des dossiers des volumes. Remplaçable en test.
+var checkDockerVolumes = func(cfg *config.Config) []dockerCheck {
+	var out []dockerCheck
+	for _, p := range cfg.Prepare {
+		if p.Type != config.PrepareDocker {
+			continue
+		}
+		out = append(out, checkDocker(p))
+	}
+	return out
+}
+
+func checkDocker(p config.Prepare) dockerCheck {
+	c := dockerCheck{ID: p.ID}
+	if !p.Paused() {
+		for _, v := range p.Volumes {
+			dir := filepath.Join(p.DataRoot, "volumes", v, "_data")
+			if fi, err := os.Lstat(dir); err != nil || !fi.IsDir() {
+				c.Err = fmt.Errorf("volume %s : %s absent ou n'est pas un dossier", v, dir)
+				return c
+			}
+		}
+		c.Detail = "pause: false : copie non figée, sans accès à Docker"
+		return c
+	}
+	if err := docker.CheckSocket(p.Socket); err != nil {
+		c.Err = err
+		return c
+	}
+	api := docker.New(p.Socket)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	version, err := api.Negotiate(ctx)
+	if err != nil {
+		c.Err = err
+		return c
+	}
+	for _, v := range p.Volumes {
+		vol, err := api.Volume(ctx, v)
+		if err != nil {
+			c.Err = fmt.Errorf("volume %s : %w", v, err)
+			return c
+		}
+		if vol.Driver != "local" {
+			c.Err = fmt.Errorf("volume %s : pilote %q, seul local est pris en charge", v, vol.Driver)
+			return c
+		}
+	}
+	ks, err := api.Using(ctx, p.Volumes)
+	if err != nil {
+		c.Err = err
+		return c
+	}
+	var names []string
+	for _, k := range ks {
+		if k.State == "running" {
+			names = append(names, k.Name())
+		}
+	}
+	gel := "aucun conteneur en marche"
+	if len(names) > 0 {
+		gel = "gelés pendant la lecture : " + strings.Join(names, ", ")
+	}
+	c.Detail = fmt.Sprintf("Docker %s · %s · le service rejoint le groupe docker (équivaut aux droits root)", version, gel)
+	return c
+}
+
+// needsDockerGroup : une préparation docker_volume gèle les conteneurs (socket Docker).
+func needsDockerGroup(cfg *config.Config) bool {
+	for _, p := range cfg.Prepare {
+		if p.Type == config.PrepareDocker && p.Paused() {
+			return true
+		}
+	}
+	return false
 }
 
 // dbToolField : champ et chemin de l'outil d'export d'un moteur.

@@ -119,7 +119,9 @@ type bench struct {
 	trays       Trays
 	smu         sync.Mutex
 	quarantined []string
-	zip         prepare.Runner // outil des préparations ; nil : aucun
+	docker      func(socket string) prepare.DockerAPI // docker_volume (nil : aucun)
+	paused      string                                // fichier de reprise du gel
+	zip         prepare.Runner                        // outil des préparations ; nil : aucun
 }
 
 func newBench(t *testing.T) *bench {
@@ -180,6 +182,9 @@ func (b *bench) run(ctx context.Context, opt Options) state.Status {
 			return "3.0", nil
 		},
 		EnsureStaging: func(d string) error { return os.MkdirAll(d, 0o700) },
+		Docker:        b.docker,
+		CheckSocket:   func(string) error { return nil },
+		PausedFile:    b.paused,
 	})
 	if err != nil {
 		b.t.Fatal(err)
