@@ -265,4 +265,15 @@ jobs:
             echo "::error title=Release non immuable::self-update la refusera ; activer « releases immuables » (Settings > General > Releases) puis republier."
             exit 1
           fi
-          gh release verify "$TAG" --repo "$GITHUB_REPOSITORY"
+          # L'attestation de release est signée par GitHub juste après la publication et
+          # met parfois une ou deux minutes à apparaître dans l'API : nouvelles tentatives,
+          # 5 min au plus, avant de conclure à son absence.
+          for i in $(seq 1 10); do
+            if gh release verify "$TAG" --repo "$GITHUB_REPOSITORY"; then
+              exit 0
+            fi
+            echo "attestation pas encore visible (essai $i/10), nouvel essai dans 30 s"
+            sleep 30
+          done
+          echo "::error title=Release non attestée::aucune attestation vérifiable pour $TAG après 5 min ; self-update refusera cette release"
+          exit 1
