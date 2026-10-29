@@ -387,6 +387,18 @@ func cmdValidate(args []string) int {
 			fmt.Printf("       version %s\n", t.Version)
 		}
 	}
+	for _, w := range cfg.Warnings() {
+		fmt.Printf("ATTENTION %s\n", w)
+	}
+	for _, k := range checkGPGKeys(cfg) {
+		check("clés gpg de "+k.ID, k.Err)
+		if k.Err == nil {
+			fmt.Printf("       %s\n", strings.Join(k.Fingerprints, ", "))
+		}
+		for _, w := range k.Warnings {
+			fmt.Printf("ATTENTION %s\n", w)
+		}
+	}
 	for _, c := range checkDBConnections(cfg) {
 		if c.Note != "" {
 			fmt.Printf("INFO   base %s : %s\n", c.ID, c.Note)
@@ -596,6 +608,9 @@ func printSummary(w io.Writer, st *state.Status) {
 		fmt.Fprintf(w, "  préparation %-10s %-16s %s · %d fichier(s) · %s · %.0f s", p.ID, label(p.Result), p.Type, p.Files, humanSize(p.Size), p.DurationS)
 		if len(p.Databases) > 0 {
 			fmt.Fprintf(w, "\n             bases : %s", strings.Join(p.Databases, ", "))
+		}
+		if len(p.Recipients) > 0 {
+			fmt.Fprintf(w, "\n             chiffré pour : %s", strings.Join(p.Recipients, ", "))
 		}
 		if p.Message != "" {
 			fmt.Fprintf(w, "\n             %s", p.Message)

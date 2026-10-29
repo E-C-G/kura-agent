@@ -89,8 +89,10 @@ type PrepareStatus struct {
 	Size    int64  `json:"size,omitempty"`    // octets produits
 	// Databases : bases exportées (db_export), dans l'ordre.
 	Databases []string `json:"databases,omitempty"`
-	DurationS float64  `json:"duration_s"`
-	Message   string   `json:"message,omitempty"`
+	// Recipients : destinataires du chiffrement (gpg : empreintes ; age : clés publiques).
+	Recipients []string `json:"recipients,omitempty"`
+	DurationS  float64  `json:"duration_s"`
+	Message    string   `json:"message,omitempty"`
 }
 
 // JobStatus résume un job.

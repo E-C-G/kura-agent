@@ -36,8 +36,13 @@ jobs:
             # Contenu généré, affiché en annotation pour pouvoir le commiter tel quel.
             echo "::notice title=go.sum généré::$(sed ':a;N;$!ba;s/%/%25/g;s/\n/%0A/g' go.sum)"
           else
-            # go.mod et go.sum doivent être à jour : affiche l'écart et échoue sinon.
-            go mod tidy -diff
+            # go.mod et go.sum doivent être à jour : affiche l'écart (aussi en annotation,
+            # lisible sans le journal brut) et échoue sinon.
+            if ! go mod tidy -diff > tidy.diff 2>&1; then
+              cat tidy.diff
+              echo "::error title=go mod tidy::$(grep -v '^go: downloading' tidy.diff | sed ':a;N;$!ba;s/%/%25/g;s/\r//g;s/\n/%0A/g')"
+              exit 1
+            fi
           fi
           go mod verify
 
@@ -182,7 +187,7 @@ jobs:
   # PostgreSQL 16 et MySQL 8.0 (clients du runner), puis MariaDB 10.11 avec mariadb-dump.
   # Chaque export est rechargé et comparé.
   bases-linux:
-    name: Linux · exports de bases (PostgreSQL, MySQL, MariaDB)
+    name: Linux · exports de bases et chiffrement
     runs-on: ubuntu-24.04
     services:
       postgres:
@@ -231,6 +236,19 @@ jobs:
           ls -l "$KURA_TEST_PG_DUMP" "$KURA_TEST_MYSQLDUMP" || true
           set -o pipefail
           go test -count=1 -v -run 'TestPostgresRealExport|TestMySQLRealExport' ./internal/prepare/ 2>&1 | tee test.log || { annotate test.log; exit 1; }
+
+      # Chiffrement : GnuPG du runner, outil age officiel (déchiffre ce que l'agent chiffre).
+      - name: Chiffrement (gpg, age)
+        env:
+          KURA_TEST_GPG: /usr/bin/gpg
+          KURA_TEST_AGE: /usr/bin/age
+        run: |
+          # Échec : la fin de la sortie en une annotation (lisible sans le journal brut).
+          annotate() { tail -n 150 "$1" | sed ':a;N;$!ba;s/%/%25/g;s/\r//g;s/\n/%0A/g' | sed 's/^/::error title=go test::/'; }
+          sudo apt-get install -y -q age
+          gpg --version | head -1 && age --version
+          set -o pipefail
+          go test -count=1 -v -run 'TestGPGRealEncrypt|TestAgeRealDecrypt' ./internal/prepare/ 2>&1 | tee test.log || { annotate test.log; exit 1; }
 
       # mariadb-dump hors des paquets MySQL du runner (qui l'excluent) : client MariaDB
       # extrait dans /usr/lib/kura-mariadb, dossier de root (/opt du runner est ouvert à

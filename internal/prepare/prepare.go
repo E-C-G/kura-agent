@@ -53,10 +53,13 @@ func (e *lowSpaceError) Error() string {
 
 // spaceHint : ce qu'une préparation demande d'espace, pour le message d'échec.
 func spaceHint(p config.Prepare) string {
-	if p.Type == config.PrepareZip {
+	switch p.Type {
+	case config.PrepareZip:
 		return "prévoir deux fois la taille de la source"
+	case config.PrepareDBExport:
+		return "prévoir la taille des exports"
 	}
-	return "prévoir la taille des exports"
+	return "prévoir la taille des fichiers chiffrés, en plus de leur clair"
 }
 
 // humanSize : taille lisible, à la française (1,2 Go).
@@ -185,6 +188,10 @@ func Run(ctx context.Context, cfg *config.Config, p config.Prepare, d Deps) (ps 
 		err = runZip(ctx, cfg, p, d, tmp, &ps, log)
 	case config.PrepareDBExport:
 		err = runDBExport(ctx, cfg, p, d, tmp, &ps, log)
+	case config.PrepareAge:
+		err = runAge(ctx, cfg, p, d, tmp, &ps, log)
+	case config.PrepareGPG:
+		err = runGPG(ctx, cfg, p, d, tmp, &ps, log)
 	default:
 		err = fmt.Errorf("type %q non pris en charge par cette version de l'agent", p.Type)
 	}

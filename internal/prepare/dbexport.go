@@ -60,6 +60,60 @@ type dbRun struct {
 	cfg      *config.Config
 	password string
 	log      *slog.Logger
+	// seal, s'il est donné, chiffre chaque export au fil de l'eau (age) : rien n'est écrit
+	// en clair, sauf la sauvegarde SQL Server, que le serveur écrit lui-même (chiffrée
+	// puis effacée aussitôt).
+	seal func(w io.Writer) (io.WriteCloser, error)
+}
+
+// sealExt : extension ajoutée aux exports chiffrés.
+const sealExt = ".age"
+
+// sealedFile crée path et renvoie l'écrivain qui chiffre vers lui ; Close ferme les deux.
+func (r *dbRun) sealedFile(path string) (io.WriteCloser, error) {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	w, err := r.seal(f)
+	if err != nil {
+		f.Close()
+		return nil, err
+	}
+	return &sealedWriter{WriteCloser: w, f: f}, nil
+}
+
+type sealedWriter struct {
+	io.WriteCloser
+	f *os.File
+}
+
+func (s *sealedWriter) Close() error { return errors.Join(s.WriteCloser.Close(), s.f.Close()) }
+
+// sealPath chiffre le fichier clair vers path puis l'efface (réussi ou non).
+func (r *dbRun) sealPath(ctx context.Context, clear, path string) (int64, error) {
+	defer os.Remove(clear)
+	in, err := os.Open(clear)
+	if err != nil {
+		return 0, err
+	}
+	defer in.Close()
+	w, err := r.sealedFile(path)
+	if err != nil {
+		return 0, err
+	}
+	_, err = copyCtx(ctx, w, in)
+	if cerr := w.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		return 0, fmt.Errorf("chiffrement : %w", err)
+	}
+	st, err := os.Stat(path)
+	if err != nil {
+		return 0, err
+	}
+	return st.Size(), nil
 }
 
 // toolSpec : lancement d'un outil d'export : environnement réduit, dossier de travail
@@ -94,6 +148,13 @@ func newEngine(r *dbRun) (dbEngine, error) {
 
 // runDBExport fait une préparation db_export dans tmp.
 func runDBExport(ctx context.Context, cfg *config.Config, p config.Prepare, d Deps, tmp string, ps *state.PrepareStatus, log *slog.Logger) error {
+	return runDB(ctx, cfg, p, d, tmp, ps, log, nil)
+}
+
+// runDB fait l'export de p dans tmp ; seal, s'il est donné, chiffre chaque export au fil
+// de l'eau (préparation age dont l'entrée est p).
+func runDB(ctx context.Context, cfg *config.Config, p config.Prepare, d Deps, tmp string, ps *state.PrepareStatus, log *slog.Logger,
+	seal func(io.Writer) (io.WriteCloser, error)) error {
 	if d.LastSize > 0 {
 		// Le dernier export réussi, plus 20 %, en plus de la réserve : sinon rien n'est lancé.
 		need := MinFree + uint64(d.LastSize)/5*6
@@ -101,7 +162,7 @@ func runDBExport(ctx context.Context, cfg *config.Config, p config.Prepare, d De
 			return &lowSpaceError{free: free, need: need, hint: fmt.Sprintf("dernier export %s, plus 20 %%, plus %s de réserve", humanSize(uint64(d.LastSize)), humanSize(MinFree))}
 		}
 	}
-	r := &dbRun{p: p, d: d, cfg: cfg, log: log}
+	r := &dbRun{p: p, d: d, cfg: cfg, log: log, seal: seal}
 	if p.Password != "" {
 		if d.Secret == nil {
 			return errors.New("password : coffre des secrets indisponible")
@@ -139,7 +200,11 @@ func runDBExport(ctx context.Context, cfg *config.Config, p config.Prepare, d De
 		names = all
 		log.Info("bases trouvées sur le serveur", "bases", names)
 	}
-	files, err := exportFiles(names, e.ext())
+	ext := e.ext()
+	if seal != nil {
+		ext += sealExt
+	}
+	files, err := exportFiles(names, ext)
 	if err != nil {
 		return err
 	}

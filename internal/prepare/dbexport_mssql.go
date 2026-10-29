@@ -164,6 +164,20 @@ func msIdent(s string) string { return "[" + strings.ReplaceAll(s, "]", "]]") + 
 func msString(s string) string { return "N'" + strings.ReplaceAll(s, "'", "''") + "'" }
 
 func (e *msEngine) export(ctx context.Context, name, path string) (int64, error) {
+	if e.seal != nil {
+		// Le serveur écrit la sauvegarde en clair ; elle est chiffrée puis effacée aussitôt.
+		clear := strings.TrimSuffix(path, sealExt)
+		if _, err := e.backup(ctx, name, clear); err != nil {
+			os.Remove(clear)
+			return 0, err
+		}
+		return e.sealPath(ctx, clear, path)
+	}
+	return e.backup(ctx, name, path)
+}
+
+// backup : sauvegarde de la base name dans path, par le serveur, puis contrôlée.
+func (e *msEngine) backup(ctx context.Context, name, path string) (int64, error) {
 	if err := e.info(ctx); err != nil {
 		return 0, err
 	}

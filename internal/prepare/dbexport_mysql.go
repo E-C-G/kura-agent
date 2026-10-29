@@ -216,7 +216,14 @@ func (e *myEngine) export(ctx context.Context, name, path string) (int64, error)
 	}
 	args = append(args, "--databases", name)
 
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	// Fichier clair, ou chiffré au fil de l'eau (age) : compressé avant d'être chiffré.
+	var f io.WriteCloser
+	var err error
+	if e.seal != nil {
+		f, err = e.sealedFile(path)
+	} else {
+		f, err = os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	}
 	if err != nil {
 		return 0, err
 	}
