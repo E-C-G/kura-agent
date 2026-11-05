@@ -30,10 +30,25 @@ func TestUnitsVerifiedBySystemd(t *testing.T) {
 		os.WriteFile(svc, []byte(u.Service), 0o644)
 		os.WriteFile(tim, []byte(u.Timer), 0o644)
 		out, err := exec.Command("systemd-analyze", "verify", "--man=no", svc, tim).CombinedOutput()
-		if err != nil || strings.TrimSpace(string(out)) != "" {
-			t.Fatalf("systemd-analyze verify (docker %v) : %v\n%s", withDocker, err, out)
+		if msgs := ownMessages(string(out), dir); err != nil || len(msgs) > 0 {
+			t.Fatalf("systemd-analyze verify (docker %v) : %v\n%s", withDocker, err, strings.Join(msgs, "\n"))
 		}
 	}
+}
+
+// ownMessages : messages de systemd-analyze, sans ceux qui portent sur les unités
+// du système (/usr/lib/systemd/…), lues aussi pour résoudre les dépendances et
+// signalées selon la version de systemd de la machine.
+func ownMessages(out, dir string) []string {
+	var msgs []string
+	for _, l := range strings.Split(out, "\n") {
+		l = strings.TrimSpace(l)
+		if l == "" || (strings.HasPrefix(l, "/") && !strings.HasPrefix(l, dir+"/")) {
+			continue
+		}
+		msgs = append(msgs, l)
+	}
+	return msgs
 }
 
 // needSystemdAnalyze : sans systemd-analyze, les tests de comparaison sont sautés,
